@@ -7,7 +7,7 @@ import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
 import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
 import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../../../../shared/streamParser';
 import type {

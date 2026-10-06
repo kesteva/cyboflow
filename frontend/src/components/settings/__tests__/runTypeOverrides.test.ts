@@ -69,7 +69,7 @@ function wf(id: string, name: string, projectName = '', projectId: number | null
   return { row, projectName };
 }
 
-const NO_CONFIG: AppConfig = { gitRepoPath: '/repo' };
+const NO_CONFIG: AppConfig = {};
 
 describe('resolveRunTypeBaseline', () => {
   it('floors a flow key to the workflow launch defaults (Opus / SDK / claude-sdk / default)', () => {
@@ -97,7 +97,6 @@ describe('resolveRunTypeBaseline', () => {
 
   it('honors the global config knobs the launch surfaces read', () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultAgentPermissionMode: 'dontAsk',
       quickSessionDefaultSubstrate: 'sdk',
     };
@@ -123,9 +122,9 @@ describe('resolveRunTypeBaseline', () => {
     const configs: (AppConfig | null)[] = [
       null,
       NO_CONFIG,
-      { gitRepoPath: '/repo', quickSessionDefaultSubstrate: 'sdk' },
-      { gitRepoPath: '/repo', quickSessionDefaultSubstrate: 'interactive' },
-      { gitRepoPath: '/repo', defaultAgentPermissionMode: 'dontAsk' },
+      { quickSessionDefaultSubstrate: 'sdk' },
+      { quickSessionDefaultSubstrate: 'interactive' },
+      { defaultAgentPermissionMode: 'dontAsk' },
     ];
     for (const key of keys) {
       for (const config of configs) {
@@ -184,7 +183,6 @@ describe('resolveRunTypeBaseline', () => {
   // vanish — the "restated config" failure the module doc names.
   it('ignores the stored entry for the key (a baseline is what a launch resolves with NOTHING stored)', () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       runTypeDefaults: {
         [QUICK_RUN_TYPE_KEY]: { model: 'haiku', substrate: 'sdk', agentRuntime: 'codex-sdk' },
       },
@@ -212,19 +210,18 @@ describe('resolveRunTypeBaseline', () => {
   // -------------------------------------------------------------------------
 
   it('takes the model from the global defaultLaunchModel, on both key kinds', () => {
-    const config: AppConfig = { gitRepoPath: '/repo', defaultLaunchModel: 'sonnet' };
+    const config: AppConfig = { defaultLaunchModel: 'sonnet' };
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).model).toBe('sonnet');
     expect(resolveRunTypeBaseline('workflow:wf-1', config).model).toBe('sonnet');
   });
 
   it('treats a blank defaultLaunchModel as unset (parity with configManager.getGlobalLaunchModel)', () => {
-    const config: AppConfig = { gitRepoPath: '/repo', defaultLaunchModel: '  ' };
+    const config: AppConfig = { defaultLaunchModel: '  ' };
     expect(resolveRunTypeBaseline('workflow:wf-1', config).model).toBe('opus');
   });
 
   it('takes the runtime from the global defaultAgentRuntime, moving the substrate WITH it', () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultAgentRuntime: 'claude-interactive',
     };
     expect(resolveRunTypeBaseline('workflow:wf-1', config)).toEqual({
@@ -240,7 +237,7 @@ describe('resolveRunTypeBaseline', () => {
   // 'claude-sdk' — otherwise every flow row would show a phantom runtime chip
   // against a runtime no flow run can use.
   it('drops a global runtime the key cannot launch on (codex-pty on a flow key)', () => {
-    const config: AppConfig = { gitRepoPath: '/repo', defaultAgentRuntime: 'codex-pty' };
+    const config: AppConfig = { defaultAgentRuntime: 'codex-pty' };
     expect(resolveRunTypeBaseline('workflow:wf-1', config).agentRuntime).toBe('claude-sdk');
     expect(resolveRunTypeBaseline('workflow:wf-1', config).substrate).toBe('sdk');
     // …while the quick key, which CAN launch it, adopts it.
@@ -248,7 +245,7 @@ describe('resolveRunTypeBaseline', () => {
   });
 
   it('drops a global runtime no key offers (codex-exec)', () => {
-    const config: AppConfig = { gitRepoPath: '/repo', defaultAgentRuntime: 'codex-exec' };
+    const config: AppConfig = { defaultAgentRuntime: 'codex-exec' };
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).agentRuntime).toBe('claude-interactive');
     expect(resolveRunTypeBaseline('workflow:wf-1', config).agentRuntime).toBe('claude-sdk');
   });
@@ -256,7 +253,6 @@ describe('resolveRunTypeBaseline', () => {
   // AC6 — the chips, which is what this baseline exists for.
   it('shows NO chips for a run type that merely restates the globals, and chips one that overrides them', () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: 'sonnet',
       defaultAgentRuntime: 'claude-interactive',
     };
@@ -283,7 +279,6 @@ describe('resolveRunTypeBaseline', () => {
   // AC5 for this seam: with neither global set the baseline is unchanged.
   it('REGRESSION: with NEITHER global set the baselines are exactly the pre-feature ones', () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: undefined,
       defaultAgentRuntime: undefined,
     };
@@ -324,7 +319,6 @@ describe('runTypeOverrideChips', () => {
   // against the RESOLVED baseline, not against the hard-coded ship default.
   it('chips a stored value that equals the ship default but differs from the configured global', () => {
     const configured = resolveRunTypeBaseline('workflow:wf-1', {
-      gitRepoPath: '/repo',
       defaultAgentPermissionMode: 'dontAsk',
     });
     // 'default' is PermissionMode's ship value, yet this user's global is dontAsk.

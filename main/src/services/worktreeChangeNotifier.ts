@@ -5,15 +5,11 @@
  * The Diff tab fetches its grouped diff once per mount and only refetched on a
  * base change or its own Commit/Restore; every edit that landed on disk while
  * it was open (an agent writing files, the user in an editor, `git add` in a
- * terminal) stayed invisible until the tab was remounted. The automatic
- * git-status pipeline that could have told it (GitStatusManager's watcher +
- * auto-refresh) is switched off behind `GIT_STATUS_BADGE_ENABLED` because its
- * only consumer, the sidebar badge, is gone — and that pipeline watched EVERY
- * active session. This notifier is the narrow replacement: it watches ONE
- * worktree per live subscriber (the rail subscribes while its Diff tab is
- * mounted for the selected session, and unsubscribes when it isn't), so the
- * cost is one watcher set for the tree the user is actually looking at, and
- * zero when they aren't.
+ * terminal) stayed invisible until the tab was remounted. This notifier
+ * closes that gap narrowly: it watches ONE worktree per live subscriber (the
+ * rail subscribes while its Diff tab is mounted for the selected session, and
+ * unsubscribes when it isn't), so the cost is one watcher set for the tree the
+ * user is actually looking at, and zero when they aren't.
  *
  * Two sources feed one coalesced signal per session:
  *   1. `GitFileWatcher` in `'always'` mode — the worktree's files, with its

@@ -5,7 +5,8 @@
  * Covered:
  *  - an unknown project id returns success:false and touches nothing
  *    (deleteProject is never called).
- *  - a running session script is stopped BEFORE the project is deleted.
+ *  - this project's running run script is stopped BEFORE the project is
+ *    deleted; another project's running script is left alone.
  *  - every session's worktree removal is attempted even when one throws, and the
  *    DB deleteProject runs only AFTER all cleanup attempts.
  *  - branch close-out: each session's branch (named as the worktree) is
@@ -15,8 +16,8 @@
  *    doesn't abort the sweep.
  *
  * Handlers captured via a stub ipcMain; scriptExecutionTracker + panelManager +
- * the demo-seed modules are module-mocked so project.ts loads in the host-Node
- * test env, and all service collaborators are object-stubbed.
+ * logsManager + the demo-seed modules are module-mocked so project.ts loads in
+ * the host-Node test env, and all service collaborators are object-stubbed.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -26,15 +27,20 @@ vi.mock('electron', () => ({
 }));
 
 const scriptTracker = vi.hoisted(() => ({
-  getRunningScript: vi.fn(() => undefined as { id: number | string; type: string } | undefined),
+  getRunningScript: vi.fn(
+    () => undefined as { id: number | string; type: string; sessionId?: string } | undefined,
+  ),
   stop: vi.fn(),
   markClosing: vi.fn(),
 }));
 vi.mock('../../services/scriptExecutionTracker', () => ({ scriptExecutionTracker: scriptTracker }));
 
-vi.mock('../../services/panelManager', () => ({
-  panelManager: { getPanelsForSession: vi.fn(() => []) },
+const panelManagerMock = vi.hoisted(() => ({
+  getPanelsForSession: vi.fn(() => [] as Array<{ id: string; type: string }>),
 }));
+vi.mock('../../services/panelManager', () => ({ panelManager: panelManagerMock }));
+const logsManagerMock = vi.hoisted(() => ({ stopScript: vi.fn(async () => {}) }));
+vi.mock('../../services/panels/logPanel/logsManager', () => ({ logsManager: logsManagerMock }));
 
 vi.mock('../../services/demo/demoSeed', () => ({ seedDemoProjectEntities: vi.fn() }));
 vi.mock('../../services/demo/demoInsightsSeed', () => ({ seedDemoInsightsHistory: vi.fn() }));
@@ -79,7 +85,6 @@ function makeServices(opts: {
   const removeWorktree = vi.fn(opts.removeWorktreeImpl ?? (async () => {}));
   const deleteBranch = vi.fn(opts.deleteBranchImpl ?? (async () => {}));
   const deleteProject = vi.fn(() => true);
-  const stopRunningScript = vi.fn(async () => {});
   const cancelHostedRuns = vi.fn(opts.cancelHostedRunsImpl ?? (async () => {}));
 
   const services = {
@@ -90,9 +95,6 @@ function makeServices(opts: {
       deleteProject,
     },
     sessionManager: {
-      stopRunningScript,
-      hasTerminalSession: vi.fn(() => false),
-      closeTerminalSession: vi.fn(async () => {}),
       getAllSessions: vi.fn(async () => []),
     },
     worktreeManager: { removeWorktree, deleteBranch },
@@ -101,7 +103,7 @@ function makeServices(opts: {
     cyboflow: { cancelHostedRuns },
   } as unknown as AppServices;
 
-  return { services, removeWorktree, deleteBranch, deleteProject, stopRunningScript, cancelHostedRuns };
+  return { services, removeWorktree, deleteBranch, deleteProject, cancelHostedRuns };
 }
 
 function register(services: AppServices) {
@@ -129,24 +131,43 @@ describe('projects:delete — unknown id', () => {
 });
 
 describe('projects:delete — running-script stop ordering', () => {
-  it('stops a running session script BEFORE deleting the project', async () => {
-    scriptTracker.getRunningScript.mockReturnValue({ id: 's1', type: 'session' });
+  it("stops this project's running script BEFORE deleting the project", async () => {
+    scriptTracker.getRunningScript.mockReturnValue({ id: 1, type: 'project', sessionId: 'main' });
+    panelManagerMock.getPanelsForSession.mockReturnValueOnce([{ id: 'logs-1', type: 'logs' }]);
     const made = makeServices({
       project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
-      sessions: [{ id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'wt-1' }],
+      sessions: [{ id: 'main', project_id: 1, is_main_repo: true }],
     });
     const handlers = register(made.services);
 
     const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
     expect(result.success).toBe(true);
 
-    expect(made.stopRunningScript).toHaveBeenCalledTimes(1);
-    expect(scriptTracker.stop).toHaveBeenCalledWith('session', 's1');
+    expect(panelManagerMock.getPanelsForSession).toHaveBeenCalledWith('main');
+    expect(logsManagerMock.stopScript).toHaveBeenCalledWith('logs-1');
+    expect(scriptTracker.stop).toHaveBeenCalledWith('project', 1);
     expect(made.deleteProject).toHaveBeenCalledTimes(1);
     // The script stop must happen before the DB row is deleted.
-    expect(made.stopRunningScript.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(logsManagerMock.stopScript.mock.invocationCallOrder[0]).toBeLessThan(
       made.deleteProject.mock.invocationCallOrder[0],
     );
+  });
+
+  it("leaves another project's running script alone", async () => {
+    scriptTracker.getRunningScript.mockReturnValue({ id: 2, type: 'project', sessionId: 'other-main' });
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [{ id: 'main', project_id: 1, is_main_repo: true }],
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    expect(scriptTracker.markClosing).not.toHaveBeenCalled();
+    expect(logsManagerMock.stopScript).not.toHaveBeenCalled();
+    expect(scriptTracker.stop).not.toHaveBeenCalled();
+    expect(made.deleteProject).toHaveBeenCalledTimes(1);
   });
 });
 

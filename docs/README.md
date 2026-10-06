@@ -26,7 +26,7 @@ no nested agent-guide files.
 | [`PROVENANCE.md`](PROVENANCE.md) | Fork lineage (Crystal 0.3.5); never merge from Nimbalyst |
 | [`eval-rubric.md`](eval-rubric.md) | The code-review eval rubric — spec of record for `main/src/orchestrator/eval/rubric.ts` |
 | [`cyboflow_system_design.md`](cyboflow_system_design.md) | Historical MVP-era product spec (banner inside); ARCHITECTURE.md is current truth |
-| `signing/`, `packaging/` | Apple signing setup + Gatekeeper checklist; root-deps policy |
+| `signing/`, `packaging/` | Apple signing setup + Gatekeeper checklist; root-deps policy; third-party licenses |
 
 ## Design-time docs
 
@@ -40,7 +40,6 @@ banner.
 
 - `archive/` — shipped/superseded docs (including the pre-fork `initial_research/`), moved
   here per the policy in `archive/README.md`.
-- `crystal-legacy/` — Crystal-era guides; historical reference, not current truth.
 - `workflows-future/`, `probes/`, `prototypes/`, `screenshots/`, `protoflow-design/` —
   flow-prose ideas, finished probe records, design mockups and capture assets.
   `protoflow-design/` is the source of the live design tokens.

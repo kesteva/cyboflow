@@ -769,34 +769,6 @@ export class GitDiffManager {
     }
   }
 
-  /**
-   * Combine multiple diffs into a single diff
-   */
-  combineDiffs(diffs: GitDiffResult[]): GitDiffResult {
-    const combinedDiff = diffs.map(d => d.diff).join('\n\n');
-
-    // Aggregate stats
-    const stats: GitDiffStats = {
-      additions: diffs.reduce((sum, d) => sum + d.stats.additions, 0),
-      deletions: diffs.reduce((sum, d) => sum + d.stats.deletions, 0),
-      filesChanged: 0 // Will be calculated from unique files
-    };
-
-    // Get unique changed files
-    const allFiles = new Set<string>();
-    diffs.forEach(d => d.changedFiles.forEach(f => allFiles.add(f)));
-    const changedFiles = Array.from(allFiles);
-    stats.filesChanged = changedFiles.length;
-
-    return {
-      diff: combinedDiff,
-      stats,
-      changedFiles,
-      beforeHash: diffs[0]?.beforeHash,
-      afterHash: diffs[diffs.length - 1]?.afterHash
-    };
-  }
-
   async getCurrentCommitHash(worktreePath: string): Promise<string> {
     try {
       return (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();

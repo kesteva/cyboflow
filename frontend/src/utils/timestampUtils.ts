@@ -2,25 +2,10 @@
  * Utility functions for consistent timestamp handling in the frontend
  */
 
-/**
- * Formats a timestamp for display to users
- * @param timestamp - The timestamp string from database or Date object
- * @returns Localized time string
- */
-export function formatForDisplay(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
-  return date.toLocaleTimeString();
-}
+import { parseTimestamp } from '../../../shared/utils/timestamp';
 
-/**
- * Formats a timestamp with full date and time for display
- * @param timestamp - The timestamp string from database or Date object
- * @returns Localized date and time string
- */
-export function formatFullDateTime(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
-  return date.toLocaleString();
-}
+// The SQLite-aware parser lives in shared/ so main and the renderer cannot drift.
+export { parseTimestamp };
 
 /**
  * Formats the distance between a timestamp and now
@@ -62,37 +47,6 @@ export function formatDistanceToNow(date: Date | string): string {
   } else {
     return 'just now';
   }
-}
-
-/**
- * Parses a database timestamp string to a Date object
- * SQLite DATETIME stores timestamps without timezone info, but they are in UTC
- * @param timestamp - The timestamp string from database or Date object
- * @returns Date object
- */
-export function parseTimestamp(timestamp: string | Date): Date {
-  if (timestamp instanceof Date) {
-    return timestamp;
-  }
-  
-  // Allow-list on the UNZONED shape — SQLite's CURRENT_TIMESTAMP / datetime()
-  // ("YYYY-MM-DD HH:MM:SS"), plus its T-separated and fractional variants.
-  // Anything already carrying a zone (a trailing 'Z', a numeric offset) fails
-  // to match and goes to the platform parser untouched, which is correct for it.
-  // The fraction is unbounded (\.\d+): a 3-digit cap sent "…19:12:52.123456"
-  // down the bare-parse path, where it was read as LOCAL and landed the host's
-  // UTC offset away. Kept byte-identical to main/src/utils/timestampUtils.ts —
-  // the two copies previously disagreed, which is what made this bug class easy
-  // to reintroduce on whichever side you were not looking at.
-  const sqliteDateTimeRegex = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
-  
-  if (sqliteDateTimeRegex.test(timestamp)) {
-    // This is a SQLite timestamp in UTC, convert to ISO format with Z suffix
-    return new Date(timestamp.replace(' ', 'T') + 'Z');
-  }
-  
-  // For ISO strings and other formats, parse normally
-  return new Date(timestamp);
 }
 
 /**
@@ -138,14 +92,4 @@ export function formatDuration(ms: number): string {
   } else {
     return `${seconds}s`;
   }
-}
-
-/**
- * Formats a timestamp for sorting/comparison
- * @param timestamp - The timestamp to format
- * @returns ISO string for consistent sorting
- */
-export function formatForSorting(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
-  return date.toISOString();
 }

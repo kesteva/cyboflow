@@ -9,7 +9,6 @@ import * as os from 'os';
 import { panelManager } from './panelManager';
 import type { Session } from '../types/session';
 import type { ToolPanel } from '../../../shared/types/panels';
-import type { DatabaseService } from '../database/database';
 import type { Project } from '../database/models';
 import { getCurrentBranch } from './gitPlumbingCommands';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
@@ -51,7 +50,6 @@ interface TaskQueueOptions {
   claudeCodeManager: AbstractCliManager;
   gitDiffManager: GitDiffManager;
   executionTracker: ExecutionTracker;
-  getMainWindow: () => Electron.BrowserWindow | null;
 }
 
 interface CreateSessionJob {
@@ -59,8 +57,7 @@ interface CreateSessionJob {
   worktreeTemplate: string;
   index?: number;
   permissionMode?: 'approve' | 'ignore';
-  projectId?: number;
-  folderId?: string;
+  projectId: number;
   baseBranch?: string;
   /**
    * A/B experiments (migration 049): pin the session worktree's branch to an
@@ -83,24 +80,11 @@ interface CreateSessionJob {
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
-    ultrathink?: boolean;
   };
-}
-
-interface ContinueSessionJob {
-  sessionId: string;
-  prompt: string;
-}
-
-interface SendInputJob {
-  sessionId: string;
-  input: string;
 }
 
 export class TaskQueue {
   private sessionQueue: SimpleQueue<CreateSessionJob>;
-  private inputQueue: SimpleQueue<SendInputJob>;
-  private continueQueue: SimpleQueue<ContinueSessionJob>;
 
   constructor(private options: TaskQueueOptions) {
     console.log('[TaskQueue] Initializing task queue...');
@@ -114,8 +98,6 @@ export class TaskQueue {
     console.log('[TaskQueue] Using SimpleQueue for Electron environment');
 
     this.sessionQueue = new SimpleQueue<CreateSessionJob>('session-creation', sessionConcurrency);
-    this.inputQueue = new SimpleQueue<SendInputJob>('session-input', 10);
-    this.continueQueue = new SimpleQueue<ContinueSessionJob>('session-continue', 10);
 
     // Add event handlers for debugging
     this.sessionQueue.on('active', (...args: unknown[]) => {
@@ -157,20 +139,9 @@ export class TaskQueue {
       // Processing session creation job - verbose debug logging removed
 
       try {
-        let targetProject;
-
-        if (projectId) {
-          // Use the project specified in the job
-          targetProject = sessionManager.getProjectById(projectId);
-          if (!targetProject) {
-            throw new Error(`Project with ID ${projectId} not found`);
-          }
-        } else {
-          // Fall back to active project for backward compatibility
-          targetProject = sessionManager.getActiveProject();
-          if (!targetProject) {
-            throw new Error('No project specified and no active project selected');
-          }
+        const targetProject = sessionManager.getProjectById(projectId);
+        if (!targetProject) {
+          throw new Error(`Project with ID ${projectId} not found`);
         }
 
         let worktreeName = worktreeTemplate;
@@ -244,7 +215,6 @@ export class TaskQueue {
           permissionMode,
           targetProject.id,
           false, // isMainRepo = false for regular sessions
-          job.data.folderId,
           toolType,
           baseCommit,
           actualBaseBranch,
@@ -386,61 +356,6 @@ export class TaskQueue {
         throw error;
       }
     });
-
-    this.inputQueue.process(10, async (job) => {
-      const { sessionId, input } = job.data;
-
-      // Find the Claude panel for this session
-      const { panelManager } = require('./panelManager');
-      const existingPanels = panelManager.getPanelsForSession(sessionId);
-      const claudePanel = existingPanels.find((p: ToolPanel) => p.type === 'claude');
-
-      if (!claudePanel) {
-        throw new Error(`No Claude panel found for session ${sessionId}`);
-      }
-
-      // Use the claude panel manager instead of the legacy session-based approach
-      const { claudePanelManager } = require('../ipc/claudePanel');
-
-      if (!claudePanelManager) {
-        throw new Error('Claude panel manager not available');
-      }
-
-      claudePanelManager.sendInputToPanel(claudePanel.id, input);
-    });
-
-    this.continueQueue.process(10, async (job) => {
-      const { sessionId, prompt } = job.data;
-      const { sessionManager } = this.options;
-
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        throw new Error(`Session ${sessionId} not found`);
-      }
-
-      // Find the Claude panel for this session
-      const { panelManager } = require('./panelManager');
-      const existingPanels = panelManager.getPanelsForSession(sessionId);
-      const claudePanel = existingPanels.find((p: ToolPanel) => p.type === 'claude');
-
-      if (!claudePanel) {
-        throw new Error(`No Claude panel found for session ${sessionId}`);
-      }
-
-      // Use the claude panel manager instead of the legacy session-based approach
-      const { claudePanelManager } = require('../ipc/claudePanel');
-
-      if (!claudePanelManager) {
-        throw new Error('Claude panel manager not available');
-      }
-
-      // Get conversation history using panel-based method for Claude data
-      const conversationHistory = sessionManager.getPanelConversationMessages ?
-        await sessionManager.getPanelConversationMessages(claudePanel.id) :
-        await sessionManager.getConversationMessages(sessionId);
-
-      await claudePanelManager.continuePanel(claudePanel.id, session.worktreePath, prompt, conversationHistory);
-    });
   }
 
   async createSession(data: CreateSessionJob): Promise<{ id: string; data: CreateSessionJob; status: string }> {
@@ -471,59 +386,23 @@ export class TaskQueue {
     prompt: string,
     worktreeTemplate: string,
     count: number,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     baseBranch?: string,
     toolType?: 'claude' | 'none',
     claudeConfig?: {
       model?: string;
       permissionMode?: 'approve' | 'ignore';
-      ultrathink?: boolean;
     },
-    providedFolderId?: string,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
     agentModel?: string | null
   ): Promise<{ id: string; data: CreateSessionJob; status: string }[]> {
-    let folderId: string | undefined = providedFolderId;
     let generatedBaseName: string | undefined;
 
     // Generate a name if no template provided
     if (!worktreeTemplate || worktreeTemplate.trim() === '') {
       generatedBaseName = generateWorktreeNameFromPrompt(prompt);
-    }
-
-    // Create a folder for multi-session prompts (only if not already provided)
-    if (!providedFolderId && count > 1 && projectId) {
-      try {
-        const { sessionManager } = this.options;
-        const db = sessionManager.db as DatabaseService;
-        const folderName = worktreeTemplate || generatedBaseName || 'Multi-session prompt';
-
-        // Ensure projectId is a number
-        const numericProjectId = typeof projectId === 'string' ? parseInt(projectId, 10) : projectId;
-        if (isNaN(numericProjectId)) {
-          throw new Error(`Invalid project ID: ${projectId}`);
-        }
-
-        const folder = db.createFolder(folderName, numericProjectId);
-        folderId = folder.id;
-
-        // Emit folder created event immediately and wait for it to be processed
-        const getMainWindow = this.options.getMainWindow;
-        const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('folder:created', folder);
-
-          // Wait a bit to ensure the frontend has processed the folder event
-          await new Promise(resolve => setTimeout(resolve, 200));
-        } else {
-          console.warn(`[TaskQueue] Could not emit folder:created event - main window not available`);
-        }
-      } catch (error) {
-        console.error('[TaskQueue] Failed to create folder for multi-session prompt:', error);
-        // Continue without folder - sessions will be created at project level
-      }
     }
 
     const jobs = [];
@@ -536,7 +415,6 @@ export class TaskQueue {
         index: i,
         permissionMode,
         projectId,
-        folderId,
         baseBranch,
         toolType,
         claudeConfig,
@@ -546,47 +424,6 @@ export class TaskQueue {
       }));
     }
     return Promise.all(jobs);
-  }
-
-  async sendInput(sessionId: string, input: string): Promise<{ id: string; data: SendInputJob; status: string }> {
-    return this.inputQueue.add({ sessionId, input });
-  }
-
-  async continueSession(sessionId: string, prompt: string): Promise<{ id: string; data: ContinueSessionJob; status: string }> {
-    return this.continueQueue.add({ sessionId, prompt });
-  }
-
-  private async ensureUniqueSessionName(baseName: string, index?: number): Promise<string> {
-    const { sessionManager } = this.options;
-    const db = sessionManager.db;
-
-    let candidateName = baseName;
-
-    // Add index suffix if provided (for multiple sessions)
-    if (index !== undefined) {
-      candidateName = `${baseName}-${index + 1}`;
-    }
-
-    // Check for existing sessions with this name (including archived)
-    let counter = 1;
-    let uniqueName = candidateName;
-
-    while (true) {
-      // Check both active and archived sessions
-      if (!db.checkSessionNameExists(uniqueName)) {
-        break;
-      }
-
-      // If we already have an index, increment after the index
-      if (index !== undefined) {
-        uniqueName = `${baseName}-${index + 1}-${counter}`;
-      } else {
-        uniqueName = `${baseName}-${counter}`;
-      }
-      counter++;
-    }
-
-    return uniqueName;
   }
 
   private async ensureUniqueNames(baseSessionName: string, baseWorktreeName: string, project: Project, index?: number): Promise<{ sessionName: string; worktreeName: string }> {
@@ -650,7 +487,5 @@ export class TaskQueue {
 
   async close() {
     await this.sessionQueue.close();
-    await this.inputQueue.close();
-    await this.continueQueue.close();
   }
 }

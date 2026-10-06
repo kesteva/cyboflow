@@ -40,7 +40,7 @@ vi.mock('fs/promises', () => ({
 // Defer the import so the mocks above are in place first
 let ConfigManager: typeof import('./configManager').ConfigManager;
 
-describe('ConfigManager migration: enableCrystalFooter → enableCyboflowFooter', () => {
+describe('ConfigManager.initialize: telemetry installId', () => {
   // Built with path.join: ConfigManager joins the mocked cyboflow dir with the
   // host separator, so on win32 the key is '\mock\cyboflow\config.json'.
   const CONFIG_PATH = path.join('/mock/cyboflow', 'config.json');
@@ -53,59 +53,8 @@ describe('ConfigManager migration: enableCrystalFooter → enableCyboflowFooter'
     ({ ConfigManager } = await import('./configManager'));
   });
 
-  it('Case A: legacy-only — copies value to enableCyboflowFooter, deletes legacy key, and saves', async () => {
-    // Pre-populate config.json with legacy key only
-    mockFiles[CONFIG_PATH] = JSON.stringify({
-      gitRepoPath: '/some/repo',
-      enableCrystalFooter: false,
-    });
-
-    const mgr = new ConfigManager();
-    await mgr.initialize();
-
-    const config = mgr.getConfig();
-
-    // New key must carry the migrated value
-    expect(config.enableCyboflowFooter).toBe(false);
-
-    // Legacy key must be gone from in-memory config
-    expect('enableCrystalFooter' in config).toBe(false);
-
-    // The saved file must not contain the legacy key
-    const saved = JSON.parse(mockFiles[CONFIG_PATH]);
-    expect(saved.enableCyboflowFooter).toBe(false);
-    expect('enableCrystalFooter' in saved).toBe(false);
-  });
-
-  it('Case B: both keys — new key wins, legacy key is deleted on save', async () => {
-    // Pre-populate with both keys: new key set to false, legacy set to true
-    mockFiles[CONFIG_PATH] = JSON.stringify({
-      gitRepoPath: '/some/repo',
-      enableCyboflowFooter: false,
-      enableCrystalFooter: true,
-    });
-
-    const mgr = new ConfigManager();
-    await mgr.initialize();
-
-    const config = mgr.getConfig();
-
-    // New key wins (false), not the legacy value (true)
-    expect(config.enableCyboflowFooter).toBe(false);
-
-    // Legacy key must be gone from in-memory config
-    expect('enableCrystalFooter' in config).toBe(false);
-
-    // The saved file must reflect the same
-    const saved = JSON.parse(mockFiles[CONFIG_PATH]);
-    expect(saved.enableCyboflowFooter).toBe(false);
-    expect('enableCrystalFooter' in saved).toBe(false);
-  });
-
-  it('Case C: neither key — no migration write, enableCyboflowFooter stays undefined', async () => {
-    // Pre-populate with no footer keys at all
-    const initialJson = JSON.stringify({ gitRepoPath: '/some/repo' });
-    mockFiles[CONFIG_PATH] = initialJson;
+  it('mints and persists an installId exactly once when the loaded config has none', async () => {
+    mockFiles[CONFIG_PATH] = JSON.stringify({ gitRepoPath: '/some/repo' });
 
     const mgr = new ConfigManager();
 
@@ -118,12 +67,7 @@ describe('ConfigManager migration: enableCrystalFooter → enableCyboflowFooter'
 
     const config = mgr.getConfig();
 
-    // Neither key was in the file, so enableCyboflowFooter stays undefined
-    expect(config.enableCyboflowFooter).toBeUndefined();
-
-    // The footer-migration block itself triggers no save (legacy key absent). The
-    // single extra write is the one-time telemetry installId persistence: the loaded
-    // config had no telemetry.installId, so initialize() generates one and saves once.
+    // The loaded config had no telemetry.installId, so initialize() generates one and saves once.
     const callCountAfter = writeFileSpy.mock.calls.length;
     expect(callCountAfter).toBe(callCountBefore + 1);
     expect(config.telemetry?.installId).toMatch(/^[0-9a-f-]{36}$/);

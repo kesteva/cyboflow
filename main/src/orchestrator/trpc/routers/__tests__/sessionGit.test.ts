@@ -5,8 +5,7 @@
  * representative subset of procedures:
  *   (a) delegation to ctx.sessionGitOps and envelope passthrough — including
  *       the IRREGULAR envelopes the merge/dismiss dialogs depend on
- *       (`alreadyUpToDate` + `gitError` on a merge failure, and getGitStatus's
- *       `gitStatus`-keyed rather than `data`-keyed success).
+ *       (`alreadyUpToDate` / `needsRebase` + `gitError` on a merge failure).
  *   (b) zod rejection of malformed input, never reaching ctx.sessionGitOps.
  *   (c) PRECONDITION_FAILED when ctx.sessionGitOps is absent.
  */
@@ -31,28 +30,7 @@ const emptyWorktree = { entries: [], groups: [], committedUnavailable: true };
 
 function makeFakeOps(): FakeOps {
   return {
-    getExecutions: vi.fn().mockResolvedValue({ success: true, data: [] }),
-    getExecutionDiff: vi.fn().mockResolvedValue({
-      success: true,
-      data: {
-        diff: '',
-        stats: { additions: 0, deletions: 0, filesChanged: 0 },
-        changedFiles: [],
-        resolvedBase: null,
-        worktree: emptyWorktree,
-      },
-    }),
     commit: vi.fn().mockResolvedValue({ success: true }),
-    diff: vi.fn().mockResolvedValue({
-      success: true,
-      data: {
-        diff: '',
-        stats: { additions: 0, deletions: 0, filesChanged: 0 },
-        changedFiles: [],
-        resolvedBase: null,
-        worktree: emptyWorktree,
-      },
-    }),
     getCombinedDiff: vi.fn().mockResolvedValue({
       success: true,
       data: {
@@ -63,11 +41,8 @@ function makeFakeOps(): FakeOps {
         worktree: emptyWorktree,
       },
     }),
-    rebaseMainIntoWorktree: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok' } }),
-    abortRebaseAndUseClaude: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok', panelId: 'p1' } }),
     squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true, data: { message: 'merged' } }),
     rebaseToMain: vi.fn().mockResolvedValue({ success: true, data: { message: 'merged' } }),
-    pull: vi.fn().mockResolvedValue({ success: true, data: { output: '' } }),
     push: vi.fn().mockResolvedValue({ success: true, data: { output: '' } }),
     getDeliveryState: vi
       .fn()
@@ -77,8 +52,6 @@ function makeFakeOps(): FakeOps {
       }),
     markComplete: vi.fn().mockResolvedValue({ success: true, data: { stamped: 1 } }),
     getBranchCommitSubjects: vi.fn().mockResolvedValue({ success: true, data: { subjects: [] } }),
-    getLastCommits: vi.fn().mockResolvedValue({ success: true, data: [] }),
-    hasChangesToRebase: vi.fn().mockResolvedValue({ success: true, data: false }),
     getGitCommands: vi.fn().mockResolvedValue({
       success: true,
       data: {
@@ -101,7 +74,6 @@ function makeFakeOps(): FakeOps {
     }),
     subscribeWorktreeChanges: vi.fn(),
     getRemoteUrl: vi.fn().mockResolvedValue({ success: true, data: { remoteUrl: '', branchName: '' } }),
-    getGitStatus: vi.fn().mockResolvedValue({ success: true, gitStatus: { state: 'clean' } }),
     cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
   } as unknown as FakeOps;
 }
@@ -111,12 +83,12 @@ describe('cyboflow.sessionGit', () => {
   // (a) Delegation + envelope passthrough for a representative subset.
   // -------------------------------------------------------------------------
   describe('(a) delegates to ctx.sessionGitOps and returns its envelope untouched', () => {
-    it('getExecutions', async () => {
+    it('getBranchCommitSubjects', async () => {
       const sessionGitOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      const result = await caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' });
-      expect(sessionGitOps.getExecutions).toHaveBeenCalledWith({ sessionId: 's1' });
-      expect(result).toEqual({ success: true, data: [] });
+      const result = await caller.cyboflow.sessionGit.getBranchCommitSubjects({ sessionId: 's1' });
+      expect(sessionGitOps.getBranchCommitSubjects).toHaveBeenCalledWith({ sessionId: 's1' });
+      expect(result).toEqual({ success: true, data: { subjects: [] } });
     });
 
     it('commit', async () => {
@@ -219,23 +191,6 @@ describe('cyboflow.sessionGit', () => {
       });
     });
 
-    it("getGitStatus's success envelope keys the status on gitStatus, not data", async () => {
-      const sessionGitOps = makeFakeOps();
-      sessionGitOps.getGitStatus.mockResolvedValue({
-        success: true,
-        gitStatus: { state: 'modified', ahead: 2 },
-        backgroundRefresh: true,
-      });
-      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      const result = await caller.cyboflow.sessionGit.getGitStatus({ sessionId: 's1', isInitialLoad: true });
-      expect(sessionGitOps.getGitStatus).toHaveBeenCalledWith({ sessionId: 's1', isInitialLoad: true });
-      expect(result).toEqual({
-        success: true,
-        gitStatus: { state: 'modified', ahead: 2 },
-        backgroundRefresh: true,
-      });
-    });
-
     it('getCurrentBranch', async () => {
       const sessionGitOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
@@ -302,9 +257,9 @@ describe('cyboflow.sessionGit', () => {
 
     it('a plain failure envelope also passes through untouched', async () => {
       const sessionGitOps = makeFakeOps();
-      sessionGitOps.getExecutions.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
+      sessionGitOps.getGitCommands.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      const result = await caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' });
+      const result = await caller.cyboflow.sessionGit.getGitCommands({ sessionId: 's1' });
       expect(result).toEqual({ success: false, error: 'Session or worktree path not found' });
     });
   });
@@ -313,11 +268,11 @@ describe('cyboflow.sessionGit', () => {
   // (b) zod rejection of malformed input, never delegated.
   // -------------------------------------------------------------------------
   describe('(b) rejects malformed input before it reaches sessionGitOps', () => {
-    it('getExecutions rejects an empty sessionId (min length 1)', async () => {
+    it('getGitCommands rejects an empty sessionId (min length 1)', async () => {
       const sessionGitOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      await expect(caller.cyboflow.sessionGit.getExecutions({ sessionId: '' })).rejects.toSatisfy(isBadRequest);
-      expect(sessionGitOps.getExecutions).not.toHaveBeenCalled();
+      await expect(caller.cyboflow.sessionGit.getGitCommands({ sessionId: '' })).rejects.toSatisfy(isBadRequest);
+      expect(sessionGitOps.getGitCommands).not.toHaveBeenCalled();
     });
 
     it('commit rejects an empty message (min length 1)', async () => {
@@ -361,9 +316,9 @@ describe('cyboflow.sessionGit', () => {
   // (c) Missing ctx.sessionGitOps → PRECONDITION_FAILED.
   // -------------------------------------------------------------------------
   describe('(c) missing ctx.sessionGitOps → PRECONDITION_FAILED', () => {
-    it('getExecutions', async () => {
+    it('getGitCommands', async () => {
       const caller = appRouter.createCaller(createContext());
-      await expect(caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
+      await expect(caller.cyboflow.sessionGit.getGitCommands({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
 
     it('squashAndRebaseToMain', async () => {
@@ -371,11 +326,6 @@ describe('cyboflow.sessionGit', () => {
       await expect(
         caller.cyboflow.sessionGit.squashAndRebaseToMain({ sessionId: 's1', commitMessage: 'm' }),
       ).rejects.toSatisfy(isPrecond);
-    });
-
-    it('getGitStatus', async () => {
-      const caller = appRouter.createCaller(createContext());
-      await expect(caller.cyboflow.sessionGit.getGitStatus({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
 
     it('getCurrentBranch', async () => {

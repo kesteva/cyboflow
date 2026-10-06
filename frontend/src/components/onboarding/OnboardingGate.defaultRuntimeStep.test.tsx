@@ -66,7 +66,6 @@ const OMP_DETECTED: ProviderDetectionResult<'omp'> = {
 
 function baseAppConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: true },
     ...over,
   };

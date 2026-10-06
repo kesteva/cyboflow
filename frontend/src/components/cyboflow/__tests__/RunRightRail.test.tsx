@@ -68,8 +68,7 @@ const { RUN_PANEL_RESOLVED_BASE, SESSION_PANEL_RESOLVED_BASE, RUN_PANEL_WORKTREE
   }));
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi — WorkflowProgressTimeline reads streamEvents from the store
-// which is seeded via subscribeToStreamEvents.
+// Mock cyboflowApi so rail children that import it never attempt real IPC.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../utils/cyboflowApi', () => ({
@@ -259,6 +258,17 @@ vi.mock('../WorktreeStrip', () => ({
       <button data-testid="worktree-strip-mock-mutated" onClick={() => onMutated?.()}>
         mutated
       </button>
+    </div>
+  ),
+}));
+
+// Stub OpenInIdeButton (its own suite covers visibility + the click/error
+// path) so rail-level tests only assert WHAT the Diff header hands it.
+vi.mock('../OpenInIdeButton', () => ({
+  OpenInIdeButton: ({ sessionId, projectId }: { sessionId: string | null; projectId: number | null }) => (
+    <div data-testid="open-in-ide-mock">
+      <span data-testid="open-in-ide-mock-session-id">{sessionId ?? ''}</span>
+      <span data-testid="open-in-ide-mock-project-id">{projectId === null ? '' : String(projectId)}</span>
     </div>
   ),
 }));
@@ -737,6 +747,34 @@ describe('RunRightRail — TASK-214 resolvedBase lift', () => {
 // quickSessionChatRunId in the mix that could briefly disagree with
 // selectedSessionId across a session switch).
 // ---------------------------------------------------------------------------
+
+describe('RunRightRail — Diff tab header Open in IDE button', () => {
+  it('hands the selected session and its project to OpenInIdeButton in the session arm', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-ide-1' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 7, sessionProjectId: 7 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.getByTestId('open-in-ide-mock-session-id')).toHaveTextContent('sess-ide-1');
+    expect(screen.getByTestId('open-in-ide-mock-project-id')).toHaveTextContent('7');
+  });
+
+  it("during a run uses the run's parent session and the RUN's project (null until resolved)", () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-ide-1', 'sess-ide-parent');
+    });
+
+    // sessionProjectId is ignored while a run is active; the run's row is not
+    // in activeRunsStore, so its project resolves to null (button hidden).
+    renderRail(EMPTY_PHASE_STATE, { sessionProjectId: 7 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.getByTestId('open-in-ide-mock-session-id')).toHaveTextContent('sess-ide-parent');
+    expect(screen.getByTestId('open-in-ide-mock-project-id')).toHaveTextContent('');
+  });
+});
 
 describe('RunRightRail — Artifacts tab quick-session fallback', () => {
   it('with no active run, a selected session, and quickSessionProjectId set, renders ArtifactsPanel scoped to the session', () => {

@@ -32,18 +32,14 @@ export function _resetCliDirOverrideCacheForTesting(): void {
 }
 
 /**
- * Parse `--cyboflow-dir` (and the deprecated `--crystal-dir` alias) directly
- * from process.argv. index.ts parses the same flags in its module body, but
- * import hoisting runs every static import BEFORE that body — including the
- * services/database.ts databaseService singleton, which binds its sessions.db
- * path at import time. When only index.ts honored the flag, those import-time
- * consumers opened the DEFAULT data dir while everything wired later opened the
- * override: two live databases in one process, surfacing as FOREIGN KEY
- * failures (e.g. a session row written to one DB and its panel row to the
- * other). Resolving the flag here, on first getCyboflowDirectory() call, makes
- * import order irrelevant. Scans full argv (no slice) so it works both in dev
+ * Parse `--cyboflow-dir` directly from process.argv. This is the single parser
+ * for the flag: import hoisting runs every static import BEFORE index.ts's
+ * module body, and some of them resolve data-dir paths at import time.
+ * Resolving the flag here, on first getCyboflowDirectory() call, makes import
+ * order irrelevant — otherwise import-time consumers would use the DEFAULT data
+ * dir while everything wired later used the override. Scans full argv (no slice) so it works both in dev
  * (`electron . --cyboflow-dir X`) and packaged (`Cyboflow --cyboflow-dir X`)
- * argv shapes; the last occurrence wins, matching index.ts's loop.
+ * argv shapes; the last occurrence wins.
  */
 function resolveCliDirOverride(): string | null {
   if (cachedCliDirOverride !== undefined) return cachedCliDirOverride;
@@ -51,10 +47,10 @@ function resolveCliDirOverride(): string | null {
   let dir: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
+    if (arg.startsWith('--cyboflow-dir=')) {
       const value = arg.substring(arg.indexOf('=') + 1);
       if (value) dir = value;
-    } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < argv.length) {
+    } else if (arg === '--cyboflow-dir' && i + 1 < argv.length) {
       dir = argv[i + 1];
       i++;
     }
@@ -126,9 +122,8 @@ export function appIconBasename(): string {
  *
  * Resolution order:
  *  1. Programmatic override (`setCyboflowDirectory`).
- *  1b. `--cyboflow-dir` / `--crystal-dir` CLI flag (parsed from process.argv
- *      here, not just in index.ts, so import-time callers agree — see
- *      resolveCliDirOverride).
+ *  1b. `--cyboflow-dir` CLI flag (parsed from process.argv here so import-time
+ *      callers agree — see resolveCliDirOverride).
  *  2. `CYBOFLOW_DIR` environment variable.
  *  3. Packaged builds — one data dir PER KIND so a user can run the stable
  *     release and the "Cyboflow Dev" distributable DMG side by side without them
@@ -148,8 +143,8 @@ export function getCyboflowDirectory(): string {
     return customCyboflowDir;
   }
 
-  // 1b. CLI flag, parsed here so import-time callers (before index.ts's own
-  //     arg loop runs) resolve the same directory as everything wired later.
+  // 1b. CLI flag, parsed here so import-time callers resolve the same
+  //     directory as everything wired later.
   const cliDir = resolveCliDirOverride();
   if (cliDir) {
     return cliDir;

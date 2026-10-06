@@ -82,7 +82,6 @@ import type {
   VerificationTaskV1,
   VerificationType,
   VerdictV1,
-  VlmJudge,
 } from '../../../../../shared/types/visualVerification';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
@@ -181,10 +180,7 @@ function seedRun(dbX: Database.Database, runId: string, worktreePath: string = L
 const CONFIG: ResolvedVisualVerifyConfig = {
   enabled: true,
   defaultType: 'interactive-web-behavior',
-  vlmConfidenceThreshold: 0.7,
-  maxPerRunJudgeCalls: 4,
   devServerPorts: [29260, 29262],
-  simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
   mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
@@ -204,12 +200,6 @@ const DRIVER_PORT = LEASED_PORT + 1;
 /** How long a row waits on `awaitTerminal` before calling the scheduler wedged. */
 const TERMINAL_DEADLINE_MS = 20_000;
 const TERMINAL_POLL_MS = 5;
-
-const fakeJudge: VlmJudge = {
-  judge: async (): Promise<VerdictV1> => {
-    throw new Error('the agent engine never calls the VLM judge — a call here is a routing bug');
-  },
-};
 
 /**
  * The portable runbook the matrix's project "committed". Declares the two
@@ -631,8 +621,6 @@ function initScheduler(
   const artifactsDir = opts.artifactsDir ?? '/artifacts';
   return VerificationScheduler.initialize({
     db: dbAdapter(dbX),
-    backends: {},
-    judge: fakeJudge,
     artifactsDirResolver: () => artifactsDir,
     config: opts.requireProvenRunbook === true ? { ...CONFIG, requireProvenRunbook: true } : CONFIG,
     leasePool: new ResourceLeasePool(new Mutex()),

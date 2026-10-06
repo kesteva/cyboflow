@@ -88,7 +88,7 @@ export interface QuickSessionRow {
   restedAtIso: string | null;
   /** sessions.status verbatim ('completed'/'stopped'/'failed'/…) — the UI's "stopped early vs clean" split that the derived `state` (which collapses these into `idle`) can't express. */
   rawStatus: string;
-  /** sessions.exit_code. Written by the PTY substrate; usually null for SDK-substrate rows. */
+  /** sessions.exit_code. Written per turn by the Claude SDK substrate's exit; null for interactive PTY-substrate rows. */
   exitCode: number | null;
   /** Rolling haiku summary (session_summaries.summary). Null when never summarized, or when the session-summary feature toggle is off (nulled at the IPC seam). */
   summary: string | null;

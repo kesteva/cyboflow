@@ -214,10 +214,10 @@ export function composeDesignMode(deps: DesignModeCompositionDeps): DesignModeCo
   // re-delivers whatever a crash left in flight.
   //
   // Wired HERE, after registerIpcHandlers, because `dispatchTurn` goes through
-  // the Claude panel continue path (the same internals behind the
-  // 'claude-panels:continue' IPC handler), and claudePanelManager only exists
-  // once the IPC handlers are registered. The lazy require mirrors taskQueue's
-  // continueQueue — index.ts must not take a static import on ipc/claudePanel.
+  // ClaudePanelManager.continuePanel, and claudePanelManager only exists once
+  // the IPC handlers are registered. The lazy require mirrors taskQueue's
+  // session-creation processor — index.ts must not take a static import on
+  // ipc/claudePanel.
   //
   // The lifecycle guards are the service's DB-backed defaults; only the SDK turn
   // and the clock are host-supplied.
@@ -242,10 +242,9 @@ export function composeDesignMode(deps: DesignModeCompositionDeps): DesignModeCo
         prompt,
         conversationHistory,
       );
-      // Echo the dispatched turn into the panel transcript, exactly as the
-      // 'claude-panels:continue' IPC path does via handlePanelContinue — without
-      // this the host-sent revision turn is invisible in the design session's
-      // chat (the "sends missing from transcript" bug class).
+      // Echo the dispatched turn into the panel transcript, as the chat send
+      // paths do — without this the host-sent revision turn is invisible in the
+      // design session's chat (the "sends missing from transcript" bug class).
       sessionManager.addPanelConversationMessage(claudePanel.id, 'user', prompt);
     },
     logger: cyboflowLogger,

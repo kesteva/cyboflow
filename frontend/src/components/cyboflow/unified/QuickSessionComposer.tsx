@@ -58,8 +58,6 @@ export interface QuickSessionComposerProps {
     pendingId?: string,
   ) => Promise<{ success: boolean; error?: string; queued?: boolean }>;
   handleStopSession?: () => void;
-  handleCompactContext?: () => void;
-  hasConversationHistory?: boolean;
   /** panel id — used to read the session's (read-only) model for display. */
   panelId?: string;
   /** interactive (PTY) quick session: composer is ⌃G-revealed. */
@@ -113,8 +111,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     handleSendInput,
     handleContinueConversation,
     handleStopSession,
-    handleCompactContext,
-    hasConversationHistory,
     panelId,
     interactive,
     ptyOpen = false,
@@ -566,19 +562,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // composer (where the SDK-gated model pill never appears). null → no pill.
   const effortLabel = activeSession.effort === 'ultracode' ? 'ultracode' : null;
 
-  const compactSlot =
-    !interactive && handleCompactContext && hasConversationHistory ? (
-      <button
-        type="button"
-        onClick={handleCompactContext}
-        disabled={running || activeSession.status === 'initializing'}
-        title="Generate a summary of the conversation to continue in a fresh context window"
-        className="inline-flex items-center border border-border-primary bg-surface-primary px-2.5 py-1.5 text-[10px] text-text-secondary transition-colors hover:border-border-hover disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Compact context
-      </button>
-    ) : undefined;
-
   return (
     <UnifiedComposer
       visibility={visibility}
@@ -604,7 +587,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       effortLabel={effortLabel}
       fastSlot={fastModeSlot}
       effortSlot={effortSlot}
-      compactSlot={compactSlot}
     />
   );
 }

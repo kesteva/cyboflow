@@ -41,10 +41,7 @@ export const IDLE_SESSION_REVIEW_DEFAULTS: ResolvedIdleSessionReviewConfig = {
 
 export interface AppConfig {
   verbose?: boolean;
-  // Legacy fields for backward compatibility
-  gitRepoPath?: string;
   systemPromptAppend?: string;
-  runScript?: string[];
   // Custom claude executable path (for when it's not in PATH)
   claudeExecutablePath?: string;
   // Permission mode for all sessions
@@ -292,29 +289,12 @@ export interface AppConfig {
   };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
-  // Session creation preferences
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
   // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
   // synthetic global `quick` key. Intentionally NOT seeded into ConfigManager's
   // constructor defaults, so config.json stays byte-identical for users who
   // never touch it. Writes use the dedicated IPC operation below, not the
   // generic UpdateConfigRequest, so the two channels cannot race on this field.
   runTypeDefaults?: Record<string, RunTypeDefaults>;
-  // Cyboflow commit footer setting (enabled by default)
-  enableCyboflowFooter?: boolean;
 }
 
 // `runTypeDefaults` is deliberately absent from this generic payload: its
@@ -414,19 +394,4 @@ export interface UpdateConfigRequest {
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
   additionalPaths?: string[];
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
-  enableCyboflowFooter?: boolean;
 }

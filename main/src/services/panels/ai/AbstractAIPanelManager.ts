@@ -383,31 +383,4 @@ export abstract class AbstractAIPanelManager {
     return Array.from(this.panelMappings.keys());
   }
 
-  /**
-   * Cleanup all panels for a session
-   */
-  async cleanupSessionPanels(sessionId: string): Promise<void> {
-    const panelsToCleanup: string[] = [];
-    
-    // Find all panels for this session
-    for (const [panelId, mapping] of this.panelMappings) {
-      if (mapping.sessionId === sessionId) {
-        panelsToCleanup.push(panelId);
-      }
-    }
-    
-    // Stop and unregister each panel
-    for (const panelId of panelsToCleanup) {
-      try {
-        if (this.isPanelRunning(panelId)) {
-          await this.stopPanel(panelId);
-        }
-        this.unregisterPanel(panelId);
-      } catch (error) {
-        this.logger?.error(`[${this.getAgentName()}PanelManager] Failed to cleanup panel ${panelId}: ${error}`);
-      }
-    }
-    
-    this.logger?.info(`[${this.getAgentName()}PanelManager] Cleaned up ${panelsToCleanup.length} panels for session ${sessionId}`);
-  }
 }

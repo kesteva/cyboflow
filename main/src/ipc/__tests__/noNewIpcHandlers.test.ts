@@ -20,7 +20,98 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
+/** Frozen 2026-10-02 at 88 handlers — back UP from 87: `sessions:open-ide`
+ * (`ipc/script.ts`) was briefly deleted as dead (nothing in the renderer
+ * triggered it once the session header was gone) and then deliberately
+ * restored, because the project "Open IDE Command" setting is kept and now
+ * drives the "Open in IDE" button in the right-rail Diff tab header. The
+ * one-handler increase is a sanctioned exception to the shrink-only rule, not
+ * a new raw channel.
+ *
+ * Earlier 2026-10-02: 87 handlers — down from 88 when `sessions:open-ide`
+ * was deleted (reverted above).
+ *
+ * Earlier 2026-10-02: 88 handlers — down from 90 when Crystal's
+ * 'active project' channels were deleted from `ipc/project.ts`:
+ * `projects:get-active` (no caller) and `projects:activate` (its only caller,
+ * ProjectSelector, was already gone). Every session/run carries an explicit
+ * projectId now.
+ *
+ * Earlier 2026-10-02: 90 handlers — down from 95 when five
+ * caller-less `ipc/app.ts` handlers were deleted: `get-app-version` and
+ * `is-packaged` (bridged, never called) plus `app:record-open`,
+ * `app:get-last-open` and `preferences:get-all` (never exposed; Crystal's
+ * welcome-screen open tracking).
+ *
+ * Earlier 2026-10-02: 95 handlers — down from 103 when Crystal's
+ * pre-panel per-session terminal was deleted: `sessions:run-terminal-command`,
+ * `sessions:send-terminal-input`, `sessions:pre-create-terminal` and
+ * `sessions:resize-terminal` (`ipc/script.ts`, with TerminalSessionManager),
+ * plus the caller-less `panels:resize-terminal`, `panels:send-terminal-input`,
+ * `panels:getActive` and `terminal:saveState` (`ipc/panels.ts`); terminal
+ * panels use `terminal:input` / `terminal:resize`.
+ *
+ * Earlier 2026-10-02: 103 handlers — down from 109 when Crystal's
+ * per-session Run button chain was deleted from `ipc/script.ts`:
+ * `sessions:has-run-script`, `sessions:get-running-session`,
+ * `sessions:run-script`, `sessions:stop-script` (only the unrendered
+ * SessionListItem called them; run scripts are project-level now) and the
+ * caller-less `logs:runScript` / `logs:isRunning`.
+ *
+ * Earlier 2026-10-02: 109 handlers — down from 110 when
+ * `panels:get-output` (`ipc/session.ts`) was deleted: its only caller was
+ * useClaudePanel's Crystal output-load, whose one consumer (the slash-command
+ * list) now reads the projected transcript instead.
+ *
+ * Earlier 2026-10-02: 110 handlers — down from 111 when the caller-less
+ * `panels:emitEvent` (`ipc/panels.ts`) was deleted along with its
+ * generic-invoke allowlist entry; main-side code emits panel events directly.
+ *
+ * Earlier 2026-10-02: 111 handlers — down from 115 when four
+ * caller-less Crystal session-scoped reads/continue were deleted from
+ * `ipc/session.ts`: `sessions:continue`, `sessions:get-output`,
+ * `sessions:get-conversation` and `sessions:get-conversation-messages` (the
+ * panel-scoped channels superseded them).
+ *
+ * Earlier 2026-10-02: 115 handlers — down from 126 when
+ * `ipc/baseAIPanelHandler.ts` (9 never-exposed `claude-panels:*` common
+ * handlers) was folded into `ipc/claudePanel.ts`, which also dropped the
+ * never-exposed `claude-panels:start` / `claude-panels:continue`.
+ *
+ * Earlier 2026-10-02: 126 handlers — down from 128 when the orphaned
+ * `claude-panels:get-substrate` / `set-substrate` bridges (`ipc/claudePanel.ts`)
+ * were deleted; the per-panel substrate is set at creation via
+ * CreatePanelRequest.substrate.
+ *
+ * Earlier 2026-10-02: 128 handlers — down from 130 when the 'Compact
+ * context' feature was deleted: `sessions:generate-compacted-context`
+ * (`ipc/session.ts`) and its never-exposed twin
+ * `claude-panels:generate-compacted-context` (`ipc/claudePanel.ts`).
+ *
+ * Earlier 2026-10-02: 130 handlers — down from 137 when `ipc/folders.ts`
+ * (7 `folders:*` handlers) was deleted with the vestigial sidebar project-folder
+ * UI.
+ *
+ * Earlier 2026-10-02: 137 handlers — down from 140 when three dead granular
+ * channels were deleted: `sessions:add-log` (`ipc/logs.ts`; internal producers
+ * call `addSessionLog()` directly) and `ui-state:save-expanded-projects` /
+ * `ui-state:save-expanded-folders` (`ipc/uiState.ts`; superseded by the
+ * combined `ui-state:save-expanded`).
+ *
+ * Earlier 2026-10-02: 140 handlers — down from 142 when the 2
+ * `dashboard:*` handlers (`ipc/dashboard.ts`) were deleted with the retired
+ * per-project dashboard panel.
+ *
+ * Earlier 2026-10-02: 142 handlers — down from 146 when the unreachable
+ * `ipc/editorPanel.ts` (4 `editor:*` handlers, never exposed in preload) was
+ * deleted with the hidden Monaco editor panel.
+ *
+ * Earlier 2026-10-02: 146 handlers — down from 148 when `ipc/nimbalyst.ts`
+ * (`nimbalyst:check-installed` / `nimbalyst:open-worktree`) was deleted with
+ * the Nimbalyst integration. (The map summed to 148, not the 150 recorded
+ * below, when this cleanup began: two earlier decreases went unrecorded.)
+ *
+ * Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
  * handlers left the raw surface in batch 1 of the session-surface IPC→tRPC
  * migration — 15 became the cyboflow.sessions tRPC router and
  * `debug:get-table-structure` was deleted outright, having had zero callers.
@@ -29,28 +120,23 @@ import * as path from 'node:path';
  * decrease MUST be recorded here, so the map tracks reality. */
 const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'index.ts': 2,
-  'ipc/app.ts': 10,
+  'ipc/app.ts': 5,
   'ipc/artifactHtml.ts': 2,
   'ipc/artifactImages.ts': 2,
-  'ipc/baseAIPanelHandler.ts': 9,
   'ipc/bugReport.ts': 3,
-  'ipc/claudePanel.ts': 12,
+  'ipc/claudePanel.ts': 7,
   'ipc/cyboflow.ts': 1,
-  'ipc/dashboard.ts': 2,
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,
-  'ipc/editorPanel.ts': 4,
-  'ipc/folders.ts': 7,
   'ipc/ideaAttachments.ts': 2,
-  'ipc/logs.ts': 3,
+  'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
-  'ipc/nimbalyst.ts': 2,
-  'ipc/panels.ts': 16,
-  'ipc/project.ts': 13,
+  'ipc/panels.ts': 11,
+  'ipc/project.ts': 11,
   'ipc/providerDetection.ts': 3,
-  'ipc/script.ts': 12,
-  'ipc/session.ts': 26,
-  'ipc/uiState.ts': 4,
+  'ipc/script.ts': 2,
+  'ipc/session.ts': 20,
+  'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,
 };
 

@@ -1,4 +1,3 @@
-import { EventEmitter } from 'events';
 
 export interface ArchiveTask {
   sessionId: string;
@@ -23,7 +22,7 @@ export interface SerializedArchiveTask {
   error?: string;
 }
 
-export class ArchiveProgressManager extends EventEmitter {
+export class ArchiveProgressManager {
   private activeTasks: Map<string, ArchiveTask> = new Map();
   private taskQueue: ArchiveTask[] = [];
   private isProcessing: boolean = false;
@@ -47,7 +46,6 @@ export class ArchiveProgressManager extends EventEmitter {
     
     this.activeTasks.set(sessionId, task);
     this.taskQueue.push(task);
-    this.emitProgress();
     
     // Start processing if not already processing
     if (!this.isProcessing) {
@@ -68,7 +66,6 @@ export class ArchiveProgressManager extends EventEmitter {
 
       // Update status to pending (actively processing)
       task.status = 'pending';
-      this.emitProgress();
 
       if (task.executeCallback) {
         try {
@@ -105,13 +102,11 @@ export class ArchiveProgressManager extends EventEmitter {
       task.endTime = new Date();
     }
     
-    this.emitProgress();
     
     // Remove completed/failed tasks after a delay to show completion
     if (status === 'completed' || status === 'failed') {
       setTimeout(() => {
         this.activeTasks.delete(sessionId);
-        this.emitProgress();
       }, 3000); // Keep visible for 3 seconds
     }
   }
@@ -142,31 +137,7 @@ export class ArchiveProgressManager extends EventEmitter {
     return this.activeTasks.size;
   }
 
-  getQueuedTaskCount(): number {
-    return this.taskQueue.length;
-  }
-
-  private emitProgress(): void {
-    const tasks = this.getActiveTasks();
-    const activeCount = tasks.filter(t => 
-      t.status !== 'completed' && t.status !== 'failed'
-    ).length;
-    
-    console.log('[ArchiveProgressManager] Emitting progress:', {
-      tasks: tasks.length,
-      activeCount,
-      totalCount: tasks.length
-    });
-    
-    this.emit('archive-progress', {
-      tasks,
-      activeCount,
-      totalCount: tasks.length
-    });
-  }
-
   clearAll(): void {
     this.activeTasks.clear();
-    this.emitProgress();
   }
 }

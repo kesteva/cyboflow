@@ -2,12 +2,9 @@
  * processTable unit tests — the shared (pid, ppid) table helpers and the
  * Windows tree-kill primitive the kill ladders consume.
  *
- * parseProcessTable and collectDescendantPids are covered by
- * terminalSessionManager's suite, which reaches them through its re-exports
- * and pins more of their edges than a second copy here did. This file covers
- * what only it can: the synchronous table fetch against the REAL host process
- * table, and — on win32 hosts — killWindowsTree reaping a real
- * parent+grandchild tree.
+ * Covers the pure parseProcessTable / collectDescendantPids text helpers, the
+ * synchronous table fetch against the REAL host process table, and — on win32
+ * hosts — killWindowsTree reaping a real parent+grandchild tree.
  */
 import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
@@ -26,6 +23,51 @@ import {
   spawnNamedDetachedGrandchildTree,
   waitUntil,
 } from '../__test_fixtures__/processTree';
+
+describe('parseProcessTable', () => {
+  it('parses "pid ppid" rows, skipping blanks and malformed lines', () => {
+    const out = ['  1   0', ' 320   1', '', 'garbage', '0 5', '  99   1  '].join('\n');
+    expect(parseProcessTable(out)).toEqual([
+      { pid: 1, ppid: 0 },
+      { pid: 320, ppid: 1 },
+      { pid: 99, ppid: 1 },
+    ]);
+  });
+});
+
+describe('collectDescendantPids', () => {
+  const procs: ProcessTableRow[] = [
+    { pid: 500, ppid: 1 },   // the session's shell (root)
+    { pid: 501, ppid: 500 }, // direct child (e.g. a dev-server wrapper)
+    { pid: 502, ppid: 501 }, // grandchild (e.g. the actual node process)
+    { pid: 503, ppid: 502 }, // great-grandchild
+    { pid: 999, ppid: 1 },   // unrelated process — must not be swept
+  ];
+
+  it('walks the ppid tree and collects every descendant, excluding the root and unrelated pids', () => {
+    expect(collectDescendantPids(500, procs).sort((a, b) => a - b)).toEqual([501, 502, 503]);
+  });
+
+  it('never traverses or includes pid<=1', () => {
+    const withInit: ProcessTableRow[] = [
+      { pid: 1, ppid: 0 },
+      { pid: 10, ppid: 1 },
+    ];
+    expect(collectDescendantPids(1, withInit)).toEqual([]);
+  });
+
+  it('is cycle-safe (a malformed ppid loop terminates)', () => {
+    const cyclic: ProcessTableRow[] = [
+      { pid: 10, ppid: 11 },
+      { pid: 11, ppid: 10 },
+    ];
+    expect(collectDescendantPids(10, cyclic).sort((a, b) => a - b)).toEqual([11]);
+  });
+
+  it('returns an empty list for a root with no rows in the table', () => {
+    expect(collectDescendantPids(999, [])).toEqual([]);
+  });
+});
 
 describe('listPidPpidTableSync', () => {
   it('round-trips a real spawned child into the (pid, ppid) table on this host', async () => {

@@ -32,12 +32,12 @@ afterEach(async () => {
 
 describe('ConfigManager.getFanOutDispatch', () => {
   it("defaults to 'workflow' on a fresh instance (before initialize)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getFanOutDispatch()).toBe('workflow');
   });
 
   it('is NOT seeded into the constructor defaults (config.json stays byte-identical)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().fanOutDispatch).toBeUndefined();
     expect(mgr.getFanOutDispatch()).toBe('workflow');
   });
@@ -48,7 +48,7 @@ describe('ConfigManager.getFanOutDispatch', () => {
       JSON.stringify({ gitRepoPath: '/some/repo' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().fanOutDispatch).toBeUndefined();
@@ -56,11 +56,11 @@ describe('ConfigManager.getFanOutDispatch', () => {
   });
 
   it("round-trips an explicit 'workflow' through a fresh initialize()", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ fanOutDispatch: 'workflow' });
 
-    const reopened = new ConfigManager('/tmp/test-git-path');
+    const reopened = new ConfigManager();
     await reopened.initialize();
 
     expect(reopened.getFanOutDispatch()).toBe('workflow');
@@ -72,7 +72,7 @@ describe('ConfigManager.getFanOutDispatch', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', fanOutDispatch: 'ultracode' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getFanOutDispatch()).toBe('workflow');
@@ -84,7 +84,7 @@ describe('ConfigManager.getFanOutDispatch', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', fanOutDispatch: 'prose' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getFanOutDispatch()).toBe('prose');

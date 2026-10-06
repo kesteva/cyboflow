@@ -2,18 +2,13 @@
  * Demo-mode boot resolution — decides ONCE, synchronously, at first import,
  * which database the entire process uses.
  *
- * Why this exists: there are TWO DatabaseService constructions in the app —
- * the module-level singleton in services/database.ts (opened at import time,
- * used by PanelManager / panels IPC / session validation) and the instance
- * built in index.ts initializeServices(). Outside demo mode both point at the
- * same sessions.db so the split is invisible. In demo mode the path decision
- * (and the demo-environment reset) must therefore happen BEFORE the module
- * graph loads the singleton — resetting later would strand one handle on a
- * deleted file and split the world across two databases (FOREIGN KEY failures
- * on every session create, as seen in the first demo smoke).
+ * Why this exists: the path decision (and the demo-environment reset) must be
+ * made once and before index.ts opens the one DatabaseService, and every later
+ * reader (index.ts's boot log, the demo sandbox wiring) must see the same
+ * answer.
  *
- * The demoMode flag is read straight from config.json (ConfigManager does not
- * exist yet at module-load time). Fail-soft: any error (unreadable config, git
+ * The demoMode flag is read straight from config.json (ConfigManager may not
+ * be initialized yet when this first runs). Fail-soft: any error (unreadable config, git
  * missing, reset failure) records the message and boots on the real database.
  */
 

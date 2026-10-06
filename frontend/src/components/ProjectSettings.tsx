@@ -54,7 +54,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
       setBuildScript(project.build_script || '');
       // Fetch the current branch when dialog opens
       if (project.path) {
-        window.electronAPI.git.detectBranch(project.path).then((result) => {
+        API.projects.detectBranch(project.path).then((result) => {
           if (result.success && result.data) {
             setCurrentBranch(result.data);
           }
@@ -284,7 +284,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
 
             <FieldWithTooltip
               label="Open IDE Command"
-              tooltip="Command to open the worktree in your IDE. The command will be executed in the worktree directory."
+              tooltip="Command the Diff tab's Open in IDE button runs to open a session's worktree in your editor. It runs inside the worktree directory. Leave empty to hide the button."
             >
               <Input
                 value={openIdeCommand}

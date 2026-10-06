@@ -42,7 +42,7 @@ dropped, its prose preserved under `docs/workflows-future/` for a future rebuild
 - **`frontend/`** — React renderer (Vite + Tailwind). UI panels, Zustand stores, and frontend
   utilities. Never touches the database or filesystem directly.
 - **`shared/`** — TypeScript types shared between `main/` and `frontend/`. The contract layer.
-- **`docs/`** — Product spec, research package, reference designs, Crystal legacy docs.
+- **`docs/`** — Product spec, research package, reference designs, archived plans.
 - **`tests/`** — Playwright E2E tests run against a live Electron instance.
 - **`scripts/`** — Build tooling: `inject-build-info.js`, `configure-build.js`.
 - **`build/`** — Electron Builder config files: `afterSign.js`, `entitlements.mac.plist`.
@@ -230,10 +230,8 @@ sprint lane (`mergeGateLaneAdvance.ts`), and raises/supersedes a
 Dispatch keys on `isAgentEngineRequest`: the REQUEST row's own
 `chain_json === '["agent"]'` first, falling back to the per-run stamp
 (`workflow_runs.verify_chain=['agent']`) — never a live flag, so an in-flight
-run always finishes on the engine it started on. For a flow run the two rungs
-are indistinguishable: its request's `chain_json` is always the empty
-intersection `'[]'` (`'agent'` is not a `VisualBackendId`, so it survives no
-intersection), so dispatch still reads the run stamp exactly as it always did.
+run always finishes on the engine it started on. A flow run's request writes
+`chain_json` `'[]'`, so its dispatch reads the run stamp.
 The ONE exception is the `__quick__` chat sentinel: it is minted once on the
 session's first chat turn and `verify_chain` has no UPDATE path (see the
 header on `visualVerificationResolver.ts`), so a quick run's posture is
@@ -242,19 +240,14 @@ the optional `getVisualVerifyConfig` dep) and written VERBATIM onto the
 request row's `chain_json`. A request row is never re-enqueued, so this is
 every bit as immutable as the run stamp it substitutes for — the dispatch key
 is still frozen at first write, just at request granularity instead of run
-granularity for this one case. The prior LEGACY engine (capture backends
-`capturePageBackend`/`playwrightBackend`/`peekabooBackend` + `VlmJudge`, plus
-the `.cyboflow/verify.json`-driven `DevServerManager`/`StaticServerManager`
-and the retired golden-baseline `pixelDiff`/`baselineStore`) is retired **in
-place** (`@cyboflow-hidden` — see `docs/CODE-PATTERNS.md`) under
-`main/src/services/visualVerify/`: it stays reachable only for a pre-upgrade
-run's legacy `verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback
-kill switch, which also boot-terminalizes any agent-engine request stranded
-queued/leased/running when the switch flips (via the same
-`isAgentEngineRequest` key, `VerificationScheduler.runRecovery`). Both engines
-share one per-project verification budget
-(`projects.visual_verify_budget_calls` / `verification_requests.judge_calls_used`,
-migration 056).
+granularity for this one case. The agent engine is the only engine: the
+earlier capture-backend + VLM-judge engine (and its golden-baseline compare)
+was deleted, so a request that is not on the agent engine — a run stamped with
+a capture-backend chain before the agent engine shipped, or an unreadable
+stamp — is terminalized `skipped` with `RETIRED_ENGINE_SKIP_REASON` rather than
+left queued. Agent deployments count against one per-project verification
+budget (`projects.visual_verify_budget_calls` /
+`verification_requests.judge_calls_used`, migration 056).
 
 **Quick sessions are the first user-conversation-triggered path into this
 queue, and firing one is deliberately UN-GATED at the PreToolUse layer.** In
@@ -371,9 +364,8 @@ Core business logic services. Key components:
   `InteractiveClaudeManager`, the per-provider PTY+SDK manager pairs
   (`CodexPtyManager`/`CodexSdkManager` in `panels/codex/`, `OmpPtyManager`/`OmpSdkManager` in
   `panels/omp/`, `PiPtyManager`/`PiSdkManager` in `panels/pi/`), and `DemoCliManager`. Contrast
-  with `AbstractAIPanelManager` (`panels/ai/AbstractAIPanelManager.ts`) and `BaseAIPanelHandler`
-  (`main/src/ipc/baseAIPanelHandler.ts`), which ARE collapse candidates — Crystal-era
-  Claude+Codex UI scaffolding.
+  with `AbstractAIPanelManager` (`panels/ai/AbstractAIPanelManager.ts`), which IS a collapse
+  candidate — Crystal-era Claude+Codex UI scaffolding.
 - **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
   Claude substrate (IDEA-013), a sibling of the SDK `ClaudeCodeManager`. It drives a REAL
   interactive `claude` REPL over the inherited `AbstractCliManager` PTY machinery (no headless
@@ -522,9 +514,8 @@ at launch; `raw_events` / `workflow_runs` / step transitions carry no substrate-
 flipping back to `'sdk'` preserves all prior interactive-run history unchanged — no migration, no
 data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 
-- **`terminalSessionManager.ts` / `terminalPanelManager.ts` / `runCommandManager.ts`** —
-  These three services are the remaining live users of `@homebridge/node-pty-prebuilt-multiarch`
-  (terminal panel and script execution surfaces — unrelated to Claude).
+- **`terminalPanelManager.ts`** — The terminal panel's PTY host
+  (`@homebridge/node-pty-prebuilt-multiarch`).
 - **`simpleTaskQueue.ts`** — In-process concurrency queue (no Redis). Wraps `p-queue`.
   Used for session mutation serialization.
 - **`worktreeManager.ts`** — `git worktree add -b ...` lifecycle; collision-safe naming;
@@ -778,7 +769,7 @@ Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`init
 **Environment gating** (`telemetry/environment.ts`, `TelemetryEnvironment = 'local' | 'dev' | 'stable'`)
 resolves from `app.isPackaged` + the stamp in `buildInfo.json`. `scripts/inject-build-info.js`
 stamps **every** packaged build: `CYBOFLOW_BUILD_ENV` (`stable`/`dev`/`local`) wins when set
-(the release pipeline sets it: `release:mac` → `stable`, `release:mac:dev` → `dev`); otherwise
+(e.g. the Windows installer workflow sets it to the variant); otherwise
 the stamp follows the build **variant** (`build:mac:dev*` → `dev`, every other `build:mac*` →
 `stable`) — so a hand-built `.dmg` handed to a tester reports a filterable environment instead
 of hiding under `local` (pre-fix `build:mac` artifacts, e.g. 0.1.14, still report `local`).
@@ -790,8 +781,8 @@ telemetry. This `environment` is telemetry-only and **distinct from the `variant
 |---|---|---|---|
 | `pnpm dev` (unpackaged) | `local` | off | off |
 | explicit `CYBOFLOW_BUILD_ENV=local` `.dmg` (or pre-fix unstamped) | `local` | on (tagged `local`) | on |
-| any `build:mac*` `.dmg` / stable release (`release:mac`) | `stable` | on (tagged `stable`) | on |
-| `build:mac:dev*` `.dmg` / Cyboflow Dev release (`release:mac:dev`) | `dev` | on (tagged `dev`) | on |
+| any `build:mac*` `.dmg` (stable release) | `stable` | on (tagged `stable`) | on |
+| `build:mac:dev*` `.dmg` (Cyboflow Dev release) | `dev` | on (tagged `dev`) | on |
 
 Credentials come from env (`SENTRY_DSN`, `APTABASE_APP_KEY`, e.g. `.envrc.local`); a missing key
 disables that SDK. Opt-out lives in config (`telemetry.errorReportingEnabled` /
@@ -870,7 +861,8 @@ All procedures are consumed by their respective Zustand stores and React compone
 ### Renderer (`frontend/src/`)
 
 - **`components/panels/`** — Per-panel React components. Panel-type subdirs present today:
-  `ai/` (abstract base), `claude/`, `cli/`, `diff/`, `editor/`, `logPanel/`. The Crystal-era
+  `ai/` (shared chat-panel prop types in `AbstractAIPanel.tsx` + chat primitives in
+  `ai/components/`), `claude/`, `logPanel/`. The Crystal-era
   `codex/` panel has already been removed.
 - **Run center pane (tabbed surface)** — for an active run, `CyboflowRoot` mounts `RunCenterPane`
   (replacing the former WorkflowCanvas-over-RunBottomPane stack): a `CenterPaneTabStrip` over a
@@ -895,8 +887,9 @@ All procedures are consumed by their respective Zustand stores and React compone
 Both packages import from here via `../../../shared/types/...`. Changing types here is a
 cross-package concern.
 
-- **Crystal-baseline:** `models.ts`, `panels.ts`, `cliPanels.ts`, `aiPanelConfig.ts`.
+- **Inherited from Crystal:** `panels.ts`, `aiPanelConfig.ts`.
 - **Cyboflow-era:** `cyboflow.ts`, `workflows.ts`, `approval.ts`, `approvals.ts`,
+  `cliSpawn.ts` (the CLI-manager spawn contract: `CliSpawnOutcome`, `LaneSpawnEnv`),
   `mcpHealth.ts`, `stuckDetection.ts`, `stuckInspection.ts`, `claudeStream.ts`,
   `unifiedMessage.ts`, `substrate.ts`, `tasks.ts` (the 3-table entity model: `IdeaRow` /
   `EpicRow` / `TaskRow`, `TaskChangeAction`, board types), `reviews.ts` (`ReviewItem`,
@@ -907,14 +900,14 @@ cross-package concern.
 
 ## Frameworks & External Dependencies
 
-- **Electron 37.6.0** — Desktop shell. `electron-builder` for packaging/signing; `@electron/rebuild`
+- **Electron 44** — Desktop shell. `electron-builder` for packaging/signing; `@electron/rebuild`
   for native module rebuilds against Electron's Node ABI.
 - **React 19 + Vite 6** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
 - **Zustand 5** — Renderer state. One slice per domain; no Redux.
-- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. Data-dir resolution is per-kind
+- **better-sqlite3 13** — SQLite, synchronous, WAL mode (N-API prebuild). Data-dir resolution is per-kind
   (`getCyboflowDirectory()`, `main/src/utils/cyboflowDirectory.ts`) — see `docs/UPDATES.md` for
   the full table. The legacy `~/.crystal/` path has already been removed.
-- **@anthropic-ai/claude-agent-sdk 0.3.224** — In-process Claude Code invocation via `query()`
+- **@anthropic-ai/claude-agent-sdk 0.3.x** (exact pin in `package.json`) — In-process Claude Code invocation via `query()`
   and `PreToolUse` hooks for approval routing. This is the live path; no `claude` CLI binary
   is spawned.
 - **@openai/codex 0.153.3** — Direct dependency (both root and `main/package.json`) that
@@ -925,9 +918,9 @@ cross-package concern.
   (`node_modules/@openai/codex*/**` in `package.json` `build.asarUnpack`) so the packaged app can
   execute the bundled binary outside the archive.
 - **@homebridge/node-pty-prebuilt-multiarch 0.12.0** — PTY sessions. Pre-built binaries;
-  rebuilt for Electron ABI by `electron-builder install-app-deps` postinstall. Used today
-  only by `terminalSessionManager`, `terminalPanelManager`, and `runCommandManager` —
-  **not** by Claude.
+  rebuilt for Electron ABI by `electron-builder install-app-deps` postinstall. Used by the
+  terminal panel (`terminalPanelManager`), the run user-shells (`runShellManager`) and the
+  interactive CLI substrates (`AbstractCliManager` and its per-provider PTY managers).
 - **@modelcontextprotocol/sdk 1.29.0** — For the cyboflow MCP server (runs as a stdio
   subprocess; entry point asar-unpacked, see below).
 - **trpc-electron 0.1.2** — Typed `electron-trpc` bridge between the renderer client and
@@ -950,7 +943,7 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
 
 - **Phase 1 — inline migrations** inside `runMigrations()`: hand-written `ALTER TABLE` /
   `CREATE TABLE` blocks gated on `PRAGMA table_info` checks and on `user_preferences` marker
-  keys (e.g. `auto_commit_migrated`, `claude_panels_migrated`, `diff_panels_migrated`,
+  keys (e.g. `claude_panels_migrated`, `diff_panels_migrated`,
   `unified_panel_settings_migrated`, `folder_session_order_fix_applied`). These are the
   legacy Crystal-era migrations and run unconditionally on every boot (each block is
   idempotent via the marker check).
@@ -971,9 +964,10 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
   code does not match. Authoring rules: `docs/CODE-PATTERNS.md` → "SQLite migrations:
   idempotence is per STATEMENT".
 
-Central tables (Crystal baseline): `sessions`, `panels`, `execution_diffs`, `projects`.
+Core tables inherited from Crystal: `sessions`, `tool_panels`, `execution_diffs`, `projects`.
 Cyboflow-era run-substrate tables (migration `006_cyboflow_schema.sql`): `workflows`,
-`workflow_runs`, `raw_events`, `messages`, `approvals` — designed in system design §5.
+`workflow_runs`, `raw_events`, `approvals` — designed in system design §5. (006 also created a
+`messages` table that never had a writer; migration 148 dropped it.)
 
 #### Entity model — 3 tables + a single shared board (migration 015)
 
@@ -1249,9 +1243,7 @@ config writes while a rotation runs.
 #### Migration files
 
 Migrations are numbered `NNN_*.sql` files directly under `main/src/database/migrations/`,
-applied in numeric order by `runFileBasedMigrations()` (see "Phase 2" above). The `legacy/`
-subdirectory holds quarantined pre-fork Crystal migrations kept for reference only — the
-runner's non-recursive numeric scan never reads it and `copy:assets` never ships it. The directory
+applied in numeric order by `runFileBasedMigrations()` (see "Phase 2" above). The directory
 listing is the source of truth for which migrations exist — it is intentionally NOT enumerated
 here, since a hand-maintained file list rots the moment a new migration lands. A few are
 structurally load-bearing enough to be worth naming: `015_entity_model_rebuild.sql` (the 3-table
@@ -1476,7 +1468,7 @@ from which command last ran.
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.
 
-Packaging/releases: per-arch DMGs; `build:mac:universal` currently fails — see
+Packaging/releases: per-arch DMGs (no universal build) — see
 `docs/RELEASE-RUNBOOK.md`.
 
 ### asarUnpack contract
@@ -1493,10 +1485,9 @@ a `dlopen`ed addon — cannot live inside the ASAR archive and must be listed in
 - `node_modules/@openai/codex*/**` — the bundled per-platform `codex` CLI
   binaries (resolved through `app.asar.unpacked` by
   `panels/codex/codexExecutablePath.ts`).
-- `node_modules/@steipete/peekaboo-mcp/**` — the retired-in-place legacy
-  visual-verify capture backend's bundled Peekaboo CLI
-  (`main/src/services/visualVerify/peekabooExecutablePath.ts`), still
-  asar-unpacked for the `CYBOFLOW_VERIFY_LEGACY=1` rollback path.
+- `node_modules/@steipete/peekaboo-mcp/**` — the bundled Peekaboo CLI the
+  `native-screen` modality runs (`main/src/services/visualVerify/peekabooExecutablePath.ts`):
+  the grant probe (`peekabooGrantProbe.ts`) and the deployed driver both spawn it.
 - `main/dist/main/src/orchestrator/mcpServer/**/*.js` — `cyboflowMcpServer.js`,
   spawned as an external `node` subprocess (the per-session Cyboflow MCP
   server; the worked example below).

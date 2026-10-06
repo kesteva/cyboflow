@@ -138,7 +138,6 @@ describe('SessionSettings', () => {
     renderGroup();
 
     for (const title of [
-      'Cyboflow Attribution',
       'CLI Runtime',
       'Computed Run Cost',
       'Artifact Commit Location',

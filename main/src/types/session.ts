@@ -11,13 +11,11 @@ export interface Session {
   prompt: string;
   status: 'initializing' | 'ready' | 'running' | 'waiting' | 'stopped' | 'completed_unviewed' | 'error';
   statusMessage?: string;
-  pid?: number;
   createdAt: Date;
   lastActivity?: Date;
   output: string[];
   jsonMessages: unknown[];
   error?: string;
-  isRunning?: boolean;
   lastViewedAt?: string;
   permissionMode?: 'approve' | 'ignore';
   runStartedAt?: string;
@@ -34,12 +32,10 @@ export interface Session {
   inPlace?: boolean;
   displayOrder?: number;
   projectId?: number;
-  folderId?: string;
   isFavorite?: boolean;
   model?: string;
   toolType?: 'claude' | 'none';
   archived?: boolean;
-  gitStatus?: GitStatus;
   baseCommit?: string;
   baseBranch?: string;
   runId?: string | null;
@@ -217,13 +213,11 @@ export interface CreateSessionRequest {
    */
   designIdeaId?: string;
   projectId?: number;
-  folderId?: string;
   baseBranch?: string;
   toolType?: 'claude' | 'none';
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
-    ultrathink?: boolean;
     /** Per-launch opt-in for Anthropic fast mode (premium, Opus-only). Default off. */
     fastMode?: boolean;
     /**
@@ -243,77 +237,7 @@ export interface SessionUpdate {
   error?: string;
   run_started_at?: string | null;
   model?: string;
-  gitStatus?: GitStatus;
   skip_continue_next?: boolean;
-}
-
-import type { TextBlock, ToolUseBlock, ToolResultBlock } from '../../../shared/types/claudeStream';
-
-// Claude message content types
-/** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
-export type TextContent = TextBlock;
-
-/** @deprecated import { ToolUseBlock } from 'shared/types/claudeStream' directly. */
-export type ToolUseContent = ToolUseBlock;
-
-/** @deprecated import { ToolResultBlock } from 'shared/types/claudeStream' directly. */
-export type ToolResultContent = ToolResultBlock;
-
-export type MessageContent = TextContent | ToolUseContent | ToolResultContent;
-
-// Tool definition interface
-export interface ToolDefinition {
-  name: string;
-  description?: string;
-  input_schema?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-// MCP server definition interface  
-export interface McpServerDefinition {
-  name: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  [key: string]: unknown;
-}
-
-// JSON message structure from Claude
-export interface ClaudeJsonMessage {
-  id?: string;
-  type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result' | 'result' | 'thinking' | 'session';
-  role?: 'user' | 'assistant' | 'system';
-  content?: string | MessageContent[];
-  message?: { 
-    content?: string | MessageContent[];
-    [key: string]: unknown;
-  };
-  timestamp: string;
-  name?: string;
-  input?: Record<string, unknown>;
-  tool_use_id?: string;
-  parent_tool_use_id?: string;
-  session_id?: string;
-  text?: string;
-  subtype?: string;
-  cwd?: string;
-  model?: string;
-  tools?: ToolDefinition[];
-  mcp_servers?: McpServerDefinition[];
-  permissionMode?: string;
-  summary?: string;
-  error?: string;
-  details?: string;
-  raw_output?: string;
-  is_error?: boolean;
-  result?: string;
-  duration_ms?: number;
-  total_cost_usd?: number;
-  num_turns?: number;
-  cost_usd?: number;
-  thinking?: string;
-  data?: Record<string, unknown>;
-  [key: string]: unknown;
 }
 
 export interface SessionOutput {

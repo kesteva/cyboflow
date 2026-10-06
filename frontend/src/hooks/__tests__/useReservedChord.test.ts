@@ -55,9 +55,9 @@ describe('useReservedChord — relayed chords', () => {
 
   it('registers no listener while disabled', () => {
     const cb = vi.fn();
-    renderHook(() => useReservedChord('tokenTest', cb, { enabled: false }));
+    renderHook(() => useReservedChord('editWorkflow', cb, { enabled: false }));
 
-    act(() => publishReservedChord('tokenTest'));
+    act(() => publishReservedChord('editWorkflow'));
     expect(cb).not.toHaveBeenCalled();
   });
 

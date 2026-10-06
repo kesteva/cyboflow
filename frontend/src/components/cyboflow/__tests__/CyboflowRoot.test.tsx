@@ -217,10 +217,6 @@ vi.mock('../../../utils/api', () => ({
       getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: undefined }),
       // usePanelSurface resolves a selected quick session via API.sessions.get.
       get: vi.fn().mockResolvedValue({ success: true, data: undefined }),
-      // sessionStore.setActiveSession notifies the backend through this; the
-      // store swallows a rejection, so leaving it off only produced console
-      // noise rather than a failure.
-      setActiveSession: vi.fn().mockResolvedValue({ success: true }),
       createQuick: vi.fn().mockResolvedValue({
         success: true,
         data: { jobId: 'job-1', sessionId: 'sess-qs-1', worktreePath: '/tmp/qs' },

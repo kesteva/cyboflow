@@ -5426,8 +5426,8 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
 //
 // FIRE-AND-CONTINUE: enabled run → enqueue a verification_requests row + reply
 // { requestId }; disabled run → reply { skipped:true } (never an error). The
-// VerificationScheduler singleton is initialized with INJECTED fake backends /
-// judge so the test stays electron-free (the scheduler's standalone invariant).
+// VerificationScheduler singleton is initialized over the in-memory DB only, so
+// the test stays electron-free (the scheduler's standalone invariant).
 // ---------------------------------------------------------------------------
 
 describe('McpQueryHandler — mcp-request-verification', () => {
@@ -5552,20 +5552,6 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     VerificationScheduler._resetForTesting();
     VerificationScheduler.initialize({
       db: dbAdapter(vdb),
-      backends: {},
-      judge: {
-        judge: vi.fn(
-          async (): Promise<VerdictV1> => ({
-            status: 'pass',
-            confidence: 0.95,
-            issues: [],
-            feedback: 'ok',
-            judgedFileNames: [],
-            baselineUsed: false,
-            model: 'fake',
-          }),
-        ),
-      },
       artifactsDirResolver: () => '/tmp/artifacts',
       ...(runbookStore ? { runbookStore } : {}),
     });
@@ -5680,7 +5666,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v1', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -5726,7 +5712,9 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(row?.run_id).toBe('run-v1');
     expect(row?.status).toBe('queued');
     expect(row?.verify_type).toBe('static-render-snapshot');
-    expect(JSON.parse(row!.chain_json)).toEqual(['capturePage']);
+    // A flow run's request carries no engine chain of its own — dispatch keys on
+    // the run stamp.
+    expect(JSON.parse(row!.chain_json)).toEqual([]);
     expect(JSON.parse(row!.deliverable_json)).toEqual({
       intent: 'the toggle renders, default off',
       url: 'http://localhost:5173',
@@ -5737,7 +5725,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vtr', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -5766,13 +5754,11 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     });
   });
 
-  it('typeOverride NARROWS the chain to the override-type ∩ the run stamped chain', async () => {
-    // Run resolved interactive-web (chain playwright,peekaboo) but an override to
-    // static-render must intersect down to only the stamped backends that overlap.
+  it('typeOverride sets the request type; the request chain stays empty (the run stamp is the engine)', async () => {
     seedVerifyRun(vdb, 'run-v2', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright', 'peekaboo'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -5794,9 +5780,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const row = vdb
       .prepare('SELECT chain_json FROM verification_requests WHERE id = ?')
       .get(data.requestId) as { chain_json: string };
-    // static-render chain is [capturePage,playwright,peekaboo]; ∩ stamped
-    // [playwright,peekaboo] = [playwright,peekaboo] (capturePage dropped — not host-available).
-    expect(JSON.parse(row.chain_json)).toEqual(['playwright', 'peekaboo']);
+    expect(JSON.parse(row.chain_json)).toEqual([]);
   });
 
   it('disabled run → replies { skipped:true } and enqueues nothing (never an error)', async () => {
@@ -5835,7 +5819,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v4', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       status: 'completed',
     });
 
@@ -5869,7 +5853,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v5a', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -5898,7 +5882,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v5b', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -5925,7 +5909,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v5c', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const task = {
@@ -5973,7 +5957,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v5d', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const task = {
@@ -6010,7 +5994,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-v5e', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const task = { version: 1, summary: 'Check the page renders', behaviors: [] };
@@ -6048,7 +6032,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vprog', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
     vdb.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-vprog');
 
@@ -6096,7 +6080,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vorch', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
     vdb.prepare("UPDATE workflow_runs SET execution_model = 'orchestrated' WHERE id = ?").run('run-vorch');
 
@@ -6127,7 +6111,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vsetupprog', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
     vdb.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-vsetupprog');
@@ -6158,7 +6142,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vguard', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -6193,7 +6177,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vguard-ok', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -6234,7 +6218,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vproof', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
       // A real repo so this test also pins down round-3 finding 2's worst case:
       // the setup flow's own PROOF run used to run the dirty live-worktree
@@ -6289,7 +6273,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vproof-wrongflow', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       // workflowId omitted ⇒ defaults to NON_SETUP_WORKFLOW_ID ('sprint').
     });
     seedRunbookDraft(vdb, 'hash-abc');
@@ -6325,7 +6309,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vproof-nopin', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
 
@@ -6358,7 +6342,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vproof-badhash', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
     // Deliberately NOT seeding a draft for this hash — 'hash-nonexistent' never
@@ -6395,7 +6379,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vhalfpin', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
     seedRunbookDraft(vdb, 'hash-abc');
@@ -6499,7 +6483,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vplain', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -6604,7 +6588,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vbogus', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       worktreePath: gitRepo,
     });
     const handler = new McpQueryHandler(dbAdapter(vdb), undefined, { verifyRunbookStore: store });
@@ -6644,7 +6628,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vbogus-nostore', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       worktreePath: gitRepo,
     });
 
@@ -6680,7 +6664,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vsnap', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       worktreePath: gitRepo,
     });
 
@@ -6706,7 +6690,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-vsnap-null', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -6756,7 +6740,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   }
 
   it('await → replies with the settled status, failure class, feedback and error message', async () => {
-    seedVerifyRun(vdb, 'run-await', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
+    seedVerifyRun(vdb, 'run-await', { enabled: true, type: 'interactive-web-behavior', chain: ['agent'] });
     insertTerminalRequest('vr_await_ok', 'run-await', {
       status: 'failed',
       verdictJson: JSON.stringify({ feedback: 'the serve command never came up' }),
@@ -6786,8 +6770,8 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   });
 
   it("await on ANOTHER run's request → not_your_request (run-bound like every other tool)", async () => {
-    seedVerifyRun(vdb, 'run-await-a', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
-    seedVerifyRun(vdb, 'run-await-b', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
+    seedVerifyRun(vdb, 'run-await-a', { enabled: true, type: 'interactive-web-behavior', chain: ['agent'] });
+    seedVerifyRun(vdb, 'run-await-b', { enabled: true, type: 'interactive-web-behavior', chain: ['agent'] });
     insertTerminalRequest('vr_await_other', 'run-await-b');
 
     const { socket, writes } = makeSocketDouble();
@@ -6810,7 +6794,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-await-missing', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
     });
 
     const { socket, writes } = makeSocketDouble();
@@ -6833,7 +6817,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-await-slow', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
     });
     insertTerminalRequest('vr_await_slow', 'run-await-slow', { status: 'running' });
 
@@ -6863,7 +6847,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-await-done', {
       enabled: true,
       type: 'interactive-web-behavior',
-      chain: ['playwright'],
+      chain: ['agent'],
       status: 'completed',
     });
     insertTerminalRequest('vr_await_done', 'run-await-done');
@@ -6927,9 +6911,8 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const row = vdb
       .prepare('SELECT chain_json, verify_type FROM verification_requests WHERE id = ?')
       .get(data.requestId) as { chain_json: string; verify_type: string };
-    // Written VERBATIM, not intersected against FALLBACK_CHAINS — the
-    // intersection would erase the 'agent' selector (it is not a
-    // VisualBackendId) and misroute the row to the legacy waterfall.
+    // Written VERBATIM — the request's own chain is the quick run's engine
+    // selector (its run stamp cannot carry a call-time posture).
     expect(row.chain_json).toBe('["agent"]');
     expect(row.verify_type).toBe('static-render-snapshot');
   });
@@ -6972,11 +6955,9 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   });
 
   it('REGRESSION — a non-quick run still reads its FROZEN stamp (chain_json "[]" under the default agent engine), even when getVisualVerifyConfig is wired', async () => {
-    // Mirrors what createRun actually stamps for an ordinary flow run under the
-    // default agent engine: verify_chain = ['agent']. The pre-existing
-    // intersection (FALLBACK_CHAINS[type] ∩ the stamp narrowed to
-    // VisualBackendId[]) always empties this out — 'agent' narrows away — so
-    // the persisted chain_json is '[]', byte-identical to before b5f25edb.
+    // Mirrors what createRun actually stamps for an ordinary flow run:
+    // verify_chain = ['agent']. A flow run's request writes chain_json '[]' —
+    // its engine is the run stamp.
     // `quickHandler` (not `vHandler`) is used deliberately: it carries
     // getVisualVerifyConfig, the realistic post-change production wiring — the
     // point of this test is that a NON-quick run ignores that dep entirely
@@ -7017,7 +6998,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     seedVerifyRun(vdb, 'run-quick-nodep', {
       enabled: true,
       type: 'static-render-snapshot',
-      chain: ['capturePage'],
+      chain: ['agent'],
       workflowId: QUICK_WORKFLOW_ID,
     });
 
@@ -7044,9 +7025,9 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const row = vdb
       .prepare('SELECT chain_json FROM verification_requests WHERE id = ?')
       .get(data.requestId) as { chain_json: string };
-    // Intersected off the frozen stamp exactly as a pre-b5f25edb quick run
-    // would be — NOT the verbatim ['agent'] engine selector.
-    expect(JSON.parse(row.chain_json)).toEqual(['capturePage']);
+    // The frozen-stamp path writes the flow-run request chain ('[]'), NOT the
+    // verbatim ['agent'] engine selector of the late-binding branch.
+    expect(JSON.parse(row.chain_json)).toEqual([]);
   });
 
   it('the enqueue ack carries snapshotSha and dirtyWorktree, and dirtyWorktree is true for a quick-session worktree with uncommitted changes', async () => {

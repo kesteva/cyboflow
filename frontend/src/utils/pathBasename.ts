@@ -8,8 +8,7 @@
  * as a separator truncates the name a user sees. `windows` defaults to the
  * running platform and is a parameter so both dialects are testable anywhere.
  *
- * These are DISPLAY helpers: they never normalize the surviving prefix, so a
- * parent dir can go straight back to main.
+ * These are DISPLAY helpers: they never normalize the surviving prefix.
  */
 import { isWindowsPlatform } from './platform';
 
@@ -32,18 +31,7 @@ export function pathBasename(p: string, windows: boolean = isWindowsPlatform()):
 }
 
 /**
- * The parent directory, its own separators untouched. `'a/b/'` is 'a'. Returns
- * '' for a root-level or empty path — the sentinel FileEditor.loadFiles wants.
- */
-export function parentPath(p: string, windows: boolean = isWindowsPlatform()): string {
-  const trimmed = p.replace(trailingSeparators(windows), '');
-  const idx = lastSeparatorIndex(trimmed, windows);
-  return idx === -1 ? '' : trimmed.slice(0, idx);
-}
-
-/**
- * The directory prefix a file label shows, trailing separator included —
- * unlike {@link parentPath}, which drops it.
+ * The directory prefix a file label shows, trailing separator included.
  */
 export function pathDirPrefix(p: string, windows: boolean = isWindowsPlatform()): string {
   const idx = lastSeparatorIndex(p, windows);

@@ -228,13 +228,6 @@ export class LogsManager {
         data: { content, type },
         timestamp: new Date().toISOString()
       });
-      
-      // Also send logs-specific output event for the panel
-      mainWindow.webContents.send('logs:output', {
-        panelId,
-        content,
-        type
-      });
     }
     
     // Update panel state
@@ -311,12 +304,6 @@ export class LogsManager {
         data: { exitCode: code },
         timestamp: new Date().toISOString()
       });
-
-      // Also send specific event for the panel
-      mainWindow.webContents.send('process:ended', {
-        panelId,
-        exitCode: code
-      });
     }
 
     // Add final log entry
@@ -337,18 +324,6 @@ export class LogsManager {
     
     const state = logsPanel.state.customState as LogsPanelState;
     return state?.isRunning || false;
-  }
-  
-  /**
-   * Get the running process for a session's logs panel
-   */
-  async getRunningProcess(sessionId: string): Promise<ChildProcess | undefined> {
-    const panels = await panelManager.getPanelsForSession(sessionId);
-    const logsPanel = panels.find((p: ToolPanel) => p.type === 'logs');
-    
-    if (!logsPanel) return undefined;
-    
-    return this.activeProcesses.get(logsPanel.id);
   }
   
   /**

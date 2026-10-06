@@ -65,8 +65,8 @@ export function RunDiffTabPanel({
    */
   comparisonRef?: string | null;
   /**
-   * Forwarded to DiffViewer — click a file header to open it (vs. toggle). The
-   * grouped arm additionally passes the clicked row's group scope.
+   * Click a file header to open it (vs. toggle). The grouped arm additionally
+   * passes the clicked row's group scope.
    */
   onOpenFile?: (filePath: string, scope?: DiffGroupScope) => void;
   /**

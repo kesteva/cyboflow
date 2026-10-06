@@ -1,4 +1,3 @@
-import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { Logger } from '../utils/logger';
@@ -8,7 +7,6 @@ import type { WorktreeManager } from './worktreeManager';
 import type { GitDiffManager } from './gitDiffManager';
 import { GitStatusLogger } from './gitStatusLogger';
 import { perfBump } from './perfTracer';
-import { GitFileWatcher } from './gitFileWatcher';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats, GitOperationalError } from './gitPlumbingCommands';
 import { runGitAsync } from '../utils/runGit';
 
@@ -19,42 +17,13 @@ interface GitStatusCache {
   };
 }
 
-/**
- * @cyboflow-hidden — the per-session git-status badge (SessionListItem →
- * GitStatusIndicator: ahead/behind + dirty/untracked dots) was the ONLY consumer
- * of this manager's output. It was dropped when the sidebar went run-centric
- * (TASK-687 "remodel sidebar to show project > workflow runs"), which deleted
- * every <SessionListItem> render; the component is now orphaned and nothing in
- * the live UI reads session.gitStatus. Until the badge returns (planned alongside
- * upcoming diff-view work), leave this flag false so we don't spawn an FSEvents
- * file watcher + periodic git subprocesses per active session to feed an unmounted
- * UI. Flip to true to revive the entire pipeline (watcher + auto-refresh) unchanged
- * — no other code needs to move. The manual/on-demand paths (getGitStatus IPC,
- * project-refresh button, post-rebase updateProjectGitStatusAfterMainUpdate) stay
- * live regardless; only the automatic hammering is gated.
- *
- * The right-rail Diff tab's liveness does NOT go through here: it uses
- * WorktreeChangeNotifier (services/worktreeChangeNotifier.ts), which watches
- * ONE worktree per open Diff tab via the `sessionGit.onWorktreeChanged`
- * subscription and stops when the tab closes — not every active session.
- */
-const GIT_STATUS_BADGE_ENABLED = false;
-
-
-export class GitStatusManager extends EventEmitter {
+export class GitStatusManager {
   private cache: GitStatusCache = {};
-  // Smart visibility-aware polling for active sessions only
   private readonly CACHE_TTL_MS = 5000; // 5 seconds cache
   private refreshDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
   private readonly DEBOUNCE_MS = 2000; // 2 seconds debounce to batch rapid changes
   private gitLogger: GitStatusLogger;
-  private fileWatcher: GitFileWatcher;
-  
-  // Throttling for UI events
-  private eventThrottleTimer: NodeJS.Timeout | null = null;
-  private pendingEvents: Map<string, { type: 'loading' | 'updated', data?: GitStatus }> = new Map();
-  private readonly EVENT_THROTTLE_MS = 100; // Throttle UI events to prevent flooding
-  
+
   // Concurrent operation limiting
   private activeOperations = 0;
   private readonly MAX_CONCURRENT_OPERATIONS = 3; // Reduced to limit CPU usage
@@ -80,150 +49,29 @@ export class GitStatusManager extends EventEmitter {
   private isInitialLoadInProgress = false;
   private initialLoadQueue: string[] = [];
   private readonly INITIAL_LOAD_DELAY_MS = 200; // Increased to 200ms for better staggering
-  
-  // Track active session and window visibility for optimized refreshes
-  private activeSessionId: string | null = null;
-  private isWindowVisible = true;
 
   constructor(
     private sessionManager: SessionManager,
     private worktreeManager: WorktreeManager,
     private gitDiffManager: GitDiffManager,
-    private logger?: Logger,
-    // @cyboflow-hidden — defaults to the disabled module flag so production runs
-    // with the automatic watcher/polling off (see GIT_STATUS_BADGE_ENABLED).
-    // Overridable so tests can exercise the real auto-refresh entry points.
-    private readonly badgeEnabled: boolean = GIT_STATUS_BADGE_ENABLED
+    private logger?: Logger
   ) {
-    super();
-    // Increase max listeners to prevent warnings when many components listen to git status events
-    // This is expected since each SessionListItem listens for git status updates
-    this.setMaxListeners(100);
     this.gitLogger = new GitStatusLogger(logger);
-    
-    // Initialize file watcher for smart refresh detection
-    this.fileWatcher = new GitFileWatcher(logger);
-    this.fileWatcher.on('needs-refresh', (sessionId: string) => {
-      // File watcher detected changes, refresh git status
-      this.logger?.info(`[GitStatus] File watcher triggered refresh for session ${sessionId}`);
-      // NOT wrapped in executeWithLimit — see the comment on fetchGitStatusCoalesced
-      // for why bounding belongs at the git-spawn level, not the debounced-refresh level.
-      this.refreshSessionGitStatus(sessionId, false).catch(error => {
-        this.logger?.error(`[GitStatus] Failed to refresh after file change for session ${sessionId}:`, error);
-      });
-    });
-  }
-
-
-  /**
-   * Set the currently active session for smart polling
-   */
-  setActiveSession(sessionId: string | null): void {
-    const previousActive = this.activeSessionId;
-    this.activeSessionId = sessionId;
-
-    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED).
-    // Still track activeSessionId above so on-demand callers behave, but skip
-    // starting the file watcher / kicking the auto-refresh.
-    if (!this.badgeEnabled) return;
-
-    if (previousActive !== sessionId) {
-      console.log(`[GitStatus] Active session changed from ${previousActive} to ${sessionId}`);
-      
-      // Start watching the active session's files if we have one
-      if (sessionId) {
-        this.startWatchingSession(sessionId);
-        
-        // If window is visible, also refresh immediately
-        // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
-        if (this.isWindowVisible) {
-          this.refreshSessionGitStatus(sessionId, false).catch(error => {
-            console.warn(`[GitStatus] Failed to refresh active session ${sessionId}:`, error);
-          });
-        }
-      }
-      
-      // Stop watching the previous active session if it exists
-      if (previousActive) {
-        this.stopWatchingSession(previousActive);
-      }
-    }
-  }
-  
-  /**
-   * Start file watching for a session
-   */
-  private async startWatchingSession(sessionId: string): Promise<void> {
-    try {
-      const session = await this.sessionManager.getSession(sessionId);
-      if (session?.worktreePath) {
-        this.fileWatcher.startWatching(sessionId, session.worktreePath);
-        this.logger?.info(`[GitStatus] Started file watching for session ${sessionId}`);
-      }
-    } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to start file watching for session ${sessionId}:`, error as Error);
-    }
-  }
-  
-  /**
-   * Stop file watching for a session
-   */
-  private stopWatchingSession(sessionId: string): void {
-    this.fileWatcher.stopWatching(sessionId);
-    this.logger?.info(`[GitStatus] Stopped file watching for session ${sessionId}`);
-  }
-  
-  /**
-   * Start git status manager (initializes file watching)
-   */
-  startPolling(): void {
-    // File watching is started per-session in setActiveSession
-    // This method is kept for backward compatibility
-    this.gitLogger.logPollStart(1);
   }
 
   /**
    * Stop git status manager
    */
   stopPolling(): void {
-    // Stop all file watchers
-    this.fileWatcher.stopAll();
-    
     this.gitLogger.logSummary();
 
     // Clear any pending debounce timers
     this.refreshDebounceTimers.forEach(timer => clearTimeout(timer));
     this.refreshDebounceTimers.clear();
 
-    // Clear event throttle timer
-    if (this.eventThrottleTimer) {
-      clearTimeout(this.eventThrottleTimer);
-      this.eventThrottleTimer = null;
-    }
-    this.pendingEvents.clear();
-    
     // Cancel all active operations
     this.abortControllers.forEach(controller => controller.abort());
     this.abortControllers.clear();
-  }
-
-  // Called when window focus changes
-  handleVisibilityChange(isHidden: boolean): void {
-    this.isWindowVisible = !isHidden;
-    this.gitLogger.logFocusChange(!isHidden);
-
-    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED);
-    // no active-session auto-refresh on focus.
-    if (!this.badgeEnabled) return;
-
-    // If window becomes visible and we have an active session, refresh it
-    // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
-    if (!isHidden && this.activeSessionId) {
-      const sessionId = this.activeSessionId;
-      this.refreshSessionGitStatus(sessionId, false).catch(error => {
-        console.warn(`[GitStatus] Failed to refresh active session on focus:`, error);
-      });
-    }
   }
 
   /**
@@ -251,7 +99,6 @@ export class GitStatusManager extends EventEmitter {
     // Check cache first
     const cached = this.cache[sessionId];
     if (cached && Date.now() - cached.lastChecked < this.CACHE_TTL_MS) {
-      this.gitLogger.logSessionFetch(sessionId, true);
       return cached.status;
     }
 
@@ -317,9 +164,7 @@ export class GitStatusManager extends EventEmitter {
                 updatedStatus.ahead = ahead;
                 updatedStatus.behind = behind;
 
-                // Update cache and emit
                 this.updateCache(session.id, updatedStatus, generation);
-                this.emitThrottled(session.id, 'updated', updatedStatus);
               }
             } catch {
               // Fall back to full refresh on error
@@ -416,9 +261,7 @@ export class GitStatusManager extends EventEmitter {
         updatedStatus.filesChanged = 0;
       }
 
-      // Update cache and emit
       this.updateCache(sessionId, updatedStatus, generation);
-      this.emitThrottled(sessionId, 'updated', updatedStatus);
 
       this.logger?.info(`[GitStatus] Updated status after ${rebaseType} rebase for session ${sessionId}`);
     } catch (error) {
@@ -435,10 +278,7 @@ export class GitStatusManager extends EventEmitter {
    */
   async refreshSessionGitStatus(sessionId: string, isUserInitiated = false): Promise<GitStatus | null> {
     perfBump('git.status.refresh');
-    // Immediately emit loading state so user sees refresh is happening
-    // This provides immediate visual feedback
-    this.emitThrottled(sessionId, 'loading');
-    
+
     // Clear any existing debounce timer for this session
     const existingTimer = this.refreshDebounceTimers.get(sessionId);
     if (existingTimer) {
@@ -460,12 +300,7 @@ export class GitStatusManager extends EventEmitter {
           const hasChanged = await this.hasGitStatusChanged(sessionId, session.worktreePath);
           if (!hasChanged) {
             this.logger?.info(`[GitStatus] Quick check: no changes for session ${sessionId}, skipping refresh`);
-            // Still emit updated to clear loading state even if no changes
-            const cached = this.cache[sessionId]?.status || null;
-            if (cached) {
-              this.emitThrottled(sessionId, 'updated', cached);
-            }
-            resolve(cached);
+            resolve(this.cache[sessionId]?.status || null);
             return;
           }
         }
@@ -473,7 +308,6 @@ export class GitStatusManager extends EventEmitter {
         const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
         if (status) {
           this.updateCache(sessionId, status, generation);
-          this.emitThrottled(sessionId, 'updated', status);
         }
         resolve(status);
       }, this.DEBOUNCE_MS);
@@ -496,8 +330,6 @@ export class GitStatusManager extends EventEmitter {
     // Add to initial load queue if not already there
     if (!this.initialLoadQueue.includes(sessionId)) {
       this.initialLoadQueue.push(sessionId);
-      // Show loading immediately for this session
-      this.emitThrottled(sessionId, 'loading');
     }
 
     // Start processing queue if not already running
@@ -505,7 +337,7 @@ export class GitStatusManager extends EventEmitter {
       this.processInitialLoadQueue();
     }
 
-    // Return cached status immediately (UI will update when fresh data arrives via events)
+    // Return cached status immediately; the queued fetch refreshes the cache
     return cached?.status || null;
   }
 
@@ -535,7 +367,6 @@ export class GitStatusManager extends EventEmitter {
             const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
             if (status) {
               this.updateCache(sessionId, status, generation);
-              this.emitThrottled(sessionId, 'updated', status);
             }
           } catch (error) {
             this.logger?.error(`[GitStatus] Error fetching status for session ${sessionId}:`, error as Error);
@@ -565,11 +396,6 @@ export class GitStatusManager extends EventEmitter {
       );
 
       this.gitLogger.logPollStart(activeSessions.length);
-      
-      // Immediately show loading for all sessions so user sees refresh happening
-      activeSessions.forEach(session => {
-        this.emitThrottled(session.id, 'loading');
-      });
 
       // Process sessions with concurrent limiting — bounded by fetchGitStatusCoalesced's
       // internal executeWithLimit, NOT wrapped here (see its comment for why: this was a
@@ -607,10 +433,7 @@ export class GitStatusManager extends EventEmitter {
       controller.abort();
       this.abortControllers.delete(sessionId);
     }
-    
-    // Clear from loading state by emitting loading false
-    this.setGitStatusLoading(sessionId, false);
-    
+
     // Clear any pending debounce timer
     const timer = this.refreshDebounceTimers.get(sessionId);
     if (timer) {
@@ -619,16 +442,6 @@ export class GitStatusManager extends EventEmitter {
     }
   }
   
-  /**
-   * Helper to set git status loading state
-   */
-  private setGitStatusLoading(sessionId: string, loading: boolean): void {
-    if (!loading) {
-      // Emit that loading has stopped
-      this.emit('git-status-loading', sessionId);
-    }
-  }
-
   /**
    * Cancel git status operations for multiple sessions
    */
@@ -758,8 +571,6 @@ export class GitStatusManager extends EventEmitter {
         this.abortControllers.delete(sessionId);
         return null;
       }
-      
-      this.gitLogger.logSessionFetch(sessionId, false);
 
       const project = this.sessionManager.getProjectForSession(sessionId);
       if (!project?.path) {
@@ -901,7 +712,6 @@ export class GitStatusManager extends EventEmitter {
 
       // Check if this was a cancellation
       if (error instanceof Error && error.name === 'AbortError') {
-        this.gitLogger.logSessionFetch(sessionId, true); // cancelled
         return null;
       }
 
@@ -941,18 +751,10 @@ export class GitStatusManager extends EventEmitter {
       }
     }
 
-    const previousStatus = this.cache[sessionId]?.status;
-    const hasChanged = !previousStatus || JSON.stringify(previousStatus) !== JSON.stringify(status);
-
     this.cache[sessionId] = {
       status,
       lastChecked: Date.now()
     };
-
-    // Only emit event if status actually changed
-    if (hasChanged) {
-      this.emitThrottled(sessionId, 'updated', status);
-    }
   }
 
   /**
@@ -971,56 +773,6 @@ export class GitStatusManager extends EventEmitter {
     this.cache = {};
     this.sessionGenerations.clear();
     this.inFlightFetches.clear();
-  }
-
-  /**
-   * Emit a throttled event to prevent UI flooding
-   * @param sessionId The session ID
-   * @param type The event type (loading or updated)
-   * @param data Optional data for updated events
-   */
-  private emitThrottled(sessionId: string, type: 'loading' | 'updated', data?: GitStatus): void {
-    // Store the pending event
-    this.pendingEvents.set(sessionId, { type, data });
-    
-    // If we don't have a throttle timer, start one
-    if (!this.eventThrottleTimer) {
-      this.eventThrottleTimer = setTimeout(() => {
-        // Batch emit all pending events
-        const eventsToEmit = new Map(this.pendingEvents);
-        this.pendingEvents.clear();
-        this.eventThrottleTimer = null;
-        
-        // Group events by type for batch emission
-        const loadingEvents: string[] = [];
-        const updatedEvents: Array<{ sessionId: string; status: GitStatus }> = [];
-        
-        eventsToEmit.forEach((event, id) => {
-          if (event.type === 'loading') {
-            loadingEvents.push(id);
-          } else if (event.type === 'updated' && event.data) {
-            updatedEvents.push({ sessionId: id, status: event.data });
-          }
-        });
-        
-        // Emit batch events
-        if (loadingEvents.length > 0) {
-          this.emit('git-status-loading-batch', loadingEvents);
-        }
-        if (updatedEvents.length > 0) {
-          this.emit('git-status-updated-batch', updatedEvents);
-        }
-        
-        // Also emit individual events for backward compatibility
-        eventsToEmit.forEach((event, id) => {
-          if (event.type === 'loading') {
-            this.emit('git-status-loading', id);
-          } else if (event.type === 'updated' && event.data) {
-            this.emit('git-status-updated', id, event.data);
-          }
-        });
-      }, this.EVENT_THROTTLE_MS);
-    }
   }
 
   /**

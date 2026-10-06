@@ -1,14 +1,13 @@
 /**
  * Unit tests for the File Explorer handler.
  *
- * Run-keyed path (listRunFiles / readRunFile): seeds an in-memory workflow_runs
- * row whose worktree_path points at a real temp directory (created per-test under
- * os.tmpdir()), then exercises:
+ * Worktree-relative core (listFilesInWorktree / readFileInWorktree), against a
+ * real temp directory (created per-test under os.tmpdir()):
  *   - directory listing (dirs-first ordering, .git exclusion, sizes)
  *   - lazy subdirectory listing via a relative path
  *   - file reads (utf-8), empty files, binary detection, size cap
  *   - path-safety rejections (absolute, traversal, symlink escape)
- *   - run-resolution failures (unknown run, no worktree, missing worktree)
+ *   - a worktree that no longer exists on disk
  *
  * Session-keyed path (listSessionFiles / readSessionFile /
  * resolveSessionWorktreePath): seeds a minimal sessions row whose worktree_path
@@ -23,8 +22,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import {
-  listRunFiles,
-  readRunFile,
+  listFilesInWorktree,
+  readFileInWorktree,
   listSessionFiles,
   readSessionFile,
   resolveSessionWorktreePath,
@@ -33,18 +32,13 @@ import {
 } from '../runFileExplorer';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createDirSymlink, fileSymlinksNeedPrivilege } from '../../__test_fixtures__/symlink';
-import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
+import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 
-const RUN_ID = 'run-fe-001';
-
-describe('runFileExplorer', () => {
-  let db: Database.Database;
+describe('runFileExplorer (worktree core)', () => {
   let worktree: string;
 
   beforeEach(() => {
-    db = createTestDb();
     worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-fe-'));
-    seedRun(db, { id: RUN_ID, projectId: 1, worktreePath: worktree });
   });
 
   afterEach(() => {
@@ -52,7 +46,7 @@ describe('runFileExplorer', () => {
   });
 
   // -------------------------------------------------------------------------
-  // listRunFiles — root listing
+  // listFilesInWorktree — root listing
   // -------------------------------------------------------------------------
   it('lists the worktree root with directories first, then files, and excludes .git', async () => {
     fs.writeFileSync(path.join(worktree, 'README.md'), '# hello');
@@ -61,7 +55,7 @@ describe('runFileExplorer', () => {
     fs.mkdirSync(path.join(worktree, '.git'));
     fs.writeFileSync(path.join(worktree, '.git', 'HEAD'), 'ref: refs/heads/main');
 
-    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const entries = await listFilesInWorktree(worktree);
 
     // .git is excluded; dirs sort before files; files sort case-insensitively
     // (so 'app.ts' precedes 'README.md').
@@ -75,19 +69,19 @@ describe('runFileExplorer', () => {
   });
 
   it('returns [] for an empty worktree root', async () => {
-    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const entries = await listFilesInWorktree(worktree);
     expect(entries).toEqual([]);
   });
 
   // -------------------------------------------------------------------------
-  // listRunFiles — subdirectory listing via relative path
+  // listFilesInWorktree — subdirectory listing via relative path
   // -------------------------------------------------------------------------
   it('lists a subdirectory addressed by a relative path', async () => {
     fs.mkdirSync(path.join(worktree, 'src', 'nested'), { recursive: true });
     fs.writeFileSync(path.join(worktree, 'src', 'index.ts'), 'x');
     fs.writeFileSync(path.join(worktree, 'src', 'nested', 'deep.ts'), 'y');
 
-    const entries = await listRunFiles(dbAdapter(db), RUN_ID, 'src');
+    const entries = await listFilesInWorktree(worktree, 'src');
     expect(entries.map((e) => e.name)).toEqual(['nested', 'index.ts']);
     // Child paths are relative to the worktree root, POSIX-style.
     expect(entries.find((e) => e.name === 'index.ts')?.path).toBe('src/index.ts');
@@ -96,17 +90,17 @@ describe('runFileExplorer', () => {
 
   it('throws not-a-directory when the relative path is a file', async () => {
     fs.writeFileSync(path.join(worktree, 'file.txt'), 'data');
-    await expect(listRunFiles(dbAdapter(db), RUN_ID, 'file.txt')).rejects.toMatchObject({
+    await expect(listFilesInWorktree(worktree, 'file.txt')).rejects.toMatchObject({
       reason: 'not-a-directory',
     });
   });
 
   // -------------------------------------------------------------------------
-  // readRunFile
+  // readFileInWorktree
   // -------------------------------------------------------------------------
   it('reads a utf-8 file', async () => {
     fs.writeFileSync(path.join(worktree, 'note.md'), 'line1\nline2');
-    const result = await readRunFile(dbAdapter(db), RUN_ID, 'note.md');
+    const result = await readFileInWorktree(worktree, 'note.md');
     expect(result).toEqual({
       path: 'note.md',
       content: 'line1\nline2',
@@ -118,14 +112,14 @@ describe('runFileExplorer', () => {
   it('reads a nested file addressed by a relative path', async () => {
     fs.mkdirSync(path.join(worktree, 'a', 'b'), { recursive: true });
     fs.writeFileSync(path.join(worktree, 'a', 'b', 'c.txt'), 'deep');
-    const result = await readRunFile(dbAdapter(db), RUN_ID, 'a/b/c.txt');
+    const result = await readFileInWorktree(worktree, 'a/b/c.txt');
     expect(result.content).toBe('deep');
     expect(result.path).toBe('a/b/c.txt');
   });
 
   it('returns empty content for an empty file', async () => {
     fs.writeFileSync(path.join(worktree, 'empty.txt'), '');
-    const result = await readRunFile(dbAdapter(db), RUN_ID, 'empty.txt');
+    const result = await readFileInWorktree(worktree, 'empty.txt');
     expect(result.content).toBe('');
     expect(result.unviewableReason).toBeNull();
     expect(result.size).toBe(0);
@@ -133,7 +127,7 @@ describe('runFileExplorer', () => {
 
   it('flags a binary file (NUL byte) as unviewable without returning content', async () => {
     fs.writeFileSync(path.join(worktree, 'blob.bin'), Buffer.from([0x41, 0x00, 0x42]));
-    const result = await readRunFile(dbAdapter(db), RUN_ID, 'blob.bin');
+    const result = await readFileInWorktree(worktree, 'blob.bin');
     expect(result.content).toBeNull();
     expect(result.unviewableReason).toBe('binary');
     expect(result.size).toBe(3);
@@ -142,7 +136,7 @@ describe('runFileExplorer', () => {
   it('flags an oversized file as too-large without returning content', async () => {
     const big = Buffer.alloc(MAX_VIEWABLE_BYTES + 1, 0x61); // all 'a', no NUL
     fs.writeFileSync(path.join(worktree, 'big.txt'), big);
-    const result = await readRunFile(dbAdapter(db), RUN_ID, 'big.txt');
+    const result = await readFileInWorktree(worktree, 'big.txt');
     expect(result.content).toBeNull();
     expect(result.unviewableReason).toBe('too-large');
     expect(result.size).toBe(MAX_VIEWABLE_BYTES + 1);
@@ -150,13 +144,13 @@ describe('runFileExplorer', () => {
 
   it('throws not-a-file when reading a directory', async () => {
     fs.mkdirSync(path.join(worktree, 'adir'));
-    await expect(readRunFile(dbAdapter(db), RUN_ID, 'adir')).rejects.toMatchObject({
+    await expect(readFileInWorktree(worktree, 'adir')).rejects.toMatchObject({
       reason: 'not-a-file',
     });
   });
 
   it('throws not-found when reading a missing file', async () => {
-    await expect(readRunFile(dbAdapter(db), RUN_ID, 'nope.txt')).rejects.toMatchObject({
+    await expect(readFileInWorktree(worktree, 'nope.txt')).rejects.toMatchObject({
       reason: 'not-found',
     });
   });
@@ -165,16 +159,16 @@ describe('runFileExplorer', () => {
   // Path safety
   // -------------------------------------------------------------------------
   it('rejects an absolute path', async () => {
-    await expect(readRunFile(dbAdapter(db), RUN_ID, '/etc/passwd')).rejects.toMatchObject({
+    await expect(readFileInWorktree(worktree, '/etc/passwd')).rejects.toMatchObject({
       reason: 'invalid-path',
     });
   });
 
   it('rejects a traversal path that escapes the worktree', async () => {
-    await expect(listRunFiles(dbAdapter(db), RUN_ID, '../..')).rejects.toMatchObject({
+    await expect(listFilesInWorktree(worktree, '../..')).rejects.toMatchObject({
       reason: 'invalid-path',
     });
-    await expect(readRunFile(dbAdapter(db), RUN_ID, '../secret.txt')).rejects.toMatchObject({
+    await expect(readFileInWorktree(worktree, '../secret.txt')).rejects.toMatchObject({
       reason: 'invalid-path',
     });
   });
@@ -188,7 +182,7 @@ describe('runFileExplorer', () => {
     try {
       createDirSymlink(outsideDir, path.join(worktree, 'linkdir'));
       await expect(
-        readRunFile(dbAdapter(db), RUN_ID, path.join('linkdir', 'secret.txt')),
+        readFileInWorktree(worktree, path.join('linkdir', 'secret.txt')),
       ).rejects.toMatchObject({
         reason: 'invalid-path',
       });
@@ -210,7 +204,7 @@ describe('runFileExplorer', () => {
       return; // mkfifo unavailable on this platform — skip
     }
     // Must reject promptly via the stat/isFile guard, never block on readFile.
-    return expect(readRunFile(dbAdapter(db), RUN_ID, 'pipe')).rejects.toMatchObject({
+    return expect(readFileInWorktree(worktree, 'pipe')).rejects.toMatchObject({
       reason: 'not-a-file',
     });
   });
@@ -226,7 +220,7 @@ describe('runFileExplorer', () => {
     fs.writeFileSync(secret, 'top secret payload'); // 18 bytes — must NOT surface
     try {
       fs.symlinkSync(secret, path.join(worktree, 'leak'));
-      const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+      const entries = await listFilesInWorktree(worktree);
       const leak = entries.find((e) => e.name === 'leak');
       expect(leak).toBeDefined();
       // Reported as a non-traversable leaf with no size — target metadata hidden.
@@ -248,7 +242,7 @@ describe('runFileExplorer', () => {
     fs.symlinkSync(path.join(worktree, 'realfile.txt'), path.join(worktree, 'linkfile'));
     fs.symlinkSync(path.join(worktree, 'realdir'), path.join(worktree, 'linkdir'));
 
-    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const entries = await listFilesInWorktree(worktree);
     const linkfile = entries.find((e) => e.name === 'linkfile');
     const linkdir = entries.find((e) => e.name === 'linkdir');
     // In-worktree symlinks are safely followed: file size + dir classification.
@@ -263,7 +257,7 @@ describe('runFileExplorer', () => {
     // a link whose target does not resolve, which is the shape under test.
     createDirSymlink(path.join(worktree, 'does-not-exist'), path.join(worktree, 'dangling'));
     fs.writeFileSync(path.join(worktree, 'keep.txt'), 'x');
-    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const entries = await listFilesInWorktree(worktree);
     const dangling = entries.find((e) => e.name === 'dangling');
     expect(dangling).toMatchObject({ name: 'dangling', isDirectory: false });
     expect(dangling?.size).toBeUndefined();
@@ -278,14 +272,14 @@ describe('runFileExplorer', () => {
     fs.mkdirSync(path.join(worktree, 'sub'));
     fs.mkdirSync(path.join(worktree, 'sub', '.git')); // nested .git too
 
-    const root = await listRunFiles(dbAdapter(db), RUN_ID);
+    const root = await listFilesInWorktree(worktree);
     const rootNames = root.map((e) => e.name);
     expect(rootNames).not.toContain('.git');
     expect(rootNames).toContain('.gitignore'); // exact-match filter, not startsWith
     expect(rootNames).toContain('.github');
 
     // The exact-name filter applies at every level — a nested .git is also hidden.
-    const sub = await listRunFiles(dbAdapter(db), RUN_ID, 'sub');
+    const sub = await listFilesInWorktree(worktree, 'sub');
     expect(sub.map((e) => e.name)).not.toContain('.git');
   });
 
@@ -299,13 +293,12 @@ describe('runFileExplorer', () => {
     fs.mkdirSync(wt);
     fs.mkdirSync(sibling);
     fs.writeFileSync(path.join(sibling, 'secret.txt'), 'sibling secret');
-    seedRun(db, { id: 'run-prefix', projectId: 1, worktreePath: wt });
     try {
       // A DIRECTORY link (junction on win32) to the sibling; the read goes
       // through it, so realpath lands in base/wt-evil — the prefix-safety shape.
       createDirSymlink(sibling, path.join(wt, 'link'));
       await expect(
-        readRunFile(dbAdapter(db), 'run-prefix', path.join('link', 'secret.txt')),
+        readFileInWorktree(wt, path.join('link', 'secret.txt')),
       ).rejects.toMatchObject({
         reason: 'invalid-path',
       });
@@ -315,27 +308,11 @@ describe('runFileExplorer', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Run resolution failures
+  // Worktree resolution failures
   // -------------------------------------------------------------------------
-  it('throws run-not-found for an unknown run id', async () => {
-    await expect(listRunFiles(dbAdapter(db), 'no-such-run')).rejects.toBeInstanceOf(RunFileError);
-    await expect(listRunFiles(dbAdapter(db), 'no-such-run')).rejects.toMatchObject({
-      reason: 'run-not-found',
-    });
-  });
-
-  it('throws no-worktree when the run has no worktree_path', async () => {
-    seedRun(db, { id: 'run-nowt', projectId: 1, worktreePath: undefined });
-    // seedRun defaults worktree_path to '/tmp/test'; overwrite to NULL directly.
-    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run('run-nowt');
-    await expect(listRunFiles(dbAdapter(db), 'run-nowt')).rejects.toMatchObject({
-      reason: 'no-worktree',
-    });
-  });
-
-  it('throws worktree-missing when worktree_path no longer exists on disk', async () => {
-    seedRun(db, { id: 'run-gone', projectId: 1, worktreePath: '/nonexistent/cyboflow/worktree' });
-    await expect(listRunFiles(dbAdapter(db), 'run-gone')).rejects.toMatchObject({
+  it('throws worktree-missing when the worktree no longer exists on disk', async () => {
+    await expect(listFilesInWorktree('/nonexistent/cyboflow/worktree')).rejects.toBeInstanceOf(RunFileError);
+    await expect(listFilesInWorktree('/nonexistent/cyboflow/worktree')).rejects.toMatchObject({
       reason: 'worktree-missing',
     });
   });
@@ -345,8 +322,8 @@ describe('runFileExplorer', () => {
 // Session-keyed path (canonical) — the File Explorer tab binds to the SELECTED
 // session's worktree (sessions.worktree_path), independent of any active run.
 //
-// The session functions share the SAME worktree-relative core as the run-keyed
-// path (covered exhaustively above), so these tests focus on:
+// The session functions delegate to the SAME worktree-relative core
+// (covered exhaustively above), so these tests focus on:
 //   - the session→worktree resolution + delegation produce identical shapes;
 //   - resolveSessionWorktreePath throws session-not-found for an unknown id.
 // GATE_SCHEMA omits the `sessions` table, so layer a minimal one on top.
@@ -370,7 +347,7 @@ describe('runFileExplorer (session-keyed)', () => {
     fs.rmSync(worktree, { recursive: true, force: true });
   });
 
-  it('listSessionFiles returns the same shape as the run-keyed core (dirs-first, .git excluded)', async () => {
+  it('listSessionFiles returns the same shape as the core (dirs-first, .git excluded)', async () => {
     fs.writeFileSync(path.join(worktree, 'README.md'), '# hello');
     fs.writeFileSync(path.join(worktree, 'app.ts'), 'export const a = 1;');
     fs.mkdirSync(path.join(worktree, 'src'));
@@ -394,7 +371,7 @@ describe('runFileExplorer (session-keyed)', () => {
     expect(entries.find((e) => e.name === 'index.ts')?.path).toBe('src/index.ts');
   });
 
-  it('readSessionFile returns the same shape as the run-keyed core', async () => {
+  it('readSessionFile returns the same shape as the core', async () => {
     fs.writeFileSync(path.join(worktree, 'note.md'), 'line1\nline2');
     const result = await readSessionFile(dbAdapter(db), SESSION_ID, 'note.md');
     expect(result).toEqual({

@@ -5,14 +5,13 @@
  * descendantPids / listDescendants) is injected, so no real `ps`/`kill`/`exec`
  * ever runs. Pins the three POSIX group-resolution shapes and the win32
  * taskkill ladder by their exact
- * command strings and signal order — the contract each call site's ladder was
- * moved under byte-identically:
- *  - 'lookup' (default): terminalSessionManager's shape — SIGTERM, then the
+ * command strings and signal order:
+ *  - 'lookup' (default): SIGTERM, then the
  *    `ps -o pgid=` lookup, group kills by the resolved pgid, dual-probe poll.
- *  - 'root': AbstractCliManager / sessionManager — NO lookup, the root pid IS
- *    the group id, fixed (non-probed) grace.
- *  - 'enumerate': runCommandManager — pgid resolved BEFORE any signal, group
- *    members the tree walk missed swept into the per-descendant kills.
+ *  - 'root' (AbstractCliManager): NO lookup, the root pid IS the group id,
+ *    fixed (non-probed) grace.
+ *  - 'enumerate': pgid resolved BEFORE any signal, group members the tree walk
+ *    missed swept into the per-descendant kills.
  */
 import { execSync, spawn } from 'node:child_process';
 import { describe, it, expect, vi } from 'vitest';
@@ -21,7 +20,6 @@ import {
   collectDescendantPidsAsync,
   describeProcesses,
   firstCommandToken,
-  forceKillPids,
   killTree,
   killTreeImmediate,
   signalTree,
@@ -67,7 +65,7 @@ describe('killTree POSIX — group resolution shapes', () => {
       pollIntervalMs: 5,
     });
 
-    // Lookup ran (terminalSessionManager's echo-suffix shape) and, returning
+    // Lookup ran (the echo-suffix shape) and, returning
     // nothing, the root pid stood in for the group id in both group kills.
     expect(execCommand).toHaveBeenCalledWith('ps -o pgid= -p 4242 2>/dev/null || echo ""');
     expect(execCommand).toHaveBeenCalledWith('kill -TERM -4242');
@@ -435,42 +433,6 @@ describe('killTree — the injected logger', () => {
     } finally {
       consoleWarn.mockRestore();
     }
-  });
-});
-
-describe('forceKillPids', () => {
-  it('issues one kill per pid, in the command form that platform uses', async () => {
-    const posix: string[] = [];
-    await forceKillPids([11, 22], {
-      platform: 'linux',
-      execCommand: (command) => {
-        posix.push(command);
-        return Promise.resolve({ stdout: '' });
-      },
-    });
-    expect(posix).toEqual(['kill -9 11', 'kill -9 22']);
-
-    const win: string[] = [];
-    await forceKillPids([11, 22], {
-      platform: 'win32',
-      execCommand: (command) => {
-        win.push(command);
-        return Promise.resolve({ stdout: '' });
-      },
-    });
-    expect(win).toEqual(['taskkill /PID 11 /F', 'taskkill /PID 22 /F']);
-  });
-
-  it('reports only the kills that did not throw, and never stops early', async () => {
-    const onKilled = vi.fn<(pid: number) => void>();
-    await forceKillPids([11, 22, 33], {
-      platform: 'linux',
-      execCommand: (command) =>
-        command.endsWith('22') ? Promise.reject(new Error('no such process')) : Promise.resolve({ stdout: '' }),
-      onKilled,
-    });
-
-    expect(onKilled.mock.calls.map(([pid]) => pid)).toEqual([11, 33]);
   });
 });
 

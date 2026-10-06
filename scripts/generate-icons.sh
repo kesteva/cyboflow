@@ -13,6 +13,7 @@
 #
 # Outputs:
 #   frontend/public/favicon-96x96.png    (96x96)
+#   frontend/public/favicon.ico          (16, 32, 48)
 #   frontend/public/apple-touch-icon.png (180x180)
 #   main/assets/icon.png                 (1024x1024)
 #   main/assets/icon.icns                (Apple iconset)
@@ -124,6 +125,12 @@ build_app_icons() {
 rasterize "$MARK_SVG" "$TMP_DIR/master.png"
 sips -z 96 96   "$TMP_DIR/master.png" --out "$ROOT/frontend/public/favicon-96x96.png"   >/dev/null
 sips -z 180 180 "$TMP_DIR/master.png" --out "$ROOT/frontend/public/apple-touch-icon.png" >/dev/null
+favicon_pngs=()
+for size in 16 32 48; do
+  sips -z "$size" "$size" "$TMP_DIR/master.png" --out "$TMP_DIR/favicon-$size.png" >/dev/null
+  favicon_pngs+=("$TMP_DIR/favicon-$size.png")
+done
+node "$SCRIPT_DIR/make-ico.mjs" "$ROOT/frontend/public/favicon.ico" "${favicon_pngs[@]}" >/dev/null
 build_app_icons "$TMP_DIR/master.png" ""
 
 # 2. Dev: same mark, accent recolored, app icons only (the favicons are the
@@ -134,6 +141,7 @@ build_app_icons "$TMP_DIR/master-dev.png" "-dev"
 
 echo "Generated:"
 echo "  frontend/public/favicon-96x96.png"
+echo "  frontend/public/favicon.ico"
 echo "  frontend/public/apple-touch-icon.png"
 echo "  main/assets/icon.png / icon.icns / icon.ico"
 echo "  main/assets/icon-dev.png / icon-dev.icns / icon-dev.ico"

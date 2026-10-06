@@ -32,10 +32,6 @@ vi.mock('../trpc/client', () => ({
         list: { query: vi.fn().mockResolvedValue([]) },
         // Live merge/PR gate — settled by default so accept actions proceed.
         sessionSettleState: { query: vi.fn().mockResolvedValue({ flowBusy: false, chatTurnInFlight: false }) },
-        listFiles: { query: vi.fn().mockResolvedValue([]) },
-        readFile: {
-          query: vi.fn().mockResolvedValue({ path: '', content: '', size: 0, unviewableReason: null }),
-        },
         // Sprint lanes (single-run lane model) — empty by default so any
         // component mounting SprintLanesPanel renders nothing.
         sprintLanes: { query: vi.fn().mockResolvedValue([]) },

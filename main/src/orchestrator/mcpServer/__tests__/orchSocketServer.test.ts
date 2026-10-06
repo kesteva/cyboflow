@@ -34,7 +34,6 @@ import { OrchSocketServer, isNamedPipePath } from '../orchSocketServer';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
-import type { OrchSocketProvider } from '../../runLauncher';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
@@ -644,16 +643,14 @@ describe('OrchSocketServer', () => {
   );
 
   // -------------------------------------------------------------------------
-  // Structural interface conformance (compile-time assertions)
+  // Public accessors
   // -------------------------------------------------------------------------
 
-  it('satisfies the OrchSocketProvider interface', async () => {
+  it('exposes getSocketPath and hasClientForRun', async () => {
     server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
     await server.start();
 
-    // This assignment fails to compile if the structural shape drifts.
-    const asProvider: OrchSocketProvider = server;
-    expect(typeof asProvider.getSocketPath()).toBe('string');
+    expect(server.getSocketPath()).toBe(socketPath);
     // hasClientForRun survives as a diagnostic (its PermissionServerLike
     // contract retired with the stale_socket rung), so pin it directly rather
     // than through an interface no longer worth declaring.

@@ -8,13 +8,12 @@
  * Behaviors verified:
  *   1. Renders phase headers + step items with state-keyed border colors.
  *   2. Applies 1.4s pulse animation to running step bullet only.
- *   3. Projects log lines (degraded mode — window is null → empty log section).
- *   4. Delta-driven re-render: changing the phaseState prop causes border updates.
- *   5. runId=null renders placeholder.
- *   6. isLoading → 'Loading workflow state…' placeholder.
- *   7. error !== null → 'Failed to load workflow state: <message>' placeholder.
- *   8. definition === null (not loading, no error) → 'No workflow data' placeholder.
- *   9. Phase headers: swatch color, label, step count.
+ *   3. Delta-driven re-render: changing the phaseState prop causes border updates.
+ *   4. runId=null renders placeholder.
+ *   5. isLoading → 'Loading workflow state…' placeholder.
+ *   6. error !== null → 'Failed to load workflow state: <message>' placeholder.
+ *   7. definition === null (not loading, no error) → 'No workflow data' placeholder.
+ *   8. Phase headers: swatch color, label, step count.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
@@ -286,23 +285,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(pendingBullet.style.animation ?? '').toBe('');
   });
 
-  // ── AC3: Log lines — degraded mode (window is null → no log lines) ────────
-
-  it('renders no log lines for non-pending steps when time-window is unavailable (degraded mode)', () => {
-    const phaseState = makePhaseState({
-      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
-    });
-
-    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
-
-    const allLogLines = document.querySelectorAll('[data-testid^="log-line-implement"]');
-    expect(allLogLines.length).toBe(0);
-
-    const runningLogLines = document.querySelectorAll('[data-testid^="log-line-write-tests"]');
-    expect(runningLogLines.length).toBe(0);
-  });
-
-  // ── AC4: Delta-driven re-render ───────────────────────────────────────────
+  // ── AC3: Delta-driven re-render ───────────────────────────────────────────
 
   it('updates step border when phaseState prop changes on rerender', () => {
     const initialState = makePhaseState({
@@ -326,7 +309,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByTestId('step-item-implement').className).toContain('border-status-error');
   });
 
-  // ── AC5: runId=null renders placeholder ──────────────────────────────────
+  // ── AC4: runId=null renders placeholder ──────────────────────────────────
 
   it('renders "No active run" placeholder when runId is null', () => {
     render(<WorkflowProgressTimeline runId={null} phaseState={EMPTY_PHASE_STATE} />);
@@ -335,7 +318,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByText('No active run')).toBeInTheDocument();
   });
 
-  // ── AC6: isLoading placeholder ────────────────────────────────────────────
+  // ── AC5: isLoading placeholder ────────────────────────────────────────────
 
   it('renders "Loading workflow state…" placeholder when phaseState.isLoading is true', () => {
     const loadingState: UseWorkflowPhaseStateResult = { ...EMPTY_PHASE_STATE, isLoading: true };
@@ -345,7 +328,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByText('Loading workflow state…')).toBeInTheDocument();
   });
 
-  // ── AC7: error placeholder ────────────────────────────────────────────────
+  // ── AC6: error placeholder ────────────────────────────────────────────────
 
   it('renders "Failed to load workflow state:" placeholder when phaseState.error is non-null', () => {
     const errorState: UseWorkflowPhaseStateResult = {
@@ -358,7 +341,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByText(/Failed to load workflow state:.*network timeout/)).toBeInTheDocument();
   });
 
-  // ── AC8: null definition (not loading, no error) ──────────────────────────
+  // ── AC7: null definition (not loading, no error) ──────────────────────────
 
   it('renders "No workflow data" when phaseState.definition is null with no loading and no error', () => {
     render(<WorkflowProgressTimeline runId="run-A" phaseState={EMPTY_PHASE_STATE} />);
@@ -366,7 +349,7 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByText('No workflow data')).toBeInTheDocument();
   });
 
-  // ── AC9: Phase headers ────────────────────────────────────────────────────
+  // ── AC8: Phase headers ────────────────────────────────────────────────────
 
   it('renders phase headers with swatch background matching phase color, label text, and step count', () => {
     const phaseState = makeTwoPhaseState();

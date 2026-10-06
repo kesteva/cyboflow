@@ -7,7 +7,7 @@
  *   - The provider value is memoized: a parent re-render with referentially
  *     stable props does NOT re-render a consumer (the bug this fix closes —
  *     a fresh value object every render used to re-render every consumer).
- *   - A prop that actually changes (e.g. isMerging) still propagates.
+ *   - A prop that actually changes (e.g. projectName) still propagates.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -37,7 +37,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 const Consumer = memo(function Consumer({ renderSpy }: { renderSpy: () => void }) {
   renderSpy();
   const ctx = useSession();
-  return <div data-testid="merging">{String(ctx?.isMerging)}</div>;
+  return <div data-testid="project-name">{String(ctx?.projectName)}</div>;
 });
 
 describe('SessionProvider', () => {
@@ -60,7 +60,7 @@ describe('SessionProvider', () => {
       return (
         <div>
           <button onClick={() => setTick((t) => t + 1)}>bump</button>
-          <SessionProvider session={session} isMerging={false}>
+          <SessionProvider session={session} projectName="alpha">
             <Consumer renderSpy={renderSpy} />
           </SessionProvider>
         </div>
@@ -70,7 +70,7 @@ describe('SessionProvider', () => {
     render(<Harness />);
     expect(renderSpy).toHaveBeenCalledTimes(1);
 
-    // Re-render the parent (Harness) with the SAME session/isMerging props —
+    // Re-render the parent (Harness) with the SAME session/projectName props —
     // before the useMemo fix, SessionProvider built a fresh context value
     // every render, so the consumer would render again here too.
     fireEvent.click(screen.getByText('bump'));
@@ -81,11 +81,11 @@ describe('SessionProvider', () => {
     const session = makeSession();
 
     function Harness() {
-      const [isMerging, setIsMerging] = useState(false);
+      const [projectName, setProjectName] = useState('alpha');
       return (
         <div>
-          <button onClick={() => setIsMerging(true)}>merge</button>
-          <SessionProvider session={session} isMerging={isMerging}>
+          <button onClick={() => setProjectName('beta')}>rename</button>
+          <SessionProvider session={session} projectName={projectName}>
             <Consumer renderSpy={() => undefined} />
           </SessionProvider>
         </div>
@@ -93,9 +93,9 @@ describe('SessionProvider', () => {
     }
 
     render(<Harness />);
-    expect(screen.getByTestId('merging')).toHaveTextContent('false');
+    expect(screen.getByTestId('project-name')).toHaveTextContent('alpha');
 
-    fireEvent.click(screen.getByText('merge'));
-    expect(screen.getByTestId('merging')).toHaveTextContent('true');
+    fireEvent.click(screen.getByText('rename'));
+    expect(screen.getByTestId('project-name')).toHaveTextContent('beta');
   });
 });

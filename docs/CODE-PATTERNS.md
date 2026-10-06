@@ -8,7 +8,7 @@ to a canonical example — read those for the actual implementation.
 - **Naming:** Components: `PascalCase.tsx`. Services/utils/stores: `camelCase.ts`.
   IPC handlers: `camelCase.ts` per domain (e.g. `session.ts`, `git.ts`).
 - **Test colocation:** Unit tests live in `__tests__/` subdirectories next to the file
-  under test (e.g. `main/src/services/__tests__/gitStatusManager.test.ts`). E2E tests
+  under test (e.g. `main/src/services/__tests__/gitDiffManager.test.ts`). E2E tests
   are top-level in `tests/`.
 - **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
   `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
@@ -42,7 +42,7 @@ to a canonical example — read those for the actual implementation.
 - **Path:** `main/src/services/simpleTaskQueue.ts`
 - **Use it for:** In-process job queue with concurrency limits. No Redis.
   Construct with `new SimpleQueue(name, concurrency)`, call `.process(n, handler)`, then `.add(data)`.
-- **Canonical example:** `main/src/services/cliManagerFactory.ts`
+- **Canonical example:** `main/src/services/taskQueue.ts`
 
 ### `main/src/utils/logger`
 
@@ -87,20 +87,12 @@ to a canonical example — read those for the actual implementation.
 ### `frontend/src/utils/migrateLocalStorageKey`
 
 - **Path:** `frontend/src/utils/migrateLocalStorageKey.ts`
-- **Use it for:** One-shot localStorage key rename (e.g. crystal-→cyboflow-). Reads legacy key,
-  copies value to new key, deletes legacy key, returns value. Idempotent.
+- **Use it for:** One-shot localStorage key rename. Reads legacy key, copies value to new key,
+  deletes legacy key, returns value. Idempotent. It currently has no production callers (every
+  past rename has aged out); it is kept as the sanctioned tool for the next rename.
 - **Call contract:** Invoke inside `useEffect(..., [])` or a `useState(() => ...)` initializer —
   never inside a closure that runs on every render or log call.
-- **Canonical example:** `frontend/src/App.tsx:60` (mount-time call).
-- **Anti-pattern:** `frontend/src/utils/console.ts:9–12` calls it inside `isVerboseEnabled()`,
-  which fires on every `devLog.*` invocation — redundant localStorage reads per log line.
-
-### `main/src/utils/commitFooter`
-
-- **Path:** `main/src/utils/commitFooter.ts`
-- **Use it for:** The canonical Cyboflow commit-footer string. Single source of truth — never inline the footer literal elsewhere.
-- **Key export:** `buildCommitFooter(enabled: boolean): string` (empty string when disabled).
-- **Canonical example:** `main/src/utils/shellEscape.ts` (`buildGitCommitCommand`); byte-level contract pinned in `main/src/utils/commitFooter.test.ts`.
+- **Canonical example:** the contract is pinned in `frontend/src/utils/migrateLocalStorageKey.test.ts`.
 
 ### `main/src/utils/devDebugLog`
 
@@ -166,9 +158,8 @@ Types in `shared/types/` are imported by both `main/` and `frontend/`. When addi
 domain concept that spans both, define its type in `shared/types/` first. Never duplicate
 type definitions across packages.
 
-- `shared/types/models.ts` — database-layer model types
 - `shared/types/panels.ts` — panel configuration and state types
-- `shared/types/cliPanels.ts` — CLI-specific panel types
+- `shared/types/cliSpawn.ts` — the CLI-manager spawn contract (`CliSpawnOutcome`, `LaneSpawnEnv`)
 
 **Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent` and
 `StuckReason`. `reviewQueueSlice`'s `subscribeToStuckEvents()` action
@@ -552,9 +543,7 @@ serializes writes, and each op atomically mutates `artifacts`, appends an `entit
 under `entity_type='artifact'`, and emits an `ArtifactChangedEvent` after commit. `apply`
 dispatches on `op` (`create` | `update` | `commit`); `create` UPSERTs by `(runId, atype)` so
 re-deriving a templated artifact (auto-mint) is idempotent — one artifact per `(run_id, atype)`
-in v1. Two further ops ride the same per-project queue outside `apply` proper: `acceptAsBaseline`
-(the Accept-as-baseline git action, delegating the fs-copy + commit to an injected
-`BaselineAcceptor` so the router itself imports no `fs`/git — standalone-typecheck invariant) and
+in v1. One further op rides the same per-project queue outside `apply` proper:
 `mergeScreenshots` (an atomic read-merge-UPSERT for concurrent screenshot deliveries). The tRPC
 sub-router, the `cyboflow_report_artifact` MCP tool family, and the orchestrator's auto-mint path
 are the only callers.
@@ -615,10 +604,13 @@ Rules when touching workflows:
 
 ### Database access
 
-`main/src/database/database.ts` (`DatabaseService`) is the singleton owning schema DDL, the
-migrations runner, and `seedDefaultBoard`. `main/src/services/database.ts` is a thin bootstrap
-shim (~10 lines) that constructs that `DatabaseService` instance from the boot path and calls
-`.initialize()` — nothing else lives there. All mutations go through the main process — the
+`main/src/database/database.ts` (`DatabaseService`) owns schema DDL, the migrations runner, and
+`seedDefaultBoard`. `index.ts` constructs the ONE instance, runs the schema-version gate, calls
+`.initialize()`, and then registers it with `main/src/services/database.ts`
+(`setDatabaseService`), whose `databaseService` export forwards to it for modules that are not
+handed an instance (PanelManager, the panels IPC, session validation). Never open a second
+`DatabaseService` on the live path: it would migrate the schema before the gate and keep its own
+caches. All mutations go through the main process — the
 renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
@@ -642,6 +634,24 @@ silently truncates). `schema.sql` (fresh install) and the highest-numbered migra
 EXISTS` must be a no-op after `schema.sql` runs. When adding a column to a shipped
 migration, also search every test file's INSERT/SELECT for the old column list — missing
 columns surface as runtime `undefined`, not typecheck errors.
+
+### Timestamps: SQLite stamps are UTC but carry no zone
+
+SQLite's `CURRENT_TIMESTAMP` / `datetime('now')` write `"YYYY-MM-DD HH:MM:SS"` — UTC with no
+zone marker — and `new Date()` reads that shape as LOCAL time, so every such value lands the
+host's UTC offset in the future. The failure is quiet: "time ago" formatters fold a negative
+interval into their zero bucket, so the wrong clock renders as a confident "just now".
+
+- Parse DB-sourced timestamp strings with `parseTimestamp` (`shared/utils/timestamp.ts`, also
+  re-exported by `main/src/utils/timestampUtils.ts` and `frontend/src/utils/timestampUtils.ts`).
+  Never `new Date(row.some_at)`. `parseDbTimestampMs` in `frontend/src/utils/homeClassify.ts`
+  is the other sanctioned parser.
+- The zone test is an allow-list on the UNZONED shape (`/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/`),
+  not "contains a `T`": some queries emit zone-marked values with no `T` (`datetime(col) || 'Z'`),
+  and a `T` check would append a second `Z` and produce Invalid Date.
+- Write application timestamps as ISO 8601 (`formatForDatabase()` → `toISOString()`); do not
+  assume every column is `CURRENT_TIMESTAMP` format — a column can mix both shapes.
+- When auditing, look for the sink that absorbs a negative interval, not for a wrong-looking number.
 
 ### SQLite migrations: idempotence is per STATEMENT, and a real error stops the boot
 
@@ -738,11 +748,9 @@ Two valid categories:
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical example (whole-file case):** `main/src/services/visualVerify/baselineStore.ts`
-  (the golden-baseline feature, retired entirely — not merely behind a kill switch)
-- **Canonical example (forward-looking placeholder):**
-  `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
-  (an ApprovalRouter integration point)
+- **Whole-file case:** the marker is the file's first comment, ahead of the imports.
+- **Canonical example:** none in the tree today — the last markers were retired in the
+  Crystal-fork cleanup, so the template above is the reference.
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   inactive surfaces (both categories).
 
@@ -796,7 +804,7 @@ All outbound telemetry is anonymized and gated in `main/src/services/telemetry/`
 
 ### macOS signing posture (`scripts/configure-build.js`)
 
-`scripts/configure-build.js` runs as a `prebuild:mac*` / `prerelease:mac` step and is the
+`scripts/configure-build.js` runs inside every `build:mac*` recipe and is the
 **single canonical writer** of `build.mac.notarize`, `hardenedRuntime`, and `gatekeeperAssess`.
 Do not edit these keys directly in `package.json` — `configure-build.js` overwrites them on
 every build. Decision is driven by env vars (`CSC_LINK`, `APPLE_ID`, `APPLE_TEAM_ID`,
@@ -868,8 +876,8 @@ on a separate `"test:watch"` key instead of overloading `"test"`.
 
 ### Canonical DDL Source
 
-The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`, `raw_events`,
-`messages`) live in TWO files that MUST stay in sync:
+The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`, `raw_events`)
+live in TWO files that MUST stay in sync:
 
 - `main/src/database/schema.sql` — fresh-install fast path. Run once on a new DB.
 - `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
@@ -926,11 +934,10 @@ parallel opt-outs; do not collapse the two types or import one where the other i
 
 **Rules — grep-enforced:**
 
-1. **No UI surface may expose `'ignore'` as selectable.** The `BaseCliPanel.tsx` Permission Mode
-   dropdown must offer only `value="approve"`. (Settings.tsx no longer has a 2-mode picker at
-   all — it now exposes the separate 4-mode `defaultAgentPermissionMode` picker,
-   `SessionSettings.tsx`'s `PERMISSION_MODE_OPTIONS`, which has no `'ignore'` value to begin
-   with.) Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
+1. **No UI surface may expose `'ignore'` as selectable.** The live pickers are all 4-mode
+   agent pickers (`AgentPermissionModeSelector.tsx`'s `PERMISSION_MODE_OPTIONS` and the pickers
+   built on it, e.g. the session wizard and the composer's `PermissionModePill`), which have no
+   `'ignore'` value to begin with. Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
 
 2. **No default or fallback may resolve to `'ignore'`.** Use `DEFAULT_PERMISSION_MODE` (imported from `shared/types/permissionMode`) wherever a missing value must be filled in. Verification: `grep -rnE "\|\| 'ignore'" main/src/ frontend/src/ shared/` must return 0 matches.
 

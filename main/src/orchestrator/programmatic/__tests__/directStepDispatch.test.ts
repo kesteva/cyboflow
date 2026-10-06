@@ -8,7 +8,7 @@ import { SpawnStepRunner, PROGRAMMATIC_STEP_DISALLOWED_TOOLS } from '../spawnSte
 import { composeStepPrompt } from '../stepPrompt';
 import { renderWorkflowPromptForRuntime } from '../../workflowPromptRenderer';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { ControllerStepContext } from '../types';
 

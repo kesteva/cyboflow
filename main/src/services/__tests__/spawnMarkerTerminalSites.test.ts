@@ -1,7 +1,6 @@
 /**
  * Spawn-marker stamping at the PTY / script spawn sites that build their env
- * inline: sessionManager (runScript + execWithShellPath), terminalSessionManager
- * and terminalPanelManager. Each spawn is driven through its real entry point
+ * inline: sessionManager (execWithShellPath) and terminalPanelManager. Each spawn is driven through its real entry point
  * with node-pty / child_process replaced by recorders; the observed env must
  * carry CYBOFLOW_INSTANCE (this process's id) and CYBOFLOW_WORKTREE (the cwd).
  */
@@ -45,7 +44,6 @@ vi.mock('../scriptExecutionTracker', () => ({
 }));
 
 import { SessionManager } from '../sessionManager';
-import { TerminalSessionManager } from '../terminalSessionManager';
 import { TerminalPanelManager } from '../terminalPanelManager';
 import { getInstanceId } from '../../utils/spawnMarker';
 import type { DatabaseService } from '../../database/database';
@@ -57,16 +55,6 @@ beforeEach(() => {
 });
 
 describe('spawn marker at inline-env spawn sites', () => {
-  it('TerminalSessionManager.createTerminalSession stamps instance + worktree', async () => {
-    const wt = '/tmp/wt-terminal-session';
-    await new TerminalSessionManager().createTerminalSession('s1', wt);
-    expect(ptySpawns).toHaveLength(1);
-    expect(ptySpawns[0].env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
-    expect(ptySpawns[0].env.CYBOFLOW_WORKTREE).toBe(wt);
-    // Sibling vars built inline are preserved.
-    expect(ptySpawns[0].env.WORKTREE_PATH).toBe(wt);
-  });
-
   it('TerminalPanelManager.initializeTerminal stamps instance + worktree', async () => {
     const wt = '/tmp/wt-terminal-panel';
     const panel = { id: 'p1', sessionId: 's1', type: 'terminal', state: {} } as unknown as ToolPanel;
@@ -81,17 +69,6 @@ describe('spawn marker at inline-env spawn sites', () => {
     expect(ptySpawns[0].env.CYBOFLOW_SESSION_ID).toBe('s1');
   });
 
-  it('SessionManager.runScript stamps the script child with the working directory', async () => {
-    const sm = new SessionManager({} as unknown as DatabaseService);
-    vi.spyOn(sm as unknown as { setSessionRunning: () => void }, 'setSessionRunning').mockImplementation(() => {});
-    const wt = '/tmp/wt-run-script';
-    await sm.runScript('s1', ['echo hi'], wt);
-    expect(childSpawns).toHaveLength(1);
-    expect(childSpawns[0].env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
-    expect(childSpawns[0].env.CYBOFLOW_WORKTREE).toBe(wt);
-  });
-
-  // POSIX shell syntax ($VAR, printf); cmd.exe would echo the names unexpanded.
   it.skipIf(process.platform === 'win32')('SessionManager.execWithShellPath stamps a real exec child with its cwd', async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marker-exec-')));
     try {

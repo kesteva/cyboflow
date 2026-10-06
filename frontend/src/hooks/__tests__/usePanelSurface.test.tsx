@@ -8,10 +8,8 @@
  * Environment: jsdom (via vitest.config.ts).
  *
  * Coverage:
- *   (a) autoCreatePermanentPanels: false — does NOT call panelApi.createPanel for dashboard/setup-tasks.
- *   (b) autoCreatePermanentPanels: true  — creates both permanent panels when absent, then reloads.
- *   (c) autoCreatePermanentPanels: true  — short-circuits handlePanelClose for a dashboard panel.
- *   (d) autoCreatePermanentPanels: false — allows handlePanelClose to delete any panel.
+ *   (a) loads the main-repo session's panels once and hands them to setPanels.
+ *   (d) handlePanelClose removes and deletes the panel.
  *   (e) onPanelCreated event with matching sessionId → addPanel called; non-matching → ignored.
  *   (f) handlePanelClose on a claude panel evicts the keep-alive xterm cache by
  *       BOTH the closing panel's own id (the cache key for a Claude 'interactive'
@@ -38,16 +36,15 @@ const {
   mockRemovePanel,
   mockSetPanels,
   mockGetState,
-  mockCreatePanel,
   mockSetActivePanel,
   mockLoadPanelsForSession,
-  mockGetActivePanel,
   mockDeletePanel,
   mockGetOrCreateMainRepoSession,
   mockSetActiveSessionStore,
   mockSessionStoreSubscribe,
   mockDisposeInteractiveTerminal,
   mockSessionStoreGetState,
+  mockClearPanelUnviewedContent,
 } = vi.hoisted(() => {
   const setActiveSessionStore = vi.fn();
   return {
@@ -56,14 +53,13 @@ const {
     mockRemovePanel: vi.fn(),
     mockSetPanels: vi.fn(),
     mockGetState: vi.fn(),
-    mockCreatePanel: vi.fn(),
     mockSetActivePanel: vi.fn(),
     mockLoadPanelsForSession: vi.fn(),
-    mockGetActivePanel: vi.fn(),
     mockDeletePanel: vi.fn(),
     mockGetOrCreateMainRepoSession: vi.fn(),
     mockSetActiveSessionStore: setActiveSessionStore,
     mockDisposeInteractiveTerminal: vi.fn(),
+    mockClearPanelUnviewedContent: vi.fn(),
     // Mutable subscribe spy — tests that need to capture the subscriber can
     // configure this via mockSessionStoreSubscribe.mockImplementation(...).
     mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined),
@@ -95,11 +91,10 @@ vi.mock('../../stores/panelStore', () => ({
 
 vi.mock('../../services/panelApi', () => ({
   panelApi: {
-    createPanel: mockCreatePanel,
     setActivePanel: mockSetActivePanel,
     loadPanelsForSession: mockLoadPanelsForSession,
-    getActivePanel: mockGetActivePanel,
     deletePanel: mockDeletePanel,
+    clearPanelUnviewedContent: mockClearPanelUnviewedContent,
   },
 }));
 
@@ -145,24 +140,6 @@ const MOCK_METADATA = {
   position: 0,
 };
 
-const DASHBOARD_PANEL: ToolPanel = {
-  id: 'panel-dash',
-  sessionId: MOCK_SESSION_ID,
-  type: 'dashboard',
-  title: 'Dashboard',
-  state: { isActive: true },
-  metadata: { ...MOCK_METADATA, permanent: true },
-};
-
-const SETUP_PANEL: ToolPanel = {
-  id: 'panel-setup',
-  sessionId: MOCK_SESSION_ID,
-  type: 'setup-tasks',
-  title: 'Setup',
-  state: { isActive: false },
-  metadata: { ...MOCK_METADATA, permanent: true },
-};
-
 const TERMINAL_PANEL: ToolPanel = {
   id: 'panel-terminal',
   sessionId: MOCK_SESSION_ID,
@@ -189,10 +166,10 @@ async function flushAsync(ticks = 10) {
 }
 
 // ---------------------------------------------------------------------------
-// (a) autoCreatePermanentPanels: false — no dashboard/setup-tasks creation
+// (a) panel loading
 // ---------------------------------------------------------------------------
 
-describe('usePanelSurface — autoCreatePermanentPanels: false', () => {
+describe('usePanelSurface — panel loading', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetOrCreateMainRepoSession.mockResolvedValue({
@@ -204,15 +181,8 @@ describe('usePanelSurface — autoCreatePermanentPanels: false', () => {
     mockSetPanels.mockReturnValue(undefined);
   });
 
-  it('(a) does NOT call panelApi.createPanel for dashboard or setup-tasks', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: false }));
-    await flushAsync();
-
-    expect(mockCreatePanel).not.toHaveBeenCalled();
-  });
-
   it('calls panelApi.loadPanelsForSession once (no reload)', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: false }));
+    renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     expect(mockLoadPanelsForSession).toHaveBeenCalledTimes(1);
@@ -220,7 +190,7 @@ describe('usePanelSurface — autoCreatePermanentPanels: false', () => {
   });
 
   it('calls setPanels with the loaded panels', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: false }));
+    renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     expect(mockSetPanels).toHaveBeenCalledWith(MOCK_SESSION_ID, [TERMINAL_PANEL]);
@@ -228,10 +198,10 @@ describe('usePanelSurface — autoCreatePermanentPanels: false', () => {
 });
 
 // ---------------------------------------------------------------------------
-// (b) autoCreatePermanentPanels: true — creates both permanent panels when absent
+// handlePanelSelect — viewing a chat panel clears its unviewed state
 // ---------------------------------------------------------------------------
 
-describe('usePanelSurface — autoCreatePermanentPanels: true — panels absent', () => {
+describe('usePanelSurface — handlePanelSelect clears unviewed content', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetOrCreateMainRepoSession.mockResolvedValue({
@@ -239,91 +209,50 @@ describe('usePanelSurface — autoCreatePermanentPanels: true — panels absent'
       data: MOCK_SESSION,
     });
     mockSetActiveSessionStore.mockResolvedValue(undefined);
-    // First load returns no panels (absent); second load (after creation) returns both.
-    mockLoadPanelsForSession
-      .mockResolvedValueOnce([])                              // initial load
-      .mockResolvedValueOnce([DASHBOARD_PANEL, SETUP_PANEL]); // reload after creation
-    mockCreatePanel.mockResolvedValue(DASHBOARD_PANEL);
-    mockGetActivePanel.mockResolvedValue(null); // no active panel initially
+    mockLoadPanelsForSession.mockResolvedValue([TERMINAL_PANEL, CLAUDE_PANEL]);
+    mockSetPanels.mockReturnValue(undefined);
     mockSetActivePanel.mockResolvedValue(undefined);
-    mockSetPanels.mockReturnValue(undefined);
-    mockSetActivePanelInStore.mockReturnValue(undefined);
+    mockClearPanelUnviewedContent.mockResolvedValue(undefined);
   });
 
-  it('(b) calls panelApi.createPanel for both dashboard and setup-tasks', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: true }));
+  it('clears a completed_unviewed claude panel when it is selected', async () => {
+    const { result } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
-    const createCalls = mockCreatePanel.mock.calls;
-    const types = createCalls.map((c) => (c[0] as { type: string }).type);
-    expect(types).toContain('dashboard');
-    expect(types).toContain('setup-tasks');
+    const unviewed: ToolPanel = {
+      ...CLAUDE_PANEL,
+      state: { isActive: false, customState: { hasUnviewedContent: true, panelStatus: 'completed_unviewed' } },
+    };
+    await act(async () => { await result.current.handlePanelSelect(unviewed); });
+
+    expect(mockSetActivePanel).toHaveBeenCalledWith(MOCK_SESSION_ID, CLAUDE_PANEL.id);
+    expect(mockClearPanelUnviewedContent).toHaveBeenCalledWith(CLAUDE_PANEL.id);
   });
 
-  it('(b) reloads panels after creation', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: true }));
+  it('does not clear a claude panel with nothing unviewed, nor a non-claude panel', async () => {
+    const { result } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
-    // loadPanelsForSession called twice: initial + reload after creation.
-    expect(mockLoadPanelsForSession).toHaveBeenCalledTimes(2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// (b) autoCreatePermanentPanels: true — panels already present (no creation)
-// ---------------------------------------------------------------------------
-
-describe('usePanelSurface — autoCreatePermanentPanels: true — panels present', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockGetOrCreateMainRepoSession.mockResolvedValue({
-      success: true,
-      data: MOCK_SESSION,
+    await act(async () => { await result.current.handlePanelSelect(CLAUDE_PANEL); });
+    await act(async () => {
+      await result.current.handlePanelSelect({
+        ...TERMINAL_PANEL,
+        state: { isActive: false, customState: { hasUnviewedContent: true } },
+      });
     });
-    mockSetActiveSessionStore.mockResolvedValue(undefined);
-    // Both panels already exist — no reload needed.
-    mockLoadPanelsForSession.mockResolvedValue([DASHBOARD_PANEL, SETUP_PANEL]);
-    mockGetActivePanel.mockResolvedValue(DASHBOARD_PANEL);
-    mockSetPanels.mockReturnValue(undefined);
-    mockSetActivePanelInStore.mockReturnValue(undefined);
-  });
 
-  it('does NOT call panelApi.createPanel when both permanent panels exist', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: true }));
-    await flushAsync();
-
-    expect(mockCreatePanel).not.toHaveBeenCalled();
-  });
-
-  it('loads panels exactly once when no creation is needed', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: true }));
-    await flushAsync();
-
-    expect(mockLoadPanelsForSession).toHaveBeenCalledTimes(1);
+    expect(mockSetActivePanel).toHaveBeenCalledTimes(2);
+    expect(mockClearPanelUnviewedContent).not.toHaveBeenCalled();
   });
 });
 
 // ---------------------------------------------------------------------------
-// (c) handlePanelClose — permanent panel guard (autoCreatePermanentPanels: true)
+// (d) handlePanelClose — deletes the panel
 // ---------------------------------------------------------------------------
 
-describe('usePanelSurface — handlePanelClose — permanent panel guard', () => {
-  const panelsMap = { [MOCK_SESSION_ID]: [DASHBOARD_PANEL, SETUP_PANEL, TERMINAL_PANEL] };
-  const activePanelsMap = { [MOCK_SESSION_ID]: DASHBOARD_PANEL.id };
-
-  function makePanelStoreMock(panelsOverride = panelsMap, activePanelsOverride = activePanelsMap) {
-    return Object.assign(
-      () => ({
-        panels: panelsOverride,
-        activePanels: activePanelsOverride,
-        setPanels: mockSetPanels,
-        setActivePanel: mockSetActivePanelInStore,
-        addPanel: mockAddPanel,
-        removePanel: mockRemovePanel,
-      }),
-      { getState: mockGetState },
-    );
-  }
+describe('usePanelSurface — handlePanelClose', () => {
+  const panelsMap = { [MOCK_SESSION_ID]: [TERMINAL_PANEL] };
+  const activePanelsMap = { [MOCK_SESSION_ID]: TERMINAL_PANEL.id };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -332,66 +261,7 @@ describe('usePanelSurface — handlePanelClose — permanent panel guard', () =>
       data: MOCK_SESSION,
     });
     mockSetActiveSessionStore.mockResolvedValue(undefined);
-    mockLoadPanelsForSession.mockResolvedValue([DASHBOARD_PANEL, SETUP_PANEL, TERMINAL_PANEL]);
-    mockGetActivePanel.mockResolvedValue(DASHBOARD_PANEL);
-    mockSetPanels.mockReturnValue(undefined);
-    mockSetActivePanelInStore.mockReturnValue(undefined);
-    mockDeletePanel.mockResolvedValue(undefined);
-    mockSetActivePanel.mockResolvedValue(undefined);
-    mockRemovePanel.mockReturnValue(undefined);
-  });
-
-  it('(c) short-circuits when trying to close a dashboard panel', async () => {
-    vi.doMock('../../stores/panelStore', () => ({
-      usePanelStore: makePanelStoreMock(),
-    }));
-
-    const { usePanelSurface: surf } = await import('../usePanelSurface');
-    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: true }));
-    await flushAsync();
-
-    await act(async () => { await result.current.handlePanelClose(DASHBOARD_PANEL); });
-
-    expect(mockDeletePanel).not.toHaveBeenCalled();
-    expect(mockRemovePanel).not.toHaveBeenCalled();
-
-    vi.doUnmock('../../stores/panelStore');
-  });
-
-  it('(c) short-circuits when trying to close a setup-tasks panel', async () => {
-    vi.doMock('../../stores/panelStore', () => ({
-      usePanelStore: makePanelStoreMock(),
-    }));
-
-    const { usePanelSurface: surf } = await import('../usePanelSurface');
-    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: true }));
-    await flushAsync();
-
-    await act(async () => { await result.current.handlePanelClose(SETUP_PANEL); });
-
-    expect(mockDeletePanel).not.toHaveBeenCalled();
-    expect(mockRemovePanel).not.toHaveBeenCalled();
-
-    vi.doUnmock('../../stores/panelStore');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// (d) handlePanelClose — no guard (autoCreatePermanentPanels: false)
-// ---------------------------------------------------------------------------
-
-describe('usePanelSurface — handlePanelClose — no permanence guard', () => {
-  const panelsMap = { [MOCK_SESSION_ID]: [DASHBOARD_PANEL] };
-  const activePanelsMap = { [MOCK_SESSION_ID]: DASHBOARD_PANEL.id };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockGetOrCreateMainRepoSession.mockResolvedValue({
-      success: true,
-      data: MOCK_SESSION,
-    });
-    mockSetActiveSessionStore.mockResolvedValue(undefined);
-    mockLoadPanelsForSession.mockResolvedValue([DASHBOARD_PANEL]);
+    mockLoadPanelsForSession.mockResolvedValue([TERMINAL_PANEL]);
     mockSetPanels.mockReturnValue(undefined);
     mockDeletePanel.mockResolvedValue(undefined);
     mockRemovePanel.mockReturnValue(undefined);
@@ -399,7 +269,7 @@ describe('usePanelSurface — handlePanelClose — no permanence guard', () => {
     mockSetActivePanelInStore.mockReturnValue(undefined);
   });
 
-  it('(d) allows closing a dashboard panel (no guard) and calls deletePanel', async () => {
+  it('(d) removes the panel from the store and calls deletePanel', async () => {
     vi.doMock('../../stores/panelStore', () => ({
       usePanelStore: Object.assign(
         () => ({
@@ -415,14 +285,13 @@ describe('usePanelSurface — handlePanelClose — no permanence guard', () => {
     }));
 
     const { usePanelSurface: surf } = await import('../usePanelSurface');
-    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: false }));
+    const { result } = renderHook(() => surf(1));
     await flushAsync();
 
-    await act(async () => { await result.current.handlePanelClose(DASHBOARD_PANEL); });
+    await act(async () => { await result.current.handlePanelClose(TERMINAL_PANEL); });
 
-    // No guard in false mode — deletePanel MUST be called.
-    expect(mockDeletePanel).toHaveBeenCalledWith(DASHBOARD_PANEL.id);
-    expect(mockRemovePanel).toHaveBeenCalledWith(MOCK_SESSION_ID, DASHBOARD_PANEL.id);
+    expect(mockDeletePanel).toHaveBeenCalledWith(TERMINAL_PANEL.id);
+    expect(mockRemovePanel).toHaveBeenCalledWith(MOCK_SESSION_ID, TERMINAL_PANEL.id);
 
     vi.doUnmock('../../stores/panelStore');
   });
@@ -477,7 +346,7 @@ describe('usePanelSurface — handlePanelClose — claude panel xterm cache evic
     });
 
     const { usePanelSurface: surf } = await import('../usePanelSurface');
-    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: false }));
+    const { result } = renderHook(() => surf(1));
     await flushAsync();
 
     await act(async () => { await result.current.handlePanelClose(CLAUDE_PANEL); });
@@ -506,7 +375,7 @@ describe('usePanelSurface — handlePanelClose — claude panel xterm cache evic
     }));
 
     const { usePanelSurface: surf } = await import('../usePanelSurface');
-    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: false }));
+    const { result } = renderHook(() => surf(1));
     await flushAsync();
 
     await act(async () => { await result.current.handlePanelClose(TERMINAL_PANEL); });
@@ -554,7 +423,7 @@ describe('usePanelSurface — onPanelCreated subscription', () => {
   });
 
   it('(e) calls addPanel when a panel:created event matches the session', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: false }));
+    renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     expect(capturedHandler).not.toBeNull();
@@ -565,7 +434,7 @@ describe('usePanelSurface — onPanelCreated subscription', () => {
   });
 
   it('(e) does NOT call addPanel when a panel:created event is for a different session', async () => {
-    renderHook(() => usePanelSurface(1, { autoCreatePermanentPanels: false }));
+    renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     expect(capturedHandler).not.toBeNull();
@@ -581,9 +450,7 @@ describe('usePanelSurface — onPanelCreated subscription', () => {
   });
 
   it('(e) calls the unsubscribe function returned by onPanelCreated on cleanup', async () => {
-    const { unmount } = renderHook(() =>
-      usePanelSurface(1, { autoCreatePermanentPanels: false }),
-    );
+    const { unmount } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     unmount();
@@ -625,9 +492,7 @@ describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', 
   });
 
   it('updates mainRepoSession when the subscriber fires with an updated session', async () => {
-    const { result } = renderHook(() =>
-      usePanelSurface(1, { autoCreatePermanentPanels: false }),
-    );
+    const { result } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     // Confirm the hook resolved its initial session.
@@ -646,9 +511,7 @@ describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', 
   });
 
   it('does NOT update mainRepoSession when the subscriber fires for a different session', async () => {
-    const { result } = renderHook(() =>
-      usePanelSurface(1, { autoCreatePermanentPanels: false }),
-    );
+    const { result } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     expect(capturedSubscriber).not.toBeNull();
@@ -663,9 +526,7 @@ describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', 
   });
 
   it('unsubscribes from sessionStore when the hook unmounts', async () => {
-    const { unmount } = renderHook(() =>
-      usePanelSurface(1, { autoCreatePermanentPanels: false }),
-    );
+    const { unmount } = renderHook(() => usePanelSurface(1));
     await flushAsync();
 
     unmount();
@@ -674,7 +535,7 @@ describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', 
   });
 
   it('does NOT call getOrCreateMainRepoSession when projectId is null', async () => {
-    renderHook(() => usePanelSurface(null, { autoCreatePermanentPanels: false }));
+    renderHook(() => usePanelSurface(null));
     await flushAsync();
 
     expect(mockGetOrCreateMainRepoSession).not.toHaveBeenCalled();

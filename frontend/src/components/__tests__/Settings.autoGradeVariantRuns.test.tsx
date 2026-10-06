@@ -39,7 +39,6 @@ vi.mock('../../stores/configStore', () => ({
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     codeReviewEvalEnabled: true,
     computeCostFromRates: false,
     autoGradeVariantRuns: true,

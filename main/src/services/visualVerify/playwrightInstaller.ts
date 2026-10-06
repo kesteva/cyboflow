@@ -1,53 +1,41 @@
 /**
- * playwrightInstaller — lazy, chromium-ONLY browser-binary provisioning for the
- * Rung-1 PlaywrightBackend (see docs/proposals/visual-verification-design.md §L2 +
- * "Open decision #3: Playwright bundling = lazy-install chromium-only"). The
- * `playwright` LIBRARY is a dependency, but its browser binaries are deliberately
- * NOT bundled into the packaged app (they are large + platform-specific). This
- * module ensures the chromium binary is present on FIRST use and at most ONCE per
- * process — never bundled, never re-installed.
+ * playwrightInstaller — lazy, chromium-ONLY browser-binary provisioning (see
+ * docs/proposals/visual-verification-design.md "Open decision #3: Playwright
+ * bundling = lazy-install chromium-only"). The `playwright` LIBRARY is a
+ * dependency, but its browser binaries are deliberately NOT bundled into the
+ * packaged app (they are large + platform-specific). This module ensures the
+ * chromium binary is present on FIRST use and at most ONCE per process — never
+ * bundled, never re-installed.
  *
  * This file lives under main/src/services/* and MAY import node:child_process + the
  * 'playwright' package — but it imports the package LAZILY (`await import('playwright')`,
  * see the NOTE below) so a pruned-in-packaging devDependency soft-fails instead of
- * crashing the boot path. The backend imports this; the (electron-free,
- * child-process-free) scheduler never does.
+ * crashing the boot path. The (electron-free, child-process-free) scheduler never
+ * imports it.
  *
  * Strategy (idempotent + memoized):
  *  1. Probe whether chromium is already installed (chromium.executablePath()
  *     resolves to an EXISTING file). If so, nothing to do — the common case after
  *     the first run / in a dev checkout with browsers already downloaded.
  *  2. Otherwise run `npx playwright install chromium` ONCE, capturing the result in
- *     a memoized promise so concurrent lanes share the single install.
+ *     a memoized promise so concurrent callers share the single install.
  *
  * Failure is SOFT: ensureChromium() resolves to false (never throws) when the
- * binary is absent AND the install fails — the backend's healthCheck() then
- * returns false, the resolver drops 'playwright' from the chain, and the request
- * falls forward / SKIPs per never-silently-pass (missing precondition ⇒ SKIPPED,
- * never FAIL, never hang).
+ * binary is absent AND the install fails.
  *
- * TWO CONSUMERS, and no longer `@cyboflow-hidden` (the marker this file carried
- * until the health panel landed):
+ * THE CONSUMER: the §6 health panel's chromium fix-it button
+ * (docs/proposals/verification-setup-flow.md §6), wired in verifyComposition.ts
+ * via hostProbeAdapters.makeChromiumProvisioner. A missing chromium row offers
+ * "Install", and this is what runs. The verification agent's driver CLI
+ * (driver/driverCore.ts) resolves the bundled `playwright` prod dependency
+ * directly and never provisions through here.
  *
- *  1. playwrightBackend.ts — the legacy backend, itself retired-in-place
- *     (docs/proposals/verification-agent-redesign.md §3/§5.8). Reached only by
- *     a pre-upgrade run's legacy `verify_chain` stamp or a NEW run started
- *     under the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (§5.8). The
- *     default v1 engine never provisions a chromium binary this way — the
- *     agent path's driver CLI (driver/driverCore.ts) resolves the bundled
- *     `playwright` prod dependency directly.
- *  2. The §6 health panel's chromium fix-it button
- *     (docs/proposals/verification-setup-flow.md §6), wired in index.ts via
- *     hostProbeAdapters.makeChromiumProvisioner. This one is USER-REACHABLE on
- *     the default engine: a missing chromium row offers "Install", and this is
- *     what runs.
- *
- * KNOWN LIMITATION of consumer 2 in a PACKAGED app: the install path below
- * spawns `npx`, which a packaged build neither bundles nor puts on PATH, and
- * which — where a system npx does exist — resolves a Playwright revision
- * independent of the app's pinned one. The button is therefore reliable in a
- * dev checkout and best-effort in a packaged app; the failure is soft (the row
- * stays 'missing') but the fix is real work and is tracked separately.
+ * KNOWN LIMITATION in a PACKAGED app: the install path below spawns `npx`, which
+ * a packaged build neither bundles nor puts on PATH, and which — where a system
+ * npx does exist — resolves a Playwright revision independent of the app's pinned
+ * one. The button is therefore reliable in a dev checkout and best-effort in a
+ * packaged app; the failure is soft (the row stays 'missing') but the fix is real
+ * work and is tracked separately.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -61,8 +49,7 @@ import type { LoggerLike } from '../../orchestrator/types';
 // launch (invisible to `pnpm dev` + the unit gate, which have root devDeps). We
 // therefore load it LAZILY via `await import('playwright')` inside the async paths
 // below, wrapped so a missing MODULE soft-fails (ensureChromium → false) exactly
-// like a missing chromium BINARY. The default browserFactory in playwrightBackend.ts
-// does the same. (The long-term fix is to promote `playwright` to dependencies; this
+// like a missing chromium BINARY. (The long-term fix is to promote `playwright` to dependencies; this
 // lazy guard keeps the boot path safe regardless.)
 
 /** How long to wait for `npx playwright install chromium` before giving up. */

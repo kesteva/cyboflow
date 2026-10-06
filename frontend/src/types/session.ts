@@ -78,7 +78,6 @@ export interface Session {
   prompt: string;
   status: 'initializing' | 'ready' | 'running' | 'waiting' | 'stopped' | 'completed_unviewed' | 'error';
   statusMessage?: string;
-  pid?: number;
   createdAt: string;
   lastActivity?: string;
   output: string[];
@@ -87,7 +86,6 @@ export interface Session {
   isRunning?: boolean;
   lastViewedAt?: string;
   projectId?: number;
-  folderId?: string;
   permissionMode?: 'approve' | 'ignore';
   runStartedAt?: string;
   isMainRepo?: boolean;
@@ -106,7 +104,6 @@ export interface Session {
   isFavorite?: boolean;
   toolType?: 'claude' | 'none';
   archived?: boolean;
-  gitStatus?: GitStatus;
   baseCommit?: string;
   baseBranch?: string;
   runId?: string | null;
@@ -191,28 +188,6 @@ export interface Session {
   originIdeaId?: string | null;
 }
 
-export interface GitStatus {
-  state: 'clean' | 'modified' | 'untracked' | 'ahead' | 'behind' | 'diverged' | 'conflict' | 'unknown';
-  ahead?: number;
-  behind?: number;
-  additions?: number; // Uncommitted additions
-  deletions?: number; // Uncommitted deletions
-  filesChanged?: number; // Uncommitted files changed
-  lastChecked?: string;
-  // Enhanced status information
-  isReadyToMerge?: boolean; // True when ahead of base branch with no uncommitted changes and not diverged (not behind)
-  hasUncommittedChanges?: boolean;
-  hasUntrackedFiles?: boolean;
-  // Allow tracking multiple states for better clarity
-  secondaryStates?: Array<'modified' | 'untracked' | 'ahead' | 'behind'>;
-  // Commit statistics (for all commits ahead of main)
-  commitAdditions?: number;
-  commitDeletions?: number;
-  commitFilesChanged?: number;
-  // Total commits in branch (not just ahead of main)
-  totalCommits?: number;
-}
-
 // NOTE: keep this interface in sync with main/src/types/session.ts CreateSessionRequest
 // until shared/types/ipc.ts consolidates IPC request shapes. See FIND-SPRINT-037-5.
 export interface CreateSessionRequest {
@@ -286,13 +261,11 @@ export interface CreateSessionRequest {
    */
   designIdeaId?: string;
   projectId?: number;
-  folderId?: string;
   baseBranch?: string;
   toolType?: 'claude' | 'none';
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
-    ultrathink?: boolean;
     /** Per-launch opt-in for Anthropic fast mode (premium, Opus-only). Default off. */
     fastMode?: boolean;
     /**
@@ -325,31 +298,6 @@ export interface GitCommands {
   getRebaseFromMainCommand?: () => string;
   getSquashAndRebaseToMainCommand?: () => string;
 }
-
-export interface GitErrorDetails {
-  title: string;
-  message: string;
-  command?: string;
-  commands?: string[];
-  output: string;
-  workingDirectory?: string;
-  projectPath?: string;
-  isRebaseConflict?: boolean;
-  hasConflicts?: boolean;
-  conflictingFiles?: string[];
-  conflictingCommits?: {
-    ours: string[];
-    theirs: string[];
-  };
-}
-
-// Import Folder from the proper types file
-import type { Folder } from './folder';
-
-// FolderWithProjectId is just an alias for Folder since it already has projectId
-export type FolderWithProjectId = Folder;
-
-export type ContextMenuPayload = Session | Folder;
 
 /**
  * `sessions:open-idea-session` wire types (the backlog idea card's "Open").

@@ -1,15 +1,6 @@
 /**
- * usePanelSurface — unified panel-surface hook.
- *
- * Consolidates the ~90-line panel-surface scaffolding that was duplicated between
- * CyboflowRoot and ProjectView (FIND-SPRINT-032-3).
- *
- * Two modes:
- *   autoCreatePermanentPanels: false  (CyboflowRoot)
- *     – Just loads panels; never auto-creates dashboard/setup-tasks; no permanence guard on close.
- *   autoCreatePermanentPanels: true   (ProjectView)
- *     – Ensures dashboard + setup-tasks permanent panels exist; guards their close; falls back to
- *       dashboard on close of the last non-permanent panel.
+ * usePanelSurface — CyboflowRoot's central panel surface: resolves the
+ * main-repo session, loads its panels, and handles panel select/close.
  *
  * Session priority: when a quick session is active (selectedSessionId in cyboflowStore),
  * panel operations target it instead of mainRepoSession — the quick session's panels are
@@ -25,10 +16,6 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { disposeInteractiveTerminal } from '../components/cyboflow/InteractiveTerminalView';
 
-export interface UsePanelSurfaceOptions {
-  autoCreatePermanentPanels: boolean;
-}
-
 export interface UsePanelSurfaceResult {
   mainRepoSession: Session | null;
   effectiveSession: Session | null;
@@ -38,12 +25,7 @@ export interface UsePanelSurfaceResult {
   handlePanelClose: (panel: ToolPanel) => Promise<void>;
 }
 
-export function usePanelSurface(
-  projectId: number | null,
-  options: UsePanelSurfaceOptions,
-): UsePanelSurfaceResult {
-  const { autoCreatePermanentPanels } = options;
-
+export function usePanelSurface(projectId: number | null): UsePanelSurfaceResult {
   // --- Main-repo session resolution ---
   const [mainRepoSessionId, setMainRepoSessionId] = useState<string | null>(null);
   const [mainRepoSession, setMainRepoSession] = useState<Session | null>(null);
@@ -123,85 +105,16 @@ export function usePanelSurface(
     };
   }, [selectedSessionId]);
 
-  // Load panels when mainRepoSessionId changes, optionally auto-creating permanent panels.
+  // Load panels when mainRepoSessionId changes.
   useEffect(() => {
     if (!mainRepoSessionId) return;
-
     const id = mainRepoSessionId;
-
-    if (!autoCreatePermanentPanels) {
-      // CyboflowRoot mode: just load, no auto-creation.
-      panelApi
-        .loadPanelsForSession(id)
-        // Diff lives in the right rail now — never surface a central 'diff' panel.
-        .then((loaded) => setPanels(id, loaded.filter((p) => p.type !== 'diff')))
-        .catch((err) => console.error('[usePanelSurface] Failed to load panels:', err));
-      return;
-    }
-
-    // ProjectView mode: load, ensure permanent panels, reload, set initial active panel.
-    (async () => {
-      try {
-        // Diff lives in the right rail now — never surface a central 'diff' panel.
-        const loadedPanels = (await panelApi.loadPanelsForSession(id)).filter(
-          (p) => p.type !== 'diff',
-        );
-
-        const dashboardPanel = loadedPanels.find((p) => p.type === 'dashboard');
-        const setupTasksPanel = loadedPanels.find((p) => p.type === 'setup-tasks');
-
-        let panelsCreated = false;
-
-        if (!dashboardPanel) {
-          await panelApi.createPanel({
-            sessionId: id,
-            type: 'dashboard',
-            title: 'Dashboard',
-            metadata: { permanent: true },
-          });
-          panelsCreated = true;
-        }
-
-        if (!setupTasksPanel) {
-          await panelApi.createPanel({
-            sessionId: id,
-            type: 'setup-tasks',
-            title: 'Setup',
-            metadata: { permanent: true },
-          });
-          panelsCreated = true;
-        }
-
-        const finalPanels = panelsCreated
-          ? (await panelApi.loadPanelsForSession(id)).filter((p) => p.type !== 'diff')
-          : loadedPanels;
-
-        setPanels(id, finalPanels);
-
-        const activePanel = await panelApi.getActivePanel(id);
-        const setupPanel = finalPanels.find((p) => p.type === 'setup-tasks');
-        const dashPanel = finalPanels.find((p) => p.type === 'dashboard');
-
-        // The diff panel is filtered out of finalPanels (it lives in the right rail now),
-        // so an active diff panel is no longer a valid central selection — treat it as "none".
-        const activeInSurface =
-          activePanel && finalPanels.some((p) => p.id === activePanel.id) ? activePanel : null;
-
-        if (!activeInSurface) {
-          // No (valid) active panel — prioritize setup-tasks over dashboard.
-          const panelToActivate = setupPanel ?? dashPanel;
-          if (panelToActivate) {
-            setActivePanelInStore(id, panelToActivate.id);
-            await panelApi.setActivePanel(id, panelToActivate.id);
-          }
-        } else {
-          setActivePanelInStore(id, activeInSurface.id);
-        }
-      } catch (err) {
-        console.error('[usePanelSurface] Failed to load/create panels:', err);
-      }
-    })();
-  }, [mainRepoSessionId, setPanels, setActivePanelInStore, autoCreatePermanentPanels]);
+    panelApi
+      .loadPanelsForSession(id)
+      // Diff lives in the right rail now — never surface a central 'diff' panel.
+      .then((loaded) => setPanels(id, loaded.filter((p) => p.type !== 'diff')))
+      .catch((err) => console.error('[usePanelSurface] Failed to load panels:', err));
+  }, [mainRepoSessionId, setPanels]);
 
   // Load panels for quick session when it becomes active.
   useEffect(() => {
@@ -266,6 +179,23 @@ export function usePanelSurface(
       if (!effectiveSessionId) return;
       setActivePanelInStore(effectiveSessionId, panel.id);
       await panelApi.setActivePanel(effectiveSessionId, panel.id);
+
+      // Viewing a chat panel acknowledges its 'completed_unviewed' state: main
+      // sets that flag when a background panel's run exits (events.ts), and
+      // this is the only path that clears it — without it the tab's
+      // unviewed dot never goes away.
+      if (panel.type === 'claude') {
+        const customState = panel.state?.customState as
+          | { hasUnviewedContent?: boolean; panelStatus?: string }
+          | undefined;
+        if (customState?.hasUnviewedContent || customState?.panelStatus === 'completed_unviewed') {
+          try {
+            await panelApi.clearPanelUnviewedContent(panel.id);
+          } catch (err) {
+            console.error('[usePanelSurface] Failed to clear unviewed content:', err);
+          }
+        }
+      }
     },
     [effectiveSessionId, setActivePanelInStore],
   );
@@ -301,22 +231,11 @@ export function usePanelSurface(
       };
 
       const idx = sessionPanels.findIndex((p) => p.id === panel.id);
-      let next: ToolPanel | undefined = sessionPanels[idx + 1] ?? sessionPanels[idx - 1];
-
-      if (autoCreatePermanentPanels) {
-        // ProjectView mode: permanent panels are not closeable.
-        if (panel.type === 'dashboard' || panel.type === 'setup-tasks') {
-          return;
-        }
-        // If no adjacent panel or it resolves to the same panel, fall back to dashboard.
-        if (!next || next.id === panel.id) {
-          next = sessionPanels.find((p) => p.type === 'dashboard') ?? sessionPanels[0];
-        }
-      }
+      const next: ToolPanel | undefined = sessionPanels[idx + 1] ?? sessionPanels[idx - 1];
 
       await closeAndActivate(next);
     },
-    [effectiveSessionId, sessionPanels, removePanel, setActivePanelInStore, autoCreatePermanentPanels],
+    [effectiveSessionId, sessionPanels, removePanel, setActivePanelInStore],
   );
 
   return {

@@ -37,12 +37,12 @@ afterEach(async () => {
 
 describe('ConfigManager.getDefaultExecutionModel', () => {
   it("floors to 'programmatic' on a fresh instance (before initialize)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getDefaultExecutionModel()).toBe('programmatic');
   });
 
   it("defaultExecutionModel is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().defaultExecutionModel).toBeUndefined();
     expect(mgr.getDefaultExecutionModel()).toBe('programmatic');
   });
@@ -53,7 +53,7 @@ describe('ConfigManager.getDefaultExecutionModel', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().defaultExecutionModel).toBeUndefined();
@@ -61,13 +61,13 @@ describe('ConfigManager.getDefaultExecutionModel', () => {
   });
 
   it("updateConfig({ defaultExecutionModel: 'orchestrated' }) persists and round-trips through a fresh initialize()", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ defaultExecutionModel: 'orchestrated' });
 
     expect(mgr.getDefaultExecutionModel()).toBe('orchestrated');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().defaultExecutionModel).toBe('orchestrated');
     expect(reloaded.getDefaultExecutionModel()).toBe('orchestrated');
@@ -79,7 +79,7 @@ describe('ConfigManager.getDefaultExecutionModel', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultExecutionModel: 'telekinetic' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     // The raw (untrusted) value survives the deep-merge onto config...

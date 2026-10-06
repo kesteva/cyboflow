@@ -12,9 +12,8 @@
  * that counts on it — a surface-scoped lifecycle makes availability deterministic
  * and re-entry simply respawns from the on-disk blessed bytes.
  *
- * SINGLE-RESOURCE server — a deliberate simplification over StaticServerManager's
- * static-root pipeline (path-traversal denylist, realpath containment, MIME map):
- * the interactive prototype contract is ONE self-contained `prototype/index.html`
+ * SINGLE-RESOURCE server — deliberately no static-root pipeline (path-traversal
+ * denylist, realpath containment, MIME map): the interactive prototype contract is ONE self-contained `prototype/index.html`
  * with no sibling assets (subresources are inline data: only, enforced by the
  * injected CSP), so this server answers EXACTLY one path —
  * `/<token>/prototype/index.html` — and 404s everything else, leaking no signal
@@ -28,8 +27,7 @@
  *
  * AUTHORIZATION: binding loopback is NOT access control — anything on 127.0.0.1
  * could hit the port. The first path segment is an unguessable per-spawn token
- * (`randomBytes(16)`), the sole authorization boundary, exactly as
- * StaticServerManager does.
+ * (`randomBytes(16)`), the sole authorization boundary.
  *
  * The loader fn, origin-registry hooks, watchdog control, and server-stopped
  * notifier are all constructor seams, so this manager unit-tests with plain

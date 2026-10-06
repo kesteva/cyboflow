@@ -39,12 +39,10 @@ describe('CliManagerFactory demo safety', () => {
     const demoSdkManager = await factory.createManager('codex-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     // Mirrors boot: codex-pty omits db and reuses the handle captured above.
     const demoPtyManager = await factory.createManager('codex-pty', {
       sessionManager,
-      skipValidation: true,
     });
 
     // Boot's narrowing is structural, so this — not `instanceof` — is what has to
@@ -65,7 +63,6 @@ describe('CliManagerFactory demo safety', () => {
     const demoSdkManager = await factory.createManager('codex-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     if (!isCodexSdkManagerLike(demoSdkManager)) throw new Error('demo manager lost its seams');
 
@@ -90,12 +87,10 @@ describe('CliManagerFactory demo safety', () => {
     const demoSdkManager = await factory.createManager('omp-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     // Mirrors boot: omp-pty omits db and reuses the handle captured above.
     const demoPtyManager = await factory.createManager('omp-pty', {
       sessionManager,
-      skipValidation: true,
     });
 
     expect(isOmpSdkManagerLike(demoSdkManager)).toBe(true);
@@ -112,7 +107,6 @@ describe('CliManagerFactory demo safety', () => {
     const demoSdkManager = await factory.createManager('omp-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     if (!isOmpSdkManagerLike(demoSdkManager)) throw new Error('demo manager lost its seams');
 
@@ -134,20 +128,16 @@ describe('CliManagerFactory demo safety', () => {
     const normalSdkManager = await factory.createManager('codex-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     const normalPtyManager = await factory.createManager('codex-pty', {
       sessionManager,
-      skipValidation: true,
     });
     const normalOmpSdkManager = await factory.createManager('omp-sdk', {
       sessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     const normalOmpPtyManager = await factory.createManager('omp-pty', {
       sessionManager,
-      skipValidation: true,
     });
 
     expect(normalSdkManager).toBeInstanceOf(CodexSdkManager);

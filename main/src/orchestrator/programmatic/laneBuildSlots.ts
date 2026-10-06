@@ -21,7 +21,7 @@
  *     to the lane commit-integrity probe and could be swept into a commit, so an
  *     exclude that cannot be written means no slot dir at all. The entry is
  *     anchored and narrow: projects commit other `.cyboflow/` files
- *     (`verify-runbook.json`, baselines).
+ *     (`verify-runbook.json`).
  *   - VERIFIED with real git before the first slot is created: a `.gitignore`
  *     negation outranks the local exclude, and files already tracked under the
  *     root are never ignored ({@link verifyLaneBuildSlotsIgnored}). Either one

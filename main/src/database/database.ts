@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
-import { join, dirname, basename } from 'path';
-import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
+import { join, dirname } from 'path';
+import type { Project, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
@@ -131,6 +131,15 @@ interface ToolPanelRow {
   created_at: string;
   substrate?: 'sdk' | 'interactive' | null;
 }
+
+/**
+ * Panel types cyboflow no longer has (Crystal's per-project 'dashboard' and
+ * 'setup-tasks' panels). Older databases can still hold rows of these types,
+ * flagged `permanent`, so the panel-listing reads skip them rather than hand
+ * the renderer an un-closable "Unknown Panel Type" tab. No migration deletes
+ * the rows; they are simply never listed.
+ */
+const RETIRED_PANEL_TYPES_SQL = "('dashboard', 'setup-tasks')";
 
 // Interface for execution diff database rows
 interface ExecutionDiffRow {
@@ -266,26 +275,6 @@ export class DatabaseService {
   }
 
   /**
-   * Execute an async function within a database transaction with automatic rollback on error
-   * @param fn Async function to execute within the transaction
-   * @returns Promise with result of the function
-   * @throws Error if transaction fails
-   */
-  private async transactionAsync<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(() => {
-        fn().then(resolve).catch(reject);
-      });
-      
-      try {
-        transaction();
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  /**
    * Compute (once) the boot-time schema-version verdict WITHOUT touching the
    * schema (docs/UPDATES.md): both packaged variants can reach the same data
    * dir (a shared CYBOFLOW_DIR override, or downgrading the same kind), so a
@@ -374,21 +363,13 @@ export class DatabaseService {
       dflt_value: unknown;
       pk: number;
     }
-    
-    // Legacy project_folders table structure for migration
-    interface LegacyProjectFolder {
-      id: number;
-      name: string;
-      project_id: number;
-      display_order?: number;
-      created_at?: string;
-      updated_at?: string;
-    }
+
     const tableInfo = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
     const hasArchivedColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'archived');
     const hasInitialPromptColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'initial_prompt');
     const hasLastViewedAtColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'last_viewed_at');
     const hasStatusMessageColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'status_message');
+    const hasRunStartedAtColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'run_started_at');
 
     if (!hasArchivedColumn) {
       // Run migration to add archived column
@@ -483,9 +464,14 @@ export class DatabaseService {
       this.db.prepare("CREATE INDEX idx_execution_diffs_sequence ON execution_diffs(session_id, execution_sequence)").run();
     }
 
-    // Add last_viewed_at column if it doesn't exist
+    // Add last_viewed_at / run_started_at (both DATETIME) if they don't exist.
+    // Plain ADDs on purpose: never rebuild sessions from a hardcoded column
+    // list, which silently drops every column the list omits.
     if (!hasLastViewedAtColumn) {
-      this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at TEXT").run();
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at DATETIME").run();
+    }
+    if (!hasRunStartedAtColumn) {
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN run_started_at DATETIME").run();
     }
 
     // Add commit_message column to execution_diffs if it doesn't exist
@@ -538,35 +524,6 @@ export class DatabaseService {
           this.db.prepare("ALTER TABLE sessions ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE").run();
           this.db.prepare("CREATE INDEX idx_sessions_project_id ON sessions(project_id)").run();
         }
-
-        // Import existing config as default project if it exists
-        try {
-          const configManager = require('../services/configManager').configManager;
-          const gitRepoPath = configManager.getGitRepoPath();
-          
-          if (gitRepoPath) {
-            // basename, not split('/'): on Windows the repo path is
-            // backslash-separated, so splitting on '/' would name the project
-            // after the entire path.
-            const projectName = basename(gitRepoPath) || 'Default Project';
-            const result = this.db.prepare(`
-              INSERT INTO projects (name, path, active)
-              VALUES (?, ?, 1)
-            `).run(projectName, gitRepoPath);
-            
-            // Update existing sessions to use this project
-            if (result.lastInsertRowid) {
-              this.db.prepare(`
-                UPDATE sessions 
-                SET project_id = ?
-                WHERE project_id IS NULL
-              `).run(result.lastInsertRowid);
-            }
-          }
-        } catch {
-          // Config manager not available during initial setup
-          console.log('Skipping default project creation during initial setup');
-        }
       });
     }
 
@@ -579,13 +536,7 @@ export class DatabaseService {
       this.db.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_is_main_repo ON sessions(is_main_repo, project_id)").run();
     }
 
-    // Add main_branch column to projects table if it doesn't exist
     const projectsTableInfo = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
-    const hasMainBranchColumn = projectsTableInfo.some((col: SqliteTableInfo) => col.name === 'main_branch');
-    
-    if (!hasMainBranchColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN main_branch TEXT").run();
-    }
 
     // Add build_script column to projects table if it doesn't exist
     const hasBuildScriptColumn = projectsTableInfo.some((col: SqliteTableInfo) => col.name === 'build_script');
@@ -608,34 +559,6 @@ export class DatabaseService {
       this.db.prepare("ALTER TABLE projects ADD COLUMN open_ide_command TEXT").run();
     }
 
-    // Create project_run_commands table if it doesn't exist
-    const runCommandsTable = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_run_commands'").all();
-    if (runCommandsTable.length === 0) {
-      this.db.prepare(`
-        CREATE TABLE project_run_commands (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          project_id INTEGER NOT NULL,
-          command TEXT NOT NULL,
-          display_name TEXT,
-          order_index INTEGER DEFAULT 0,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-      `).run();
-      this.db.prepare("CREATE INDEX idx_project_run_commands_project_id ON project_run_commands(project_id)").run();
-      
-      // Migrate existing run_script data to the new table
-      const projectsWithRunScripts = this.db.prepare("SELECT id, run_script FROM projects WHERE run_script IS NOT NULL").all() as Array<{id: number; run_script: string}>;
-      for (const project of projectsWithRunScripts) {
-        if (project.run_script) {
-          this.db.prepare(`
-            INSERT INTO project_run_commands (project_id, command, display_name, order_index)
-            VALUES (?, ?, 'Default Run Command', 0)
-          `).run(project.id, project.run_script);
-        }
-      }
-    }
-    
     // Check if display_order columns exist
     const projectsTableInfo2 = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
     const sessionsTableInfo2 = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
@@ -679,86 +602,6 @@ export class DatabaseService {
       this.db.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_display_order ON sessions(project_id, display_order)").run();
     }
     
-    // Normalize timestamp fields migration
-    // Check if last_viewed_at is still TEXT type
-    const sessionTableInfoTimestamp = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
-    const lastViewedAtColumn = sessionTableInfoTimestamp.find((col: SqliteTableInfo) => col.name === 'last_viewed_at');
-    
-    // Skip this migration if last_viewed_at_new already exists (migration partially completed)
-    const hasLastViewedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'last_viewed_at_new');
-    
-    if (lastViewedAtColumn && lastViewedAtColumn.type === 'TEXT' && !hasLastViewedAtNew) {
-      console.log('[Database] Running timestamp normalization migration...');
-      
-      try {
-        // Check if the new columns already exist (from a previous failed migration)
-        const hasLastViewedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'last_viewed_at_new');
-        const hasRunStartedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'run_started_at_new');
-        
-        // Create new temporary columns with DATETIME type if they don't exist
-        if (!hasLastViewedAtNew) {
-          this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at_new DATETIME").run();
-        }
-        if (!hasRunStartedAtNew) {
-          this.db.prepare("ALTER TABLE sessions ADD COLUMN run_started_at_new DATETIME").run();
-        }
-        
-        // Copy and convert existing data
-        this.db.prepare("UPDATE sessions SET last_viewed_at_new = datetime(last_viewed_at) WHERE last_viewed_at IS NOT NULL").run();
-        // Note: run_started_at column doesn't exist in the original schema, skip this update
-        
-        // Create a backup of the table with proper schema
-        this.db.prepare(`
-          CREATE TABLE sessions_new (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            initial_prompt TEXT NOT NULL,
-            worktree_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_output TEXT,
-            exit_code INTEGER,
-            pid INTEGER,
-            claude_session_id TEXT,
-            archived BOOLEAN DEFAULT 0,
-            last_viewed_at DATETIME,
-            project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
-            run_started_at DATETIME,
-            is_main_repo BOOLEAN DEFAULT 0,
-            display_order INTEGER
-          )
-        `).run();
-        
-        // Copy all data to new table
-        this.db.prepare(`
-          INSERT INTO sessions_new 
-          SELECT id, name, initial_prompt, worktree_name, worktree_path, status, 
-                 created_at, updated_at, last_output, exit_code, pid, claude_session_id,
-                 archived, last_viewed_at_new, project_id, permission_mode, 
-                 run_started_at_new, is_main_repo, display_order
-          FROM sessions
-        `).run();
-        
-        // Drop old table and rename new one
-        this.db.prepare("DROP TABLE sessions").run();
-        this.db.prepare("ALTER TABLE sessions_new RENAME TO sessions").run();
-        
-        // Recreate indexes
-        this.db.prepare("CREATE INDEX idx_sessions_archived ON sessions(archived)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_project_id ON sessions(project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_is_main_repo ON sessions(is_main_repo, project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_display_order ON sessions(project_id, display_order)").run();
-        
-        console.log('[Database] Timestamp normalization migration completed successfully');
-      } catch (error) {
-        console.error('[Database] Failed to normalize timestamps:', error);
-        // Don't throw - allow app to continue with TEXT fields
-      }
-    }
-    
     // Add missing completion_timestamp to prompt_markers if it doesn't exist
     const promptMarkersInfo = this.db.prepare("PRAGMA table_info(prompt_markers)").all() as SqliteTableInfo[];
     const hasCompletionTimestamp = promptMarkersInfo.some((col: SqliteTableInfo) => col.name === 'completion_timestamp');
@@ -776,14 +619,6 @@ export class DatabaseService {
       console.log('[Database] Added is_favorite column to sessions table');
     }
 
-    // Add auto_commit column to sessions table if it doesn't exist
-    const hasAutoCommitColumn = sessionTableInfoFavorite.some((col: SqliteTableInfo) => col.name === 'auto_commit');
-    
-    if (!hasAutoCommitColumn) {
-      this.db.prepare("ALTER TABLE sessions ADD COLUMN auto_commit BOOLEAN DEFAULT 1").run();
-      console.log('[Database] Added auto_commit column to sessions table');
-    }
-
     // Add skip_continue_next column to sessions table if it doesn't exist
     const hasSkipContinueNextColumn = sessionTableInfoFavorite.some((col: SqliteTableInfo) => col.name === 'skip_continue_next');
     
@@ -792,130 +627,18 @@ export class DatabaseService {
       console.log('[Database] Added skip_continue_next column to sessions table');
     }
 
-    // Handle folder table migration
-    // First, check if project_folders table exists (old schema)
-    const projectFoldersExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_folders'").all().length > 0;
-    const foldersExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='folders'").all().length > 0;
-    
-    if (projectFoldersExists) {
-      console.log('[Database] Found legacy project_folders table, migrating to new folders schema...');
-      
-      // Check if the old folders table has INTEGER id
-      if (foldersExists) {
-        const foldersInfo = this.db.prepare("PRAGMA table_info(folders)").all() as SqliteTableInfo[];
-        const idColumn = foldersInfo.find((col: SqliteTableInfo) => col.name === 'id');
-        
-        if (idColumn && idColumn.type === 'INTEGER') {
-          // Old folders table with INTEGER id exists, drop it
-          console.log('[Database] Dropping old folders table with INTEGER id...');
-          this.db.prepare('DROP TABLE IF EXISTS folders').run();
-        }
-      }
-      
-      // Create new folders table with TEXT id
-      this.db.prepare(`
-        CREATE TABLE IF NOT EXISTS folders (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          project_id INTEGER NOT NULL,
-          display_order INTEGER DEFAULT 0,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-      `).run();
-      
-      // Migrate data from project_folders to folders
-      const projectFolders = this.db.prepare('SELECT * FROM project_folders').all() as LegacyProjectFolder[];
-      console.log(`[Database] Migrating ${projectFolders.length} folders from project_folders to folders table...`);
-      
-      for (const folder of projectFolders) {
-        const newId = `folder-${folder.id}-${Date.now()}`;
-        this.db.prepare(`
-          INSERT INTO folders (id, name, project_id, display_order, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(newId, folder.name, folder.project_id, folder.display_order || 0, folder.created_at, folder.updated_at);
-        
-        // Update sessions that reference this folder
-        this.db.prepare(`
-          UPDATE sessions 
-          SET folder_id = ? 
-          WHERE folder_id = ?
-        `).run(newId, folder.id);
-      }
-      
-      // Drop the old project_folders table
-      this.db.prepare('DROP TABLE project_folders').run();
-      console.log('[Database] Dropped legacy project_folders table');
-      
-      // Update sessions table folder_id column type if needed
-      const sessionTableInfo = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
-      const folderIdColumn = sessionTableInfo.find((col: SqliteTableInfo) => col.name === 'folder_id');
-      
-      if (folderIdColumn && folderIdColumn.type === 'INTEGER') {
-        console.log('[Database] Converting sessions.folder_id from INTEGER to TEXT...');
-        
-        // Create new sessions table with correct schema
-        this.db.prepare(`
-          CREATE TABLE sessions_folders_migration (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            initial_prompt TEXT NOT NULL,
-            worktree_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_output TEXT,
-            exit_code INTEGER,
-            pid INTEGER,
-            claude_session_id TEXT,
-            archived BOOLEAN DEFAULT 0,
-            last_viewed_at DATETIME,
-            project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
-            run_started_at DATETIME,
-            is_main_repo BOOLEAN DEFAULT 0,
-            display_order INTEGER,
-            is_favorite BOOLEAN DEFAULT 0,
-            folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
-            auto_commit BOOLEAN DEFAULT 1
-          )
-        `).run();
-        
-        // Copy data, folder_id has already been converted to TEXT values above
-        this.db.prepare(`
-          INSERT INTO sessions_folders_migration 
-          SELECT * FROM sessions
-        `).run();
-        
-        // Drop old table and rename new one
-        this.db.prepare('DROP TABLE sessions').run();
-        this.db.prepare('ALTER TABLE sessions_folders_migration RENAME TO sessions').run();
-        
-        // Recreate indexes
-        this.db.prepare("CREATE INDEX idx_sessions_archived ON sessions(archived)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_project_id ON sessions(project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_is_main_repo ON sessions(is_main_repo, project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_display_order ON sessions(project_id, display_order)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_folder_id ON sessions(folder_id)").run();
-        
-        console.log('[Database] Successfully converted sessions.folder_id to TEXT type');
-      }
-    } else {
-      // No project_folders table, create folders table normally
-      this.db.prepare(`
-        CREATE TABLE IF NOT EXISTS folders (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          project_id INTEGER NOT NULL,
-          display_order INTEGER DEFAULT 0,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-      `).run();
-    }
+    // Add folders table if it doesn't exist
+    this.db.prepare(`
+      CREATE TABLE IF NOT EXISTS folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        project_id INTEGER NOT NULL,
+        display_order INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `).run();
 
     // Create index on folders project_id
     this.db.prepare(`
@@ -973,30 +696,6 @@ export class DatabaseService {
       console.log('[Database] Created ui_state table');
     }
 
-    // Add app_opens table to track application launches
-    const appOpensTable = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_opens'").all();
-    if (appOpensTable.length === 0) {
-      this.db.prepare(`
-        CREATE TABLE app_opens (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          welcome_hidden BOOLEAN DEFAULT 0,
-          app_version TEXT
-        )
-      `).run();
-      this.db.prepare("CREATE INDEX idx_app_opens_opened_at ON app_opens(opened_at)").run();
-      console.log('[Database] Created app_opens table');
-    }
-
-    // Add app_version column to app_opens table if it doesn't exist
-    const appOpensTableInfo = this.db.prepare("PRAGMA table_info(app_opens)").all() as SqliteTableInfo[];
-    const hasAppVersionColumn = appOpensTableInfo.some((col: SqliteTableInfo) => col.name === 'app_version');
-
-    if (!hasAppVersionColumn) {
-      this.db.prepare("ALTER TABLE app_opens ADD COLUMN app_version TEXT").run();
-      console.log('[Database] Added app_version column to app_opens table');
-    }
-
     // Remove model column from sessions table if it exists (moved to panel level)
     const sessionTableInfoModel = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
     const hasModelColumn = sessionTableInfoModel.some((col: SqliteTableInfo) => col.name === 'model');
@@ -1049,15 +748,6 @@ export class DatabaseService {
       console.log('[Database] Added worktree_folder column to projects table');
     }
 
-    // Add lastUsedModel column to projects table if it doesn't exist
-    const projectsTableInfoModel = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
-    const hasLastUsedModelColumn = projectsTableInfoModel.some((col: SqliteTableInfo) => col.name === 'lastUsedModel');
-    
-    if (!hasLastUsedModelColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN lastUsedModel TEXT DEFAULT 'sonnet'").run();
-      console.log('[Database] Added lastUsedModel column to projects table');
-    }
-
     // Add base_commit and base_branch columns to sessions table if they don't exist
     const sessionsTableInfoBase = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
     const hasBaseCommitColumn = sessionsTableInfoBase.some((col: SqliteTableInfo) => col.name === 'base_commit');
@@ -1071,70 +761,6 @@ export class DatabaseService {
     if (!hasBaseBranchColumn) {
       this.db.prepare("ALTER TABLE sessions ADD COLUMN base_branch TEXT").run();
       console.log('[Database] Added base_branch column to sessions table');
-    }
-
-    // Add commit mode settings columns to projects table if they don't exist
-    const projectsTableInfoCommit = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
-    const hasCommitModeColumn = projectsTableInfoCommit.some((col: SqliteTableInfo) => col.name === 'commit_mode');
-    const hasCommitStructuredPromptTemplateColumn = projectsTableInfoCommit.some((col: SqliteTableInfo) => col.name === 'commit_structured_prompt_template');
-    const hasCommitCheckpointPrefixColumn = projectsTableInfoCommit.some((col: SqliteTableInfo) => col.name === 'commit_checkpoint_prefix');
-    
-    if (!hasCommitModeColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN commit_mode TEXT DEFAULT 'checkpoint'").run();
-      console.log('[Database] Added commit_mode column to projects table');
-    }
-    
-    if (!hasCommitStructuredPromptTemplateColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN commit_structured_prompt_template TEXT").run();
-      console.log('[Database] Added commit_structured_prompt_template column to projects table');
-    }
-    
-    if (!hasCommitCheckpointPrefixColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN commit_checkpoint_prefix TEXT DEFAULT 'checkpoint: '").run();
-      console.log('[Database] Added commit_checkpoint_prefix column to projects table');
-    }
-
-    // Add commit mode settings columns to sessions table if they don't exist
-    const sessionsTableInfoCommit = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
-    const hasSessionCommitModeColumn = sessionsTableInfoCommit.some((col: SqliteTableInfo) => col.name === 'commit_mode');
-    const hasSessionCommitModeSettingsColumn = sessionsTableInfoCommit.some((col: SqliteTableInfo) => col.name === 'commit_mode_settings');
-    
-    if (!hasSessionCommitModeColumn) {
-      try {
-        this.db.prepare("ALTER TABLE sessions ADD COLUMN commit_mode TEXT").run();
-        console.log('[Database] Added commit_mode column to sessions table');
-      } catch (error) {
-        console.error('[Database] Error adding commit_mode column:', error);
-      }
-    }
-    
-    if (!hasSessionCommitModeSettingsColumn) {
-      try {
-        this.db.prepare("ALTER TABLE sessions ADD COLUMN commit_mode_settings TEXT").run();
-        console.log('[Database] Added commit_mode_settings column to sessions table');
-      } catch (error) {
-        console.error('[Database] Error adding commit_mode_settings column:', error);
-      }
-    }
-
-    // Migrate existing auto_commit boolean to commit_mode
-    const hasAutoCommitMigrated = this.db.prepare("SELECT value FROM user_preferences WHERE key = 'auto_commit_migrated'").get();
-    if (!hasAutoCommitMigrated) {
-      console.log('[Database] Migrating auto_commit boolean to commit_mode...');
-      
-      // Update sessions: auto_commit=true -> commit_mode='checkpoint', auto_commit=false -> commit_mode='disabled'
-      this.db.prepare(`
-        UPDATE sessions 
-        SET commit_mode = CASE 
-          WHEN auto_commit = 1 THEN 'checkpoint'
-          ELSE 'disabled'
-        END
-        WHERE commit_mode IS NULL
-      `).run();
-      
-      // Mark migration as complete
-      this.db.prepare("INSERT INTO user_preferences (key, value) VALUES ('auto_commit_migrated', 'true')").run();
-      console.log('[Database] Completed auto_commit migration');
     }
 
     // Add tool panels table if it doesn't exist
@@ -1937,7 +1563,7 @@ export class DatabaseService {
   }
 
   // Project operations
-  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string, mainBranch?: string): Project {
+  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string): Project {
     // Get the max display_order for projects
     const maxOrderResult = this.db.prepare(`
       SELECT MAX(display_order) as max_order
@@ -1947,9 +1573,9 @@ export class DatabaseService {
     const displayOrder = (maxOrderResult?.max_order ?? -1) + 1;
 
     const result = this.db.prepare(`
-      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, main_branch, display_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, mainBranch || null, displayOrder);
+      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, display_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, displayOrder);
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
@@ -2025,10 +1651,6 @@ export class DatabaseService {
     return this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Project | undefined;
   }
 
-  getProjectByPath(path: string): Project | undefined {
-    return this.db.prepare('SELECT * FROM projects WHERE path = ?').get(path) as Project | undefined;
-  }
-
   /**
    * Look up a session by its exact worktree_path. Used by the boot-injected
    * permission-trust resolver (main/src/index.ts →
@@ -2041,19 +1663,6 @@ export class DatabaseService {
     return this.db
       .prepare('SELECT * FROM sessions WHERE worktree_path = ? LIMIT 1')
       .get(worktreePath) as Session | undefined;
-  }
-
-  getActiveProject(): Project | undefined {
-    const project = this.db.prepare('SELECT * FROM projects WHERE active = 1 LIMIT 1').get() as Project | undefined;
-    if (project) {
-      console.log(`[Database] Retrieved active project:`, {
-        id: project.id,
-        name: project.name,
-        build_script: project.build_script,
-        run_script: project.run_script
-      });
-    }
-    return project;
   }
 
   getAllProjects(): Project[] {
@@ -2096,10 +1705,6 @@ export class DatabaseService {
       fields.push('worktree_folder = ?');
       values.push(updates.worktree_folder);
     }
-    if (updates.lastUsedModel !== undefined) {
-      fields.push('lastUsedModel = ?');
-      values.push(updates.lastUsedModel);
-    }
     if (updates.permission_trust !== undefined) {
       fields.push('permission_trust = ?');
       values.push(updates.permission_trust);
@@ -2129,294 +1734,8 @@ export class DatabaseService {
     return this.getProject(id);
   }
 
-  setActiveProject(id: number): Project | undefined {
-    // First deactivate all projects
-    this.db.prepare('UPDATE projects SET active = 0').run();
-    
-    // Then activate the selected project
-    this.db.prepare('UPDATE projects SET active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
-    
-    return this.getProject(id);
-  }
-
   deleteProject(id: number): boolean {
     const result = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  // Folder operations
-  createFolder(name: string, projectId: number, parentFolderId?: string | null): Folder {
-    // Validate inputs
-    if (!name || typeof name !== 'string') {
-      throw new Error('Folder name must be a non-empty string');
-    }
-    if (!projectId || typeof projectId !== 'number' || projectId <= 0) {
-      throw new Error('Project ID must be a positive number');
-    }
-    
-    // Validate parent folder if provided
-    if (parentFolderId) {
-      const parentFolder = this.getFolder(parentFolderId);
-      if (!parentFolder) {
-        throw new Error('Parent folder not found');
-      }
-      if (parentFolder.project_id !== projectId) {
-        throw new Error('Parent folder belongs to a different project');
-      }
-      
-      // Check nesting depth
-      const depth = this.getFolderDepth(parentFolderId);
-      if (depth >= 4) { // Parent is at depth 4, so child would be at depth 5
-        throw new Error('Maximum nesting depth (5 levels) reached');
-      }
-    }
-    
-    const id = `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-    console.log('[Database] Creating folder:', { id, name, projectId, parentFolderId });
-
-    // Get the max display_order - if this is a root-level folder (no parent),
-    // we need to consider both folders and sessions since they share the same space
-    let displayOrder: number;
-    if (!parentFolderId) {
-      // Root-level folder: check both folders and sessions
-      const maxFolderOrder = this.db.prepare(`
-        SELECT MAX(display_order) as max_order
-        FROM folders
-        WHERE project_id = ? AND parent_folder_id IS NULL
-      `).get(projectId) as { max_order: number | null };
-
-      const maxSessionOrder = this.db.prepare(`
-        SELECT MAX(display_order) as max_order
-        FROM sessions
-        WHERE project_id = ? AND (archived = 0 OR archived IS NULL) AND folder_id IS NULL
-      `).get(projectId) as { max_order: number | null };
-
-      // Use the maximum of both to ensure no overlap
-      const maxOrder = Math.max(
-        maxFolderOrder?.max_order ?? -1,
-        maxSessionOrder?.max_order ?? -1
-      );
-      displayOrder = maxOrder + 1;
-    } else {
-      // Nested folder: only check folders at the same level
-      const maxOrder = this.db.prepare(`
-        SELECT MAX(display_order) as max_order
-        FROM folders
-        WHERE project_id = ? AND parent_folder_id = ?
-      `).get(projectId, parentFolderId) as { max_order: number | null };
-
-      displayOrder = (maxOrder?.max_order ?? -1) + 1;
-    }
-    
-    const stmt = this.db.prepare(`
-      INSERT INTO folders (id, name, project_id, parent_folder_id, display_order)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    
-    stmt.run(id, name, projectId, parentFolderId || null, displayOrder);
-    
-    const folder = this.getFolder(id);
-    console.log('[Database] Created folder:', folder);
-    
-    return folder!;
-  }
-
-  getFolder(id: string): Folder | undefined {
-    const stmt = this.db.prepare(`
-      SELECT * FROM folders WHERE id = ?
-    `);
-    
-    const folder = stmt.get(id) as Folder | undefined;
-    console.log(`[Database] Getting folder by id ${id}:`, folder);
-    return folder;
-  }
-
-  getFoldersForProject(projectId: number): Folder[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM folders 
-      WHERE project_id = ? 
-      ORDER BY display_order ASC, name ASC
-    `);
-    
-    const folders = stmt.all(projectId) as Folder[];
-    console.log(`[Database] Getting folders for project ${projectId}:`, folders);
-    return folders;
-  }
-
-  updateFolder(id: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }): void {
-    const fields: string[] = [];
-    const values: (string | number | boolean | null)[] = [];
-    
-    if (updates.name !== undefined) {
-      fields.push('name = ?');
-      values.push(updates.name);
-    }
-    
-    if (updates.display_order !== undefined) {
-      fields.push('display_order = ?');
-      values.push(updates.display_order);
-    }
-    
-    if (updates.parent_folder_id !== undefined) {
-      fields.push('parent_folder_id = ?');
-      values.push(updates.parent_folder_id);
-    }
-    
-    if (fields.length === 0) return;
-    
-    fields.push('updated_at = CURRENT_TIMESTAMP');
-    values.push(id);
-    
-    const stmt = this.db.prepare(`
-      UPDATE folders 
-      SET ${fields.join(', ')} 
-      WHERE id = ?
-    `);
-    
-    stmt.run(...values);
-  }
-
-  deleteFolder(id: string): void {
-    // Sessions will have their folder_id set to NULL due to ON DELETE SET NULL
-    const stmt = this.db.prepare('DELETE FROM folders WHERE id = ?');
-    stmt.run(id);
-  }
-
-  updateFolderDisplayOrder(folderId: string, newOrder: number): void {
-    const stmt = this.db.prepare(`
-      UPDATE folders 
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP 
-      WHERE id = ?
-    `);
-    stmt.run(newOrder, folderId);
-  }
-
-  reorderFolders(projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>): void {
-    const stmt = this.db.prepare(`
-      UPDATE folders
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND project_id = ?
-    `);
-
-    const transaction = this.db.transaction(() => {
-      folderOrders.forEach(({ id, displayOrder }) => {
-        stmt.run(displayOrder, id, projectId);
-      });
-    });
-
-    transaction();
-  }
-
-  // Helper method to get the depth of a folder in the hierarchy
-  getFolderDepth(folderId: string): number {
-    let depth = 0;
-    let currentId: string | null = folderId;
-    
-    while (currentId) {
-      const folder = this.getFolder(currentId);
-      if (!folder || !folder.parent_folder_id) break;
-      depth++;
-      currentId = folder.parent_folder_id;
-      
-      // Safety check to prevent infinite loops
-      if (depth > 10) {
-        console.error('[Database] Circular reference detected in folder hierarchy');
-        break;
-      }
-    }
-    
-    return depth;
-  }
-
-  // Check if moving a folder would create a circular reference
-  wouldCreateCircularReference(folderId: string, proposedParentId: string): boolean {
-    // Check if proposedParentId is a descendant of folderId
-    let currentId: string | null = proposedParentId;
-    const visited = new Set<string>();
-    
-    while (currentId) {
-      // If we find the folder we're trying to move in the parent chain, it's circular
-      if (currentId === folderId) {
-        return true;
-      }
-      
-      // Safety check for circular references in existing data
-      if (visited.has(currentId)) {
-        console.error('[Database] Existing circular reference detected in folder hierarchy');
-        return true;
-      }
-      visited.add(currentId);
-      
-      const folder = this.getFolder(currentId);
-      if (!folder) break;
-      currentId = folder.parent_folder_id || null;
-    }
-    
-    return false;
-  }
-
-  // Project run commands operations
-  createRunCommand(projectId: number, command: string, displayName?: string, orderIndex?: number): ProjectRunCommand {
-    const result = this.db.prepare(`
-      INSERT INTO project_run_commands (project_id, command, display_name, order_index)
-      VALUES (?, ?, ?, ?)
-    `).run(projectId, command, displayName || null, orderIndex || 0);
-    
-    const runCommand = this.getRunCommand(result.lastInsertRowid as number);
-    if (!runCommand) {
-      throw new Error('Failed to create run command');
-    }
-    return runCommand;
-  }
-
-  getRunCommand(id: number): ProjectRunCommand | undefined {
-    return this.db.prepare('SELECT * FROM project_run_commands WHERE id = ?').get(id) as ProjectRunCommand | undefined;
-  }
-
-  getProjectRunCommands(projectId: number): ProjectRunCommand[] {
-    return this.db.prepare('SELECT * FROM project_run_commands WHERE project_id = ? ORDER BY order_index ASC, id ASC').all(projectId) as ProjectRunCommand[];
-  }
-
-  updateRunCommand(id: number, updates: { command?: string; display_name?: string; order_index?: number }): ProjectRunCommand | undefined {
-    const fields: string[] = [];
-    const values: (string | number | boolean | null)[] = [];
-
-    if (updates.command !== undefined) {
-      fields.push('command = ?');
-      values.push(updates.command);
-    }
-    if (updates.display_name !== undefined) {
-      fields.push('display_name = ?');
-      values.push(updates.display_name);
-    }
-    if (updates.order_index !== undefined) {
-      fields.push('order_index = ?');
-      values.push(updates.order_index);
-    }
-
-    if (fields.length === 0) {
-      return this.getRunCommand(id);
-    }
-
-    values.push(id);
-
-    this.db.prepare(`
-      UPDATE project_run_commands 
-      SET ${fields.join(', ')} 
-      WHERE id = ?
-    `).run(...values);
-    
-    return this.getRunCommand(id);
-  }
-
-  deleteRunCommand(id: number): boolean {
-    const result = this.db.prepare('DELETE FROM project_run_commands WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  deleteProjectRunCommands(projectId: number): boolean {
-    const result = this.db.prepare('DELETE FROM project_run_commands WHERE project_id = ?').run(projectId);
     return result.changes > 0;
   }
 
@@ -2501,13 +1820,6 @@ export class DatabaseService {
 
   getAllSessionsIncludingArchived(): Session[] {
     return this.db.prepare('SELECT * FROM sessions WHERE (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY created_at DESC').all() as Session[];
-  }
-
-  getArchivedSessions(projectId?: number): Session[] {
-    if (projectId !== undefined) {
-      return this.db.prepare('SELECT * FROM sessions WHERE project_id = ? AND archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY updated_at DESC').all(projectId) as Session[];
-    }
-    return this.db.prepare('SELECT * FROM sessions WHERE archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY updated_at DESC').all() as Session[];
   }
 
   getMainRepoSession(projectId: number): Session | undefined {
@@ -2639,17 +1951,9 @@ export class DatabaseService {
       updates.push('folder_id = ?');
       values.push(data.folder_id);
     }
-    if (data.last_output !== undefined) {
-      updates.push('last_output = ?');
-      values.push(data.last_output);
-    }
     if (data.exit_code !== undefined) {
       updates.push('exit_code = ?');
       values.push(data.exit_code);
-    }
-    if (data.pid !== undefined) {
-      updates.push('pid = ?');
-      values.push(data.pid);
     }
     if (data.claude_session_id !== undefined) {
       updates.push('claude_session_id = ?');
@@ -2766,11 +2070,6 @@ export class DatabaseService {
     return result.changes > 0;
   }
 
-  restoreSession(id: string): boolean {
-    const result = this.db.prepare('UPDATE sessions SET archived = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
   // Session output operations
   addSessionOutput(sessionId: string, type: 'stdout' | 'stderr' | 'system' | 'json' | 'error', data: string): void {
     this.db.prepare(`
@@ -2817,23 +2116,6 @@ export class DatabaseService {
     `).all(panelId) as SessionOutput[];
   }
 
-  getRecentSessionOutputs(sessionId: string, since?: Date): SessionOutput[] {
-    if (since) {
-      return this.db.prepare(`
-        SELECT * FROM session_outputs 
-        WHERE session_id = ? AND timestamp > ? 
-        ORDER BY timestamp ASC
-      `).all(sessionId, since.toISOString()) as SessionOutput[];
-    } else {
-      return this.getSessionOutputs(sessionId);
-    }
-  }
-
-  clearSessionOutputs(sessionId: string): void {
-    this.db.prepare('DELETE FROM session_outputs WHERE session_id = ?').run(sessionId);
-    this.invalidateSessionTokenUsageCache(sessionId);
-  }
-
   // Claude panel output operations - use panel_id for Claude-specific data
   addPanelOutput(panelId: string, type: 'stdout' | 'stderr' | 'system' | 'json' | 'error', data: string): void {
     // Get the session_id from the panel
@@ -2865,28 +2147,6 @@ export class DatabaseService {
       WHERE panel_id = ? 
       ORDER BY timestamp ASC, id ASC
     `).all(panelId) as SessionOutput[];
-  }
-
-  getRecentPanelOutputs(panelId: string, since?: Date): SessionOutput[] {
-    if (since) {
-      return this.db.prepare(`
-        SELECT * FROM session_outputs 
-        WHERE panel_id = ? AND timestamp > ? 
-        ORDER BY timestamp ASC
-      `).all(panelId, since.toISOString()) as SessionOutput[];
-    } else {
-      return this.getPanelOutputs(panelId);
-    }
-  }
-
-  clearPanelOutputs(panelId: string): void {
-    // Panel outputs carry the owning session_id too (see addPanelOutput), so
-    // they count towards that session's getSessionTokenUsage cache.
-    const panel = this.getPanel(panelId);
-    this.db.prepare('DELETE FROM session_outputs WHERE panel_id = ?').run(panelId);
-    if (panel) {
-      this.invalidateSessionTokenUsageCache(panel.sessionId);
-    }
   }
 
   // Conversation message operations
@@ -2945,10 +2205,6 @@ export class DatabaseService {
     return result.changes === 1;
   }
 
-  clearConversationMessages(sessionId: string): void {
-    this.db.prepare('DELETE FROM conversation_messages WHERE session_id = ?').run(sessionId);
-  }
-
   // Claude panel conversation message operations - use panel_id for Claude-specific data
   addPanelConversationMessage(panelId: string, messageType: 'user' | 'assistant', content: string): void {
     // Get the session_id from the panel
@@ -2962,8 +2218,8 @@ export class DatabaseService {
       VALUES (?, ?, ?, ?)
     `).run(panel.sessionId, panelId, messageType, content);
     // TASK-225 auto-clear, panel-backed twin of addConversationMessage above:
-    // the common chat send paths (ipc/session.ts sessions:input / continue,
-    // baseAIPanelHandler) persist the user's turn THROUGH this method, so
+    // the common chat send paths (ipc/session.ts sessions:input /
+    // panels:continue) persist the user's turn THROUGH this method, so
     // without the same clear here answering in-chat left the Needs-your-input
     // card standing until the user also hit Dismiss.
     if (messageType === 'user') {
@@ -2977,10 +2233,6 @@ export class DatabaseService {
       WHERE panel_id = ? 
       ORDER BY timestamp ASC
     `).all(panelId) as ConversationMessage[];
-  }
-
-  clearPanelConversationMessages(panelId: string): void {
-    this.db.prepare('DELETE FROM conversation_messages WHERE panel_id = ?').run(panelId);
   }
 
   // Cleanup operations
@@ -3085,14 +2337,6 @@ export class DatabaseService {
     `).all(panelId) as PromptMarker[];
     
     return markers;
-  }
-
-  updatePromptMarkerLine(id: number, outputLine: number): void {
-    this.db.prepare(`
-      UPDATE prompt_markers 
-      SET output_line = ? 
-      WHERE id = ?
-    `).run(outputLine, id);
   }
 
   updatePromptMarkerCompletion(sessionId: string, timestamp?: string): void {
@@ -3215,18 +2459,8 @@ export class DatabaseService {
     return this.convertDbExecutionDiff(diff);
   }
 
-  getExecutionDiffs(sessionId: string): ExecutionDiff[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM execution_diffs 
-      WHERE session_id = ? 
-      ORDER BY execution_sequence ASC
-    `).all(sessionId) as ExecutionDiffRow[];
-    
-    return rows.map(this.convertDbExecutionDiff.bind(this));
-  }
-
   /**
-   * Stats-only projection of getExecutionDiffs — for pollers (e.g. the
+   * Stats-only projection of execution_diffs — for pollers (e.g. the
    * session-statistics IPC handler) that only fold stats_* / files_changed and
    * would otherwise materialize every multi-MB git_diff blob just to discard it.
    */
@@ -3248,11 +2482,6 @@ export class DatabaseService {
       before_commit_hash: row.before_commit_hash ?? null,
       after_commit_hash: row.after_commit_hash ?? null,
     }));
-  }
-
-  getExecutionDiff(id: number): ExecutionDiff | undefined {
-    const row = this.db.prepare('SELECT * FROM execution_diffs WHERE id = ?').get(id) as ExecutionDiffRow | undefined;
-    return row ? this.convertDbExecutionDiff(row) : undefined;
   }
 
   getNextExecutionSequence(sessionId: string): number {
@@ -3281,75 +2510,6 @@ export class DatabaseService {
       commit_message: row.commit_message,
       timestamp: row.timestamp
     };
-  }
-
-  // Claude panel execution diff operations - use panel_id for Claude-specific data
-  createPanelExecutionDiff(data: CreatePanelExecutionDiffData): ExecutionDiff {
-    const result = this.db.prepare(`
-      INSERT INTO execution_diffs (
-        panel_id, prompt_marker_id, execution_sequence, git_diff, 
-        files_changed, stats_additions, stats_deletions, stats_files_changed,
-        before_commit_hash, after_commit_hash, commit_message
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      data.panel_id,
-      data.prompt_marker_id || null,
-      data.execution_sequence,
-      data.git_diff || null,
-      data.files_changed ? JSON.stringify(data.files_changed) : null,
-      data.stats_additions || 0,
-      data.stats_deletions || 0,
-      data.stats_files_changed || 0,
-      data.before_commit_hash || null,
-      data.after_commit_hash || null,
-      data.commit_message || null
-    );
-
-    const diff = this.db.prepare('SELECT * FROM execution_diffs WHERE id = ?').get(result.lastInsertRowid) as ExecutionDiffRow | undefined;
-    if (!diff) {
-      throw new Error('Failed to retrieve created panel execution diff');
-    }
-    return this.convertDbExecutionDiff(diff);
-  }
-
-  getPanelExecutionDiffs(panelId: string): ExecutionDiff[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM execution_diffs 
-      WHERE panel_id = ? 
-      ORDER BY execution_sequence ASC
-    `).all(panelId) as ExecutionDiffRow[];
-    
-    return rows.map(this.convertDbExecutionDiff.bind(this));
-  }
-
-  getNextPanelExecutionSequence(panelId: string): number {
-    const result = this.db.prepare(`
-      SELECT MAX(execution_sequence) as max_seq 
-      FROM execution_diffs 
-      WHERE panel_id = ?
-    `).get(panelId) as { max_seq: number | null } | undefined;
-    
-    return (result?.max_seq || 0) + 1;
-  }
-
-  // Display order operations
-  updateProjectDisplayOrder(projectId: number, displayOrder: number): void {
-    this.db.prepare(`
-      UPDATE projects 
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP 
-      WHERE id = ?
-    `).run(displayOrder, projectId);
-  }
-
-  updateSessionDisplayOrder(sessionId: string, displayOrder: number): void {
-    // No updated_at bump: display_order is presentation metadata, and
-    // updated_at doubles as the last-activity clock (see markSessionAsViewed).
-    this.db.prepare(`
-      UPDATE sessions
-      SET display_order = ?
-      WHERE id = ?
-    `).run(displayOrder, sessionId);
   }
 
   reorderProjects(projectOrders: Array<{ id: number; displayOrder: number }>): void {
@@ -3480,43 +2640,6 @@ export class DatabaseService {
     this.db.prepare('DELETE FROM ui_state WHERE key = ?').run(key);
   }
 
-  // App opens operations
-  recordAppOpen(welcomeHidden: boolean, appVersion?: string): void {
-    this.db.prepare(`
-      INSERT INTO app_opens (welcome_hidden, app_version)
-      VALUES (?, ?)
-    `).run(welcomeHidden ? 1 : 0, appVersion || null);
-  }
-
-  getLastAppOpen(): { opened_at: string; welcome_hidden: boolean; app_version?: string } | null {
-    const result = this.db.prepare(`
-      SELECT opened_at, welcome_hidden, app_version
-      FROM app_opens
-      ORDER BY opened_at DESC
-      LIMIT 1
-    `).get() as { opened_at: string; welcome_hidden: number; app_version?: string } | undefined;
-
-    if (!result) return null;
-
-    return {
-      opened_at: result.opened_at,
-      welcome_hidden: Boolean(result.welcome_hidden),
-      app_version: result.app_version
-    };
-  }
-
-  getLastAppVersion(): string | null {
-    const result = this.db.prepare(`
-      SELECT app_version
-      FROM app_opens
-      WHERE app_version IS NOT NULL
-      ORDER BY opened_at DESC
-      LIMIT 1
-    `).get() as { app_version: string } | undefined;
-
-    return result?.app_version || null;
-  }
-
   // User preferences operations
   getUserPreference(key: string): string | null {
     const result = this.db.prepare(`
@@ -3534,18 +2657,6 @@ export class DatabaseService {
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
     `).run(key, value);
-  }
-
-  getUserPreferences(): Record<string, string> {
-    const rows = this.db.prepare(`
-      SELECT key, value FROM user_preferences
-    `).all() as Array<{ key: string; value: string }>;
-    
-    const preferences: Record<string, string> = {};
-    for (const row of rows) {
-      preferences[row.key] = row.value;
-    }
-    return preferences;
   }
 
   // Panel operations
@@ -3712,7 +2823,9 @@ export class DatabaseService {
   }
 
   getPanelsForSession(sessionId: string): ToolPanel[] {
-    const rows = this.db.prepare('SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at').all(sessionId) as ToolPanelRow[];
+    const rows = this.db.prepare(
+      `SELECT * FROM tool_panels WHERE session_id = ? AND type NOT IN ${RETIRED_PANEL_TYPES_SQL} ORDER BY created_at`
+    ).all(sessionId) as ToolPanelRow[];
     
     // Get the active panel ID for this session
     const activePanel = this.db.prepare('SELECT active_panel_id FROM sessions WHERE id = ?').get(sessionId) as { active_panel_id: string | null } | undefined;
@@ -3736,7 +2849,9 @@ export class DatabaseService {
   }
 
   getAllPanels(): ToolPanel[] {
-    const rows = this.db.prepare('SELECT * FROM tool_panels ORDER BY created_at').all() as ToolPanelRow[];
+    const rows = this.db.prepare(
+      `SELECT * FROM tool_panels WHERE type NOT IN ${RETIRED_PANEL_TYPES_SQL} ORDER BY created_at`
+    ).all() as ToolPanelRow[];
     
     return rows.map(row => ({
       id: row.id,
@@ -3753,7 +2868,8 @@ export class DatabaseService {
     const rows = this.db.prepare(`
       SELECT tp.* FROM tool_panels tp
       JOIN sessions s ON tp.session_id = s.id
-      WHERE s.archived = 0 OR s.archived IS NULL
+      WHERE (s.archived = 0 OR s.archived IS NULL)
+        AND tp.type NOT IN ${RETIRED_PANEL_TYPES_SQL}
       ORDER BY tp.created_at
     `).all() as ToolPanelRow[];
     
@@ -3776,7 +2892,7 @@ export class DatabaseService {
     const row = this.db.prepare(`
       SELECT tp.* FROM tool_panels tp
       JOIN sessions s ON s.active_panel_id = tp.id
-      WHERE s.id = ?
+      WHERE s.id = ? AND tp.type NOT IN ${RETIRED_PANEL_TYPES_SQL}
     `).get(sessionId) as ToolPanelRow | undefined;
     
     if (!row) return null;
@@ -3794,10 +2910,6 @@ export class DatabaseService {
       metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
       substrate: row.substrate ?? undefined,
     };
-  }
-
-  deletePanelsForSession(sessionId: string): void {
-    this.db.prepare('DELETE FROM tool_panels WHERE session_id = ?').run(sessionId);
   }
 
   // ========== UNIFIED PANEL SETTINGS OPERATIONS ==========
@@ -3846,94 +2958,6 @@ export class DatabaseService {
       SET settings = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(JSON.stringify(mergedSettings), panelId);
-  }
-
-  /**
-   * Set panel settings (replaces all existing settings)
-   */
-  setPanelSettings(panelId: string, settings: Record<string, unknown>): void {
-    const settingsWithTimestamp = {
-      ...settings,
-      updatedAt: new Date().toISOString()
-    };
-
-    this.db.prepare(`
-      UPDATE tool_panels
-      SET settings = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(JSON.stringify(settingsWithTimestamp), panelId);
-  }
-
-  // ========== LEGACY CLAUDE PANEL SETTINGS (for backward compatibility) ==========
-  // These will be deprecated but are kept for migration purposes
-
-  createClaudePanelSettings(panelId: string, settings: {
-    model?: string;
-    commit_mode?: boolean;
-    system_prompt?: string;
-    max_tokens?: number;
-    temperature?: number;
-  }): void {
-    // Use the new unified settings storage
-    this.updatePanelSettings(panelId, {
-      model: settings.model || 'auto',
-      commitMode: settings.commit_mode || false,
-      systemPrompt: settings.system_prompt || null,
-      maxTokens: settings.max_tokens || 4096,
-      temperature: settings.temperature || 0.7
-    });
-  }
-
-  getClaudePanelSettings(panelId: string): {
-    panel_id: string;
-    model: string;
-    commit_mode: boolean;
-    system_prompt: string | null;
-    max_tokens: number;
-    temperature: number;
-    created_at: string;
-    updated_at: string;
-  } | null {
-    const settings = this.getPanelSettings(panelId);
-    
-    if (!settings || Object.keys(settings).length === 0) {
-      return null;
-    }
-
-    // Convert from new format to old format for compatibility
-    const s = settings as Record<string, unknown>;
-    return {
-      panel_id: panelId,
-      model: (typeof s.model === 'string' ? s.model : null) || 'auto',
-      commit_mode: (typeof s.commitMode === 'boolean' ? s.commitMode : null) || false,
-      system_prompt: (typeof s.systemPrompt === 'string' ? s.systemPrompt : null) || null,
-      max_tokens: (typeof s.maxTokens === 'number' ? s.maxTokens : null) || 4096,
-      temperature: (typeof s.temperature === 'number' ? s.temperature : null) || 0.7,
-      created_at: (typeof s.createdAt === 'string' ? s.createdAt : null) || new Date().toISOString(),
-      updated_at: (typeof s.updatedAt === 'string' ? s.updatedAt : null) || new Date().toISOString()
-    };
-  }
-
-  updateClaudePanelSettings(panelId: string, settings: {
-    model?: string;
-    commit_mode?: boolean;
-    system_prompt?: string;
-    max_tokens?: number;
-    temperature?: number;
-  }): void {
-    const updateObj: Record<string, unknown> = {};
-    
-    if (settings.model !== undefined) updateObj.model = settings.model;
-    if (settings.commit_mode !== undefined) updateObj.commitMode = settings.commit_mode;
-    if (settings.system_prompt !== undefined) updateObj.systemPrompt = settings.system_prompt;
-    if (settings.max_tokens !== undefined) updateObj.maxTokens = settings.max_tokens;
-    if (settings.temperature !== undefined) updateObj.temperature = settings.temperature;
-    
-    this.updatePanelSettings(panelId, updateObj);
-  }
-
-  deleteClaudePanelSettings(panelId: string): void {
-    this.db.prepare('DELETE FROM claude_panel_settings WHERE panel_id = ?').run(panelId);
   }
 
   // Session statistics methods

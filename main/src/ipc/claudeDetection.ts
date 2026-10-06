@@ -3,7 +3,7 @@ import {
   type ProviderDetectionResult,
 } from '../../../shared/types/onboarding';
 import { detectClaudeCredentials } from '../utils/claudeCredentials';
-import { detectClaudeBinary } from '../utils/claudeCodeTest';
+import { detectClaudeBinary } from '../utils/claudeBinaryDetection';
 import type { AppServices } from './types';
 
 /**

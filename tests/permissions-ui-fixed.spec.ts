@@ -5,8 +5,8 @@
  * default-permission-mode radio the legacy spec asserted
  * (`input[name="defaultPermissionMode"][value="approve"]`, "Default Security
  * Mode", "Secure & Controlled") NO LONGER EXISTS in Settings. The permission-mode
- * redesign moved permission mode out of global Settings into the per-panel CLI
- * composer (`BaseCliPanel.tsx`), which isn't reachable without a live session.
+ * redesign moved permission mode out of global Settings into the per-session
+ * composer (`PermissionModePill`), which isn't reachable without a live session.
  * So this spec now asserts what global Settings actually renders today — the
  * modal opens over live IPC and its General/AI/Integrations/Notifications/Updates
  * tabs mount (IDEA-016 split the former "AI Integration" section of General into

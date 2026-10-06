@@ -9,7 +9,7 @@ import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import type { ConversationMessage } from '../../../database/models';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
 import { isPermissionMode } from '../../../../../shared/types/workflows';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type { Logger } from '../../../utils/logger';

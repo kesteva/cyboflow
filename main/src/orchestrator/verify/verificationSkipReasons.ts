@@ -47,7 +47,7 @@ export const UNSUPPORTED_MODALITY_REASONS: Partial<Record<VerificationModality, 
  * and it differs on purpose: "not yet wired" is a statement about cyboflow that
  * a user can do nothing about, whereas the grant pair is the one native-screen
  * failure a human can actually fix (grant Screen Recording + Accessibility, or
- * install the binary). The probe (`peekabooBackend.healthCheck`) collapses
+ * install the binary). The probe (`PeekabooGrantProbe.healthCheck`) collapses
  * binary-absent and grant-declined into a single boolean by design — it never
  * throws and never distinguishes — so this names both halves rather than
  * guessing which one bit.

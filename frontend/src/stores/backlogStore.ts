@@ -29,8 +29,7 @@
  * ## Layout preference
  *
  * `layoutMode` ('kanban' | 'list') is persisted under `cyboflow-backlog-layout`
- * via {@link migrateLocalStorageKey} (mount-only migration from the legacy
- * `crystal-backlog-layout` key) — NEVER via ad-hoc getItem/setItem rename logic.
+ * (see {@link readPersistedLayout}).
  *
  * ## Search / membership filter / sort view state (IDEA-053, TASK-203)
  *
@@ -46,7 +45,6 @@
 import { create } from 'zustand';
 import { trpc } from '../trpc/client';
 import { API, type IPCResponse } from '../utils/api';
-import { migrateLocalStorageKey } from '../utils/migrateLocalStorageKey';
 import type { Project } from '../types/project';
 import type { BacklogTaskItem, Board, TaskChangedEvent } from '../../../shared/types/tasks';
 import type { BacklogSortMode } from '../components/Backlog/backlogSelectors';
@@ -65,16 +63,18 @@ export interface BacklogProjectRef {
   name: string;
 }
 
-const LAYOUT_LEGACY_KEY = 'crystal-backlog-layout';
 const LAYOUT_KEY = 'cyboflow-backlog-layout';
 
 /**
- * Read the persisted layout mode (mount-only legacy migration). Defaults to
- * 'kanban' when unset or invalid.
+ * Read the persisted layout mode. Defaults to 'kanban' when unset, invalid, or
+ * storage is unavailable.
  */
 export function readPersistedLayout(): LayoutMode {
-  const raw = migrateLocalStorageKey(LAYOUT_LEGACY_KEY, LAYOUT_KEY);
-  return raw === 'list' ? 'list' : 'kanban';
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === 'list' ? 'list' : 'kanban';
+  } catch {
+    return 'kanban';
+  }
 }
 
 /** Persist the layout mode. Swallows storage failures (private mode). */

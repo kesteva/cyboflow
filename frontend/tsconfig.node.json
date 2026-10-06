@@ -1,11 +1,13 @@
 {
   "compilerOptions": {
+    // Composite because tsconfig.json references this project, so `tsc -b`
+    // must emit something. The output goes under node_modules/.tmp, never next
+    // to vite.config.ts: Vite prefers a sibling vite.config.js over the .ts,
+    // and a stale emitted copy would silently shadow the source in `pnpm dev`.
     "composite": true,
+    "outDir": "./node_modules/.tmp/tsconfig-node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "skipLibCheck": true,
-    // `tsc -b` EMITS vite.config.js from vite.config.ts (composite), and Vite
-    // prefers that .js over the .ts when both exist — so this target is what the
-    // build config actually runs as. ES2020 matches the Node that runs Vite and
-    // keeps modern syntax (?? , matchAll) intact instead of downleveling to ES5.
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "bundler",

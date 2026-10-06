@@ -56,7 +56,6 @@ import {
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'path';
-import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
@@ -118,15 +117,13 @@ export class ConfigManager extends EventEmitter {
   private configPath: string;
   private configDir: string;
 
-  constructor(defaultGitPath?: string) {
+  constructor() {
     super();
     this.configDir = getCyboflowDirectory();
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = {
-      gitRepoPath: defaultGitPath || os.homedir(),
       verbose: false,
       systemPromptAppend: undefined,
-      runScript: undefined,
       defaultPermissionMode: 'approve',
       defaultModel: 'sonnet',
       notifications: {
@@ -140,19 +137,6 @@ export class ConfigManager extends EventEmitter {
         errorReportingEnabled: defaultTelemetryEnabled(),
         usageMetricsEnabled: defaultTelemetryEnabled(),
         installId: ''
-      },
-      sessionCreationPreferences: {
-        sessionCount: 1,
-        toolType: 'none',
-        selectedTools: {
-          claude: false
-        },
-        claudeConfig: {
-          model: 'auto',
-          permissionMode: 'approve',
-          ultrathink: false
-        },
-        showAdvanced: false
       }
     };
   }
@@ -176,35 +160,8 @@ export class ConfigManager extends EventEmitter {
         telemetry: {
           ...this.config.telemetry,
           ...loadedConfig.telemetry
-        },
-        sessionCreationPreferences: {
-          ...this.config.sessionCreationPreferences,
-          ...loadedConfig.sessionCreationPreferences,
-          selectedTools: {
-            ...this.config.sessionCreationPreferences?.selectedTools,
-            ...loadedConfig.sessionCreationPreferences?.selectedTools
-          },
-          claudeConfig: {
-            ...this.config.sessionCreationPreferences?.claudeConfig,
-            ...loadedConfig.sessionCreationPreferences?.claudeConfig
-          }
         }
       };
-
-      // One-time migration: enableCrystalFooter → enableCyboflowFooter (see TASK-561).
-      // We mutate `loadedConfig` so the existing merge above has already set
-      // `this.config.enableCyboflowFooter` if both keys were present; here we just
-      // ensure the legacy key never persists back to disk.
-      const legacy = (loadedConfig as Record<string, unknown>).enableCrystalFooter;
-      if (typeof legacy === 'boolean') {
-        // Only fill the new key if it's not already set (new wins on conflict).
-        if (this.config.enableCyboflowFooter === undefined) {
-          this.config.enableCyboflowFooter = legacy;
-        }
-        // Remove the legacy key from in-memory config and force a save.
-        delete (this.config as Record<string, unknown>).enableCrystalFooter;
-        await this.saveConfig();
-      }
     } catch (error) {
       // Config file doesn't exist, use defaults
       await this.saveConfig();
@@ -249,10 +206,6 @@ export class ConfigManager extends EventEmitter {
     return this.getConfig();
   }
 
-  getGitRepoPath(): string {
-    return this.config.gitRepoPath || '';
-  }
-
   isVerbose(): boolean {
     return this.config.verbose || false;
   }
@@ -267,16 +220,8 @@ export class ConfigManager extends EventEmitter {
     return this.config.demoMode || false;
   }
 
-  getDatabasePath(): string {
-    return path.join(this.configDir, 'sessions.db');
-  }
-
   getSystemPromptAppend(): string | undefined {
     return this.config.systemPromptAppend;
-  }
-
-  getRunScript(): string[] | undefined {
-    return this.config.runScript;
   }
 
   getDefaultModel(): string {
@@ -854,23 +799,17 @@ export class ConfigManager extends EventEmitter {
    * VISUAL_VERIFY_DEFAULTS applied for any member the persisted config omits.
    * Mirrors getArtifactCommitDir's floor-on-read contract for a nested block: the
    * stored shape stays partial (so config.json is never rewritten with defaults),
-   * while callers (resolver, scheduler, judge) get a complete, typed config.
+   * while callers (resolver, scheduler, agent engine) get a complete, typed config.
    */
   getVisualVerifyConfig(): ResolvedVisualVerifyConfig {
     const vv = this.config.visualVerify;
     return {
       enabled: vv?.enabled ?? VISUAL_VERIFY_DEFAULTS.enabled,
       defaultType: vv?.defaultType ?? VISUAL_VERIFY_DEFAULTS.defaultType,
-      vlmConfidenceThreshold:
-        vv?.vlmConfidenceThreshold ?? VISUAL_VERIFY_DEFAULTS.vlmConfidenceThreshold,
-      maxPerRunJudgeCalls: vv?.maxPerRunJudgeCalls ?? VISUAL_VERIFY_DEFAULTS.maxPerRunJudgeCalls,
       devServerPorts:
         vv?.devServerPorts && vv.devServerPorts.length > 0
           ? [...vv.devServerPorts]
           : [...VISUAL_VERIFY_DEFAULTS.devServerPorts],
-      simulatorDevices: vv?.simulatorDevices
-        ? [...vv.simulatorDevices]
-        : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
       // The four `mobile` iOS-Simulator knobs. Floored here and NOWHERE ELSE:
       // the scheduler reads this resolved block (and only this block), so a knob
       // Settings persists but this method omits never reaches the tier at all —
@@ -946,22 +885,6 @@ export class ConfigManager extends EventEmitter {
       agentObserve: wv?.agentObserve ?? WEB_VIEWER_DEFAULTS.agentObserve,
       agentDrive: wv?.agentDrive ?? WEB_VIEWER_DEFAULTS.agentDrive,
       persistLogin: wv?.persistLogin ?? WEB_VIEWER_DEFAULTS.persistLogin,
-    };
-  }
-
-  getSessionCreationPreferences() {
-    return this.config.sessionCreationPreferences || {
-      sessionCount: 1,
-      toolType: 'none',
-      selectedTools: {
-        claude: false
-      },
-      claudeConfig: {
-        model: 'auto',
-        permissionMode: 'approve',
-        ultrathink: false
-      },
-      showAdvanced: false
     };
   }
 

@@ -4,8 +4,6 @@ import { EventEmitter } from 'events';
 export class PanelEventBus extends EventEmitter {
   private subscriptions = new Map<string, PanelEventSubscription[]>();
   private panelListenerMap = new Map<string, Map<PanelEventType | string, (event: PanelEvent) => void>>(); // Track listeners per panel
-  private eventHistory: PanelEvent[] = [];
-  private readonly MAX_HISTORY_SIZE = 100;
   
   constructor() {
     super();
@@ -55,36 +53,11 @@ export class PanelEventBus extends EventEmitter {
     };
   }
   
-  emit(eventType: string | symbol, event: PanelEvent): boolean {
-    // Add to history
-    this.eventHistory.push(event);
-    
-    // Trim history if needed
-    if (this.eventHistory.length > this.MAX_HISTORY_SIZE) {
-      this.eventHistory = this.eventHistory.slice(-this.MAX_HISTORY_SIZE);
-    }
-    
-    // Emit the event
-    return super.emit(eventType, event);
-  }
-  
   emitPanelEvent(event: PanelEvent): void {
     this.emit(event.type, event);
     
     // Also emit a generic 'panel:event' for logging/debugging
     this.emit('panel:event', event);
-  }
-  
-  getRecentEvents(eventTypes?: PanelEventType[], limit = 10): PanelEvent[] {
-    let events = [...this.eventHistory];
-    
-    // Filter by event types if specified
-    if (eventTypes && eventTypes.length > 0) {
-      events = events.filter(e => eventTypes.includes(e.type));
-    }
-    
-    // Return most recent events up to limit
-    return events.slice(-limit);
   }
   
   unsubscribePanel(panelId: string): void {
@@ -103,22 +76,6 @@ export class PanelEventBus extends EventEmitter {
     
     // Remove from subscriptions map
     this.subscriptions.delete(panelId);
-  }
-  
-  clearHistory(): void {
-    this.eventHistory = [];
-  }
-  
-  getSubscribedPanels(eventType: PanelEventType): string[] {
-    const panels: string[] = [];
-    
-    this.subscriptions.forEach((subs, panelId) => {
-      if (subs.some(sub => sub.eventTypes.includes(eventType))) {
-        panels.push(panelId);
-      }
-    });
-    
-    return panels;
   }
 }
 

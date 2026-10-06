@@ -52,7 +52,6 @@ function register(): SessionGitOpsLike {
     gitDiffManager: {},
     gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
     databaseService: { getDb: () => inertDb() },
-    configManager: { getConfig: () => ({ enableCyboflowFooter: false }), isDemoMode: () => false },
     claudeCodeManager: {},
   } as unknown as AppServices;
   return createGitOps(services);

@@ -2,10 +2,9 @@
  * Lazy loader for `@anthropic-ai/claude-agent-sdk`'s `query`.
  *
  * The SDK entry is a single pre-bundled ~1 MB CJS file costing ~50 ms to parse
- * warm (worse on a cold filesystem cache). Five modules call `query()` and all
- * of them sit on the app-boot import graph (claudeCodeManager via services
- * wiring; vlmJudge, monitorQuery, evalJudgeQuery, pairwiseJudgeQuery via
- * index.ts), so a top-level import anywhere makes every app boot pay that parse
+ * warm (worse on a cold filesystem cache). The modules that call `query()` all
+ * sit on the app-boot import graph (claudeCodeManager via services wiring;
+ * monitorQuery, evalJudgeQuery, pairwiseJudgeQuery via index.ts), so a top-level import anywhere makes every app boot pay that parse
  * before the window shows. Routing every call site through this helper defers
  * the parse to the first real SDK query, where it is imperceptible next to the
  * subprocess spawn.

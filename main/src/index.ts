@@ -15,12 +15,12 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { ModelAvailabilityService, isModelUsable } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
-import { RunCommandManager } from './services/runCommandManager';
+import { setDatabaseService } from './services/database';
 import { Logger } from './utils/logger';
 import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory, appIconBasename } from './utils/cyboflowDirectory';
+import { getCyboflowSubdirectory, getCyboflowDirectory, appIconBasename } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
 import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
@@ -82,7 +82,6 @@ import {
   resolveLaneManager,
   type ManagerRegistration,
 } from './services/substrateDispatchFacade';
-import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
@@ -154,8 +153,6 @@ import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { DatabaseBackupService } from './services/databaseBackupService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
-import { FsBaselineStore } from './services/visualVerify/baselineStore';
-import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { composeSystemView } from './systemViewComposition';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -207,9 +204,8 @@ import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge'
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
-import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
+import type { StreamEventPublisher } from './orchestrator/runLauncher';
 import { VariantResolver } from './orchestrator/variantResolver';
-import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
@@ -238,9 +234,9 @@ import { getDevDebugLogPath, appendDevDebugLog, flushDevDebugLogs } from './util
 import type { DevLogLevel } from './utils/devDebugLog';
 import { installMainConsoleForwarding } from './mainConsoleForwarding';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
+import { composePermissionTrust } from './permissionTrustComposition';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
@@ -484,7 +480,6 @@ let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
-let runCommandManager: RunCommandManager;
 let archiveProgressManager: ArchiveProgressManager;
 // Run user-shells (worktree-terminal feature). Module-level so the before-quit
 // handler (outside the orchestrator-setup block) can destroyAll() on app quit.
@@ -581,9 +576,6 @@ if (isDevelopment) {
   }
 }
 
-// Set up console wrapper to reduce logging in production
-setupConsoleWrapper();
-
 // Global crash guards. Two independent failure modes were surfacing the native
 // Electron crash dialog:
 //   1. An async 'error' event on process.stdout/stderr (EPIPE when the pipe on
@@ -646,30 +638,9 @@ process.on('warning', (warning: Error & { code?: string; detail?: string }) => {
   }
 });
 
-// Parse command-line arguments for custom Cyboflow directory
-const args = process.argv.slice(2);
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-
-  // Support --cyboflow-dir=/path, --cyboflow-dir /path (canonical) and --crystal-dir (deprecated alias)
-  if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
-    const flagName = arg.startsWith('--cyboflow-dir=') ? '--cyboflow-dir=' : '--crystal-dir=';
-    const dir = arg.substring(flagName.length);
-    setCyboflowDirectory(dir);
-    console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-    if (flagName === '--crystal-dir=') {
-      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
-    }
-  } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < args.length) {
-    const dir = args[i + 1];
-    setCyboflowDirectory(dir);
-    console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-    if (arg === '--crystal-dir') {
-      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
-    }
-    i++;
-  }
-}
+// The data directory (--cyboflow-dir flag / CYBOFLOW_DIR / per-kind default) is resolved
+// by getCyboflowDirectory(); log it once so the backend debug log shows which one is in use.
+console.log(`[Main] Using Cyboflow directory: ${getCyboflowDirectory()}`);
 
 // Install Devtron in development
 if (isDevelopment) {
@@ -843,7 +814,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
     getConfiguredClaudePath: () => configManager.getConfig()?.claudeExecutablePath,
     log: (message) => logger.info(message),
   });
-  const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
+  const workspaceFileOps = createFileOps({ sessionManager, databaseService });
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -950,15 +921,11 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
 // Deferrable (non-first-paint) startup work, kicked off once the main window's
 // first frame is painted ('ready-to-show') rather than on the critical path to
 // first paint. Idempotent: the macOS 'activate' re-created window fires
-// 'ready-to-show' again, and these sweeps / git polling must run only once.
+// 'ready-to-show' again, and these sweeps must run only once.
 let deferredStartupWorkStarted = false;
 function runDeferredStartupWork(): void {
   if (deferredStartupWorkStarted) return;
   deferredStartupWorkStarted = true;
-
-  // Git status polling is comparatively expensive (spawns git per session), so it
-  // is held back until the window is visible instead of started during init.
-  gitStatusManager.startPolling();
 
   // Bug reports use their own Sentry client, built lazily on first submission, so
   // a report the offline transport queued in an earlier session would otherwise
@@ -1309,31 +1276,6 @@ async function createWindow() {
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     console.error('Renderer process crashed:', details);
   });
-
-  // Handle window focus/blur/minimize for smart git status polling
-  mainWindow.on('focus', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(false); // false = visible/focused
-    }
-  });
-
-  mainWindow.on('blur', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(true); // true = hidden/blurred
-    }
-  });
-
-  mainWindow.on('minimize', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(true); // true = hidden/minimized
-    }
-  });
-
-  mainWindow.on('restore', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(false); // false = visible/restored
-    }
-  });
 }
 
 /**
@@ -1437,10 +1379,7 @@ async function initializeServices(): Promise<boolean> {
   startPerfTracer(logger);
   
   // Use the boot-resolved database path. The demo bootstrap decides ONCE per
-  // process (at module load, before the services/database.ts singleton opens
-  // its handle) whether this boot runs on the throwaway demo database — both
-  // DatabaseService constructions MUST use the same path or sessions and
-  // panels land in different databases (FOREIGN KEY failures on create).
+  // process whether this boot runs on the throwaway demo database.
   const dbPath = getBootDatabasePath();
   const demoBootEnv = getDemoBootEnvironment();
   if (demoBootEnv) {
@@ -1497,6 +1436,10 @@ async function initializeServices(): Promise<boolean> {
     return false;
   }
 
+  // Register the one DatabaseService for modules not handed it, then restore panels.
+  setDatabaseService(databaseService);
+  panelManager.loadPanelsFromDatabase();
+
   sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
 
@@ -1534,20 +1477,15 @@ async function initializeServices(): Promise<boolean> {
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper, diskUsageService);
-
-  // Initialize the active project's worktree directory if one exists
-  const activeProject = sessionManager.getActiveProject();
-  if (activeProject) {
-    await worktreeManager.initializeProject(activeProject.path);
-  }
+  worktreeManager = new WorktreeManager(codexBrokerReaper, diskUsageService);
 
   // Initialize CLI manager factory
   cliManagerFactory = CliManagerFactory.getInstance(logger, configManager);
 
   // Create default CLI manager (Claude). Permission gating runs in-process
-  // via the SDK's PreToolUse hook → ApprovalRouter (TASK-590).
-  // Skip validation during startup - tools will be validated when actually used
+  // via the SDK's PreToolUse hook → ApprovalRouter (TASK-590). The factory never
+  // probes the binary, so a missing `claude` never blocks startup; availability
+  // is checked lazily on first spawn.
   defaultCliManager = await cliManagerFactory.createManager('claude', {
     sessionManager,
     logger,
@@ -1555,14 +1493,12 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
 
   // Create the interactive (PTY) CLI manager (IDEA-013 S4 / TASK-809). Registered
   // as the 'claude-interactive' built-in tool by TASK-806. Constructed with the
-  // same db-in-additionalOptions + skipValidation contract as the SDK manager so a
-  // missing `claude` binary never blocks startup; availability is probed lazily on
-  // first interactive spawn. The SubstrateDispatchFacade routes per-run between this
+  // same db-in-additionalOptions contract as the SDK manager; availability is
+  // probed lazily on first interactive spawn. The SubstrateDispatchFacade routes per-run between this
   // and defaultCliManager based on workflow_runs.substrate.
   const interactiveCliManager = await cliManagerFactory.createManager('claude-interactive', {
     sessionManager,
@@ -1571,7 +1507,6 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true,
   });
   // Narrow the AbstractCliManager-typed factory return to the concrete class:
   // AppServices.interactiveCliManager exposes the persistent-REPL seams
@@ -1594,7 +1529,6 @@ async function initializeServices(): Promise<boolean> {
       db: databaseService.getDb(),
       appVersion: app.getVersion(),
     },
-    skipValidation: true,
   });
   // Structural, not `instanceof`: the demo factory returns a DemoCliManager
   // carrying the same seams, and requiring the concrete class is what used to
@@ -1607,7 +1541,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isCodexPtyManagerLike(createdCodexPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Codex PTY seams for codex-pty');
@@ -1621,7 +1554,6 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true,
   });
   // Structural, exactly like the Codex twins above — demo mode returns a
   // DemoCliManager carrying the seams rather than an OmpSdkManager.
@@ -1633,7 +1565,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isOmpPtyManagerLike(createdOmpPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the OMP PTY seams for omp-pty');
@@ -1644,7 +1575,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isPiPtyManagerLike(createdPiPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Pi PTY seams for pi-pty');
@@ -1656,7 +1586,6 @@ async function initializeServices(): Promise<boolean> {
     logger,
     configManager,
     additionalOptions: { db: databaseService.getDb() },
-    skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Pi SDK seams for pi-sdk');
@@ -1665,7 +1594,6 @@ async function initializeServices(): Promise<boolean> {
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
-  runCommandManager = new RunCommandManager(databaseService);
 
   taskQueue = new TaskQueue({
     sessionManager,
@@ -1673,7 +1601,6 @@ async function initializeServices(): Promise<boolean> {
     claudeCodeManager: defaultCliManager, // Use default CLI manager for backward compatibility
     gitDiffManager,
     executionTracker,
-    getMainWindow: () => mainWindow
   });
 
   // ---------------------------------------------------------------------------
@@ -1738,7 +1665,6 @@ async function initializeServices(): Promise<boolean> {
   // agent permission mode + CLI substrate via the resolvers (ConfigManager
   // satisfies WorkflowConfigProvider structurally).
   workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger, configManager);
-  const mcpConfigWriter = new McpConfigWriter();
 
   // Native task-tracking write chokepoint (migration 014). The single serialized
   // writer for `tasks`/`task_events`; injected (structurally) into RunExecutor,
@@ -1908,15 +1834,6 @@ async function initializeServices(): Promise<boolean> {
   // a closure over configManager + databaseService so the router stays free of
   // ConfigManager/service imports (standalone-typecheck invariant). Fail-soft:
   // any lookup error returns null → the snapshot is skipped, never the commit.
-  // S5 — the Accept-as-baseline committer (4th ArtifactRouter arg). The router stays
-  // fs/git-free (standalone-typecheck invariant); this closure does the concrete fs
-  // work via the FsBaselineStore (copy run-artifact PNGs into the git-tracked
-  // .cyboflow/artifacts/baselines/<key>/<viewport>.png tree at the project ROOT) and
-  // stages + commits them with `git`. It is the ONLY layer allowed to import the
-  // electron-backed cyboflowDirectory util + child_process. Mirrors the
-  // resolveCommitDir closure: a closure over databaseService + the run-artifacts-dir
-  // resolver. Returns the baselineKey actually written.
-  const fsBaselineStore = new FsBaselineStore();
   ArtifactRouter.initialize(
     cyboflowDb,
     cyboflowLogger,
@@ -1929,44 +1846,7 @@ async function initializeServices(): Promise<boolean> {
         return null;
       }
     },
-    async ({ projectId, runId, baselineKey, fileNames }) => {
-      const project = databaseService.getProject(projectId);
-      if (!project?.path) {
-        throw new Error(`accept-baseline: project ${projectId} has no path`);
-      }
-      const projectRoot = project.path;
-      const artifactsDir = getCyboflowSubdirectory('artifacts', 'runs', runId);
-      const written: string[] = [];
-      for (const fileName of fileNames) {
-        const stem = path.basename(fileName).replace(/\.png$/i, '');
-        const source = path.join(artifactsDir, path.basename(fileName));
-        // The viewport stem of the captured PNG IS its baseline viewport stem.
-        const dest = await fsBaselineStore.write(projectRoot, baselineKey, stem, source);
-        written.push(dest);
-      }
-      // Stage + commit the baselines tree (only the baselines paths we wrote). Run in
-      // the project ROOT (baselines are durable at root, not the run worktree).
-      if (written.length > 0) {
-        try {
-          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe', windowsHide: true });
-          execFileSync(
-            resolveGitCommand(),
-            ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
-            { cwd: projectRoot, stdio: 'pipe', windowsHide: true },
-          );
-        } catch (err) {
-          // A git failure (no repo / nothing changed) is logged but does not undo the
-          // on-disk copy — the bytes are written; the human can commit manually.
-          cyboflowLogger?.warn('[acceptBaseline] git commit failed (fail-soft)', {
-            projectId,
-            baselineKey,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      return { baselineKey };
-    },
-    // 5th arg (IDEA-039) — the run's on-disk artifacts subtree resolver. Source of
+    // 4th arg (IDEA-039) — the run's on-disk artifacts subtree resolver. Source of
     // committed bytes on snapshot AND the tree reapForRun removes on merge /
     // create-PR close-out. A closure over the electron-backed getCyboflowSubdirectory
     // (the router is electron-free, so the path is injected). Mirrors the
@@ -1992,9 +1872,9 @@ async function initializeServices(): Promise<boolean> {
         'app.asar.unpacked/main/dist/main/src/orchestrator/verify/driver/driverCli.js',
       )
     : path.join(__dirname, 'orchestrator', 'verify', 'driver', 'driverCli.js');
-  // VerificationScheduler + everything it is injected with (backends, capped VLM
-  // judge, dev/static servers, the verification-agent runner, the runbook store +
-  // status resolver, the host probes, the lane runbook bootstrap) — composed in
+  // VerificationScheduler + everything it is injected with (the verification-agent
+  // runner, the runbook store + status resolver, the host probes, the lane runbook
+  // bootstrap) — composed in
   // verifyComposition.ts (issue #19 step 4). Order is load-bearing: the routers
   // above must exist (verdict delivery + bootstrap write through them) and
   // VerificationScheduler.initialize() must precede the OrchSocketServer below.
@@ -2003,7 +1883,6 @@ async function initializeServices(): Promise<boolean> {
     cyboflowLogger,
     cyboflowDb,
     databaseService,
-    fsBaselineStore,
     claudeExecutablePath,
     driverCliPath: verifyDriverCliPath,
   });
@@ -2043,7 +1922,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     databaseService,
     getMainWindow: () => mainWindow,
-    devMode: !app.isPackaged,
   });
 
   // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically
@@ -2140,25 +2018,6 @@ async function initializeServices(): Promise<boolean> {
     configManager,
     workflowRegistry,
   });
-
-  // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
-  // injects the live socket path into spawned sessions.
-  const orchSocketProvider: OrchSocketProvider = {
-    getSocketPath: () => orchSocketServer.getSocketPath(),
-  };
-
-  // BridgeScriptResolver — delegates to resolveMcpServerScriptPath(), which
-  // returns the asar-unpacked path in packaged builds and the __dirname-relative
-  // compiled .js in dev (no extraction step needed).
-  const bridgeScriptResolver: BridgeScriptResolver = {
-    getScriptPath: () => resolveMcpServerScriptPath(),
-  };
-
-  // NodeResolver — returns the process's own node executable path as a
-  // best-effort fallback.  A proper findExecutableInPath ladder is epic 7.
-  const nodeResolver: NodeResolver = {
-    getNodePath: async () => process.execPath,
-  };
 
   // Concrete WorkflowPromptReaderLike adapter — keeps RunExecutor free of direct
   // fs/concrete-module imports while branching on the run's workflow row.
@@ -2571,16 +2430,14 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
   };
 
+  // Migration-127 trust prompt: projects:create + first session/run launch in an undecided project.
+  const permissionTrust = composePermissionTrust({ databaseService, sessionManager, workflowRegistry, getMainWindow: () => mainWindow });
   runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
     worktreeManager,
     cyboflowLogger,
-    mcpConfigWriter,
-    orchSocketProvider,
-    bridgeScriptResolver,
-    nodeResolver,
-    cyboflowPublisher,
+    permissionTrust.wrapRunPublisher(cyboflowPublisher),
     runExecutor,
     runQueues,
     taskChangeRouter,
@@ -2699,10 +2556,12 @@ async function initializeServices(): Promise<boolean> {
       orchSocketServer.cancelInFlightShellApprovals(runId),
     );
   }
+  // The cyboflow MCP server entry for the Codex/OMP runtimes: the bundled server
+  // script (asar-unpacked in packaged builds) run by this process's own binary.
   createdCodexSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
-    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
-    nodeExecutablePath: await nodeResolver.getNodePath(),
+    bridgeScriptPath: resolveMcpServerScriptPath(),
+    nodeExecutablePath: process.execPath,
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
@@ -2710,8 +2569,8 @@ async function initializeServices(): Promise<boolean> {
   // them; content questions use the same durable QuestionRouter as Claude/Codex.
   createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
-    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
-    nodeExecutablePath: await nodeResolver.getNodePath(),
+    bridgeScriptPath: resolveMcpServerScriptPath(),
+    nodeExecutablePath: process.execPath,
   });
   createdOmpSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 
@@ -2863,11 +2722,11 @@ async function initializeServices(): Promise<boolean> {
     gitDiffManager,
     gitStatusManager,
     executionTracker,
-    runCommandManager,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,
     archiveProgressManager,
+    permissionTrustPrompter: permissionTrust.prompter,
     cyboflow: {
       workflowRegistry,
       runLauncher,
@@ -3409,14 +3268,6 @@ app.whenReady().then(async () => {
   await createWindow();
   console.log('[Main] Window created successfully');
 
-  // Record app open in the local database (used for app-update detection)
-  try {
-    const currentVersion = app.getVersion();
-    databaseService.recordAppOpen(false, currentVersion);
-  } catch (error) {
-    console.error('[Main] Failed to record app open:', error);
-  }
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       console.log('[Main] Activating app, creating new window...');
@@ -3540,24 +3391,6 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Pairwise judge worker stopped');
   }
 
-  // Cleanup all sessions and terminate child processes. Deliberately AFTER the
-  // queue drain above: cleanup() settles no run-executor task (it stops the
-  // project run script and the terminal-panel PTYs), so running it first buys
-  // the drain nothing and its per-pty exit grace polls eat the 10s quit ceiling
-  // in services/quitDrain.ts ahead of the database flush.
-  if (sessionManager) {
-    console.log('[Main] Cleaning up sessions and terminating child processes...');
-    await sessionManager.cleanup();
-    console.log('[Main] Session cleanup complete');
-  }
-
-  // Stop all run commands
-  if (runCommandManager) {
-    console.log('[Main] Stopping all run commands...');
-    await runCommandManager.stopAllRunCommands();
-    console.log('[Main] Run commands stopped');
-  }
-  
   // Stop git status polling
   if (gitStatusManager) {
     console.log('[Main] Stopping git status polling...');

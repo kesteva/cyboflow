@@ -25,14 +25,14 @@ afterEach(async () => {
 
 describe('ConfigManager.computeCostFromRates', () => {
   it('floors to false without seeding the constructor defaults', () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
 
     expect(manager.getConfig().computeCostFromRates).toBeUndefined();
     expect(manager.getComputeCostFromRates()).toBe(false);
   });
 
   it('persists alongside the eval toggle and round-trips through a fresh initialize', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     await manager.updateConfig({
       codeReviewEvalEnabled: false,
@@ -42,7 +42,7 @@ describe('ConfigManager.computeCostFromRates', () => {
     expect(manager.getCodeReviewEvalEnabled()).toBe(false);
     expect(manager.getComputeCostFromRates()).toBe(true);
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().codeReviewEvalEnabled).toBe(false);
     expect(reloaded.getConfig().computeCostFromRates).toBe(true);

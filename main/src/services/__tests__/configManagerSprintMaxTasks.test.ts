@@ -114,7 +114,7 @@ describe('resolveSprintMaxTasks / clampSprintMaxTasks', () => {
 
 describe('ConfigManager.getSprintMaxTasks', () => {
   it('round-trips through configOps.updateConfig → .getConfig → a fresh load off disk', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -131,14 +131,14 @@ describe('ConfigManager.getSprintMaxTasks', () => {
     expect((await readPersisted(tempDir)).sprintMaxTasks).toEqual({ sdk: 40, interactive: 25 });
 
     // A relaunch reads the same values (config is a plain JSON file).
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getSprintMaxTasks()).toEqual({ sdk: 40, interactive: 25 });
     expect(resolveSprintMaxTasks(reloaded.getSprintMaxTasks(), 'sdk')).toBe(40);
   });
 
   it('STORES the clamped value — the boundary does not trust the renderer', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -153,7 +153,7 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   });
 
   it('rejects a malformed payload instead of persisting it', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -173,7 +173,7 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   });
 
   it('drops a cleared member so the substrate falls back to its built-in default', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -188,7 +188,7 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   });
 
   it('with the field absent, config.json stays free of the key and the defaults hold', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     expect(manager.getConfig().sprintMaxTasks).toBeUndefined();
@@ -207,7 +207,7 @@ describe('ConfigManager.getSprintMaxTasks', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ sprintMaxTasks: { sdk: 999, interactive: 'ten' } }),
     );
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     // sdk clamps to the ceiling; the non-numeric interactive entry is DROPPED so

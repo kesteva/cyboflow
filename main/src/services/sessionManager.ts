@@ -1,20 +1,14 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess } from 'child_process';
-import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { parseTimestamp } from '../utils/timestampUtils';
-import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
-import { formatForDisplay } from '../utils/timestampUtils';
-import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
-import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
 import { stampSpawnMarker } from '../utils/spawnMarker';
 
 // Interface for generic JSON message data that can contain various properties
@@ -46,7 +40,7 @@ interface PanelStateWithCustomData extends ToolPanelState {
   customState?: Record<string, unknown>;
   [key: string]: unknown;
 }
-import { addSessionLog, cleanupSessionLogs } from '../ipc/logs';
+import { addSessionLog } from '../ipc/logs';
 import { withLock } from '../utils/mutex';
 import { panelManager } from './panelManager';
 
@@ -69,44 +63,11 @@ function parseStringArrayColumn(raw: string | undefined | null): string[] | unde
 
 export class SessionManager extends EventEmitter {
   private activeSessions: Map<string, Session> = new Map();
-  private runningScriptProcess: ChildProcess | null = null;
-  private currentRunningSessionId: string | null = null;
-  private activeProject: Project | null = null;
-  private terminalSessionManager: TerminalSessionManager;
 
   constructor(public db: DatabaseService) {
     super();
     // Increase max listeners to prevent warnings when many components listen to events
-    // This is expected since multiple SessionListItem components and project tree views listen to events
     this.setMaxListeners(100);
-    this.terminalSessionManager = new TerminalSessionManager();
-    
-    // Forward terminal output events to the terminal display
-    this.terminalSessionManager.on('terminal-output', ({ sessionId, data, type }) => {
-      // Terminal PTY output goes directly to the terminal view
-      // Terminal is now independent and not used for run scripts
-      this.emit('terminal-output', { sessionId, data, type });
-    });
-    
-    // Forward zombie process detection events
-    this.terminalSessionManager.on('zombie-processes-detected', (data) => {
-      this.emit('zombie-processes-detected', data);
-    });
-  }
-
-  setActiveProject(project: Project): void {
-    this.activeProject = project;
-    this.emit('active-project-changed', project);
-  }
-
-  getActiveProject(): Project | null {
-    if (!this.activeProject) {
-      this.activeProject = this.db.getActiveProject() || null;
-      if (this.activeProject) {
-        // Active project loaded successfully
-      }
-    }
-    return this.activeProject;
   }
 
   getDbSession(id: string): DbSession | undefined {
@@ -127,19 +88,6 @@ export class SessionManager extends EventEmitter {
       const panelState = panel?.state?.customState as BaseAIPanelState | undefined;
       const claudeSessionId = panelState?.agentSessionId || panelState?.claudeSessionId;
       return claudeSessionId;
-    } catch (e) {
-      return undefined;
-    }
-  }
-
-  // Generic method for getting agent session ID (works for any AI panel)
-  getPanelAgentSessionId(panelId: string): string | undefined {
-    try {
-      const panel = this.db.getPanel(panelId);
-      const customState = panel?.state?.customState as BaseAIPanelState | undefined;
-      // Check new field first, then fall back to legacy claudeSessionId
-      const agentSessionId = customState?.agentSessionId || customState?.claudeSessionId;
-      return agentSessionId;
     } catch (e) {
       return undefined;
     }
@@ -183,7 +131,6 @@ export class SessionManager extends EventEmitter {
       prompt: dbSession.initial_prompt,
       status: this.mapDbStatusToSessionStatus(dbSession.status, dbSession.last_viewed_at, dbSession.updated_at),
       statusMessage: dbSession.status_message,
-      pid: dbSession.pid,
       createdAt: parseTimestamp(dbSession.created_at),
       // The session's real last-ACTIVITY clock: idle_since (stamped at the
       // busy→resting transition, migration 119) when the session is at rest,
@@ -202,14 +149,12 @@ export class SessionManager extends EventEmitter {
       output: [], // Will be loaded separately by frontend when needed
       jsonMessages: [], // Will be loaded separately by frontend when needed
       error: dbSession.exit_code && dbSession.exit_code !== 0 ? `Exit code: ${dbSession.exit_code}` : undefined,
-      isRunning: false,
       lastViewedAt: dbSession.last_viewed_at,
       permissionMode: dbSession.permission_mode,
       runStartedAt: dbSession.run_started_at,
       isMainRepo: dbSession.is_main_repo,
       inPlace: !!dbSession.in_place,
       projectId: dbSession.project_id, // Add the missing projectId field
-      folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
       isFavorite: dbSession.is_favorite,
       // Model is now managed at panel level
@@ -299,10 +244,9 @@ export class SessionManager extends EventEmitter {
     worktreePath: string,
     prompt: string,
     worktreeName: string,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     isMainRepo?: boolean,
-    folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
@@ -321,7 +265,6 @@ export class SessionManager extends EventEmitter {
         permissionMode,
         projectId,
         isMainRepo,
-        folderId,
         toolType,
         baseCommit,
         baseBranch,
@@ -339,10 +282,9 @@ export class SessionManager extends EventEmitter {
     worktreePath: string,
     prompt: string,
     worktreeName: string,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     isMainRepo?: boolean,
-    folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
@@ -359,19 +301,9 @@ export class SessionManager extends EventEmitter {
     // Add log entry for session creation
     addSessionLog(id, 'info', `Creating session: ${name}`, 'SessionManager');
     
-    let targetProject;
-    
-    if (projectId) {
-      targetProject = this.getProjectById(projectId);
-      if (!targetProject) {
-        throw new Error(`Project with ID ${projectId} not found`);
-      }
-    } else {
-      // Fall back to active project for backward compatibility
-      targetProject = this.getActiveProject();
-      if (!targetProject) {
-        throw new Error('No project specified and no active project selected');
-      }
+    const targetProject = this.getProjectById(projectId);
+    if (!targetProject) {
+      throw new Error(`Project with ID ${projectId} not found`);
     }
 
     // run_id is intentionally omitted: no flow-owned-session creation surface exists today.
@@ -385,7 +317,6 @@ export class SessionManager extends EventEmitter {
       worktree_name: worktreeName,
       worktree_path: worktreePath,
       project_id: targetProject.id,
-      folder_id: folderId,
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
       in_place: inPlace,
@@ -443,7 +374,6 @@ export class SessionManager extends EventEmitter {
         project.default_permission_mode || DEFAULT_PERMISSION_MODE,
         projectId,
         true, // isMainRepo = true
-        undefined, // folderId
         'claude', // tool_type
         undefined, // baseCommit
         undefined // baseBranch
@@ -705,23 +635,12 @@ export class SessionManager extends EventEmitter {
       console.error(`[SessionManager] Error stopping AI panels for session ${id}:`, error);
     }
 
-    // Close terminal session if it exists
-    await this.terminalSessionManager.closeTerminalSession(id);
-    
     this.activeSessions.delete(id);
     this.emit('session-deleted', { id }); // Keep the same event name for frontend compatibility
   }
 
   stopSession(id: string): void {
     this.updateSession(id, { status: 'stopped' });
-  }
-
-  setSessionPid(id: string, pid: number): void {
-    this.db.updateSession(id, { pid });
-    const session = this.activeSessions.get(id);
-    if (session) {
-      session.pid = pid;
-    }
   }
 
   setSessionExitCode(id: string, exitCode: number): void {
@@ -929,36 +848,6 @@ export class SessionManager extends EventEmitter {
     return this.db.getPanelPromptMarkers(panelId);
   }
 
-  addPanelInitialPromptMarker(panelId: string, prompt: string): void {
-    // Prompt markers are no longer needed for panels - using conversation_messages instead
-    // The prompt is already being added to conversation_messages in addPanelConversationMessage
-  }
-
-  async continueConversation(id: string, userMessage: string): Promise<void> {
-    return await withLock(`session-input-${id}`, async () => {
-      // Store the user's message
-      this.addConversationMessage(id, 'user', userMessage);
-      
-      // Add the continuation prompt to output so it's visible
-      const timestamp = formatForDisplay(new Date());
-      const userPromptDisplay = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[42m\x1b[30m 👤 USER PROMPT \x1b[0m\r\n` +
-                               `\x1b[1m\x1b[92m${userMessage}\x1b[0m\r\n\r\n`;
-      this.addSessionOutput(id, {
-        type: 'stdout',
-        data: userPromptDisplay,
-        timestamp: new Date()
-      });
-      
-      // Add a prompt marker for this continued conversation
-      // Get current output count to use as index
-      const outputs = this.db.getSessionOutputs(id);
-      this.db.addPromptMarker(id, userMessage, outputs.length);
-      
-      // Emit event for the Claude Code manager to handle
-      this.emit('conversation-continue', { sessionId: id, message: userMessage });
-    });
-  }
-
   markSessionAsViewed(id: string): void {
     const updatedDbSession = this.db.markSessionAsViewed(id);
     if (updatedDbSession) {
@@ -987,125 +876,8 @@ export class SessionManager extends EventEmitter {
     return this.db.createExecutionDiff(data);
   }
 
-  getExecutionDiffs(sessionId: string): ExecutionDiff[] {
-    return this.db.getExecutionDiffs(sessionId);
-  }
-
-  getExecutionDiff(id: number): ExecutionDiff | undefined {
-    return this.db.getExecutionDiff(id);
-  }
-
   getNextExecutionSequence(sessionId: string): number {
     return this.db.getNextExecutionSequence(sessionId);
-  }
-
-  getProjectRunScript(sessionId: string): string[] | null {
-    const dbSession = this.getDbSession(sessionId);
-    if (dbSession?.project_id) {
-      const project = this.getProjectById(dbSession.project_id);
-      if (project?.run_script) {
-        // Split by newlines to get array of commands
-        return project.run_script.split('\n').filter(cmd => cmd.trim());
-      }
-    }
-    return null;
-  }
-
-  getProjectBuildScript(sessionId: string): string[] | null {
-    const dbSession = this.getDbSession(sessionId);
-    if (dbSession?.project_id) {
-      const project = this.getProjectById(dbSession.project_id);
-      if (project?.build_script) {
-        // Split by newlines to get array of commands
-        return project.build_script.split('\n').filter(cmd => cmd.trim());
-      }
-    }
-    return null;
-  }
-
-  async runScript(sessionId: string, commands: string[], workingDirectory: string): Promise<void> {
-    // Stop any currently running script and wait for it to fully terminate
-    await this.stopRunningScript();
-
-    // Clear previous logs when starting a new run
-    cleanupSessionLogs(sessionId);
-
-    // Mark session as running
-    this.setSessionRunning(sessionId, true);
-    this.currentRunningSessionId = sessionId;
-
-    // Track in shared script execution tracker
-    scriptExecutionTracker.start('session', sessionId);
-    
-    // Join commands to run them sequentially, in the dialect of the shell
-    // getShellCommandArgs routes to (POSIX `a && b`; PowerShell cannot parse
-    // `&&` on PS 5.1, so the win32 form differs — see buildCommandString).
-    const command = ShellDetector.buildCommandString({}, commands);
-    
-    // Get enhanced shell PATH
-    const shellPath = getShellPath();
-    
-    // Get the user's default shell and command arguments
-    const { shell, args } = ShellDetector.getShellCommandArgs(command);
-    
-    // POSIX: a process group of its own, so the stop ladder can signal the
-    // whole tree. Windows has no process groups, and DETACHED_PROCESS overrides
-    // CREATE_NO_WINDOW there, so a console child would allocate a visible
-    // console; the stop path uses taskkill /T on the pid instead.
-    this.runningScriptProcess = spawn(shell, args, {
-      cwd: workingDirectory,
-      stdio: 'pipe',
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-      env: stampSpawnMarker({
-        ...process.env,
-        PATH: shellPath
-      }, workingDirectory)
-    });
-
-    // Handle output - send to logs instead of terminal
-    this.runningScriptProcess.stdout?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      // Split by lines and add each as a log entry
-      const lines = output.split('\n').filter(line => line.trim());
-      lines.forEach(line => {
-        addSessionLog(sessionId, 'info', line, 'Application');
-      });
-      // Log output is now handled via addSessionLog above
-    });
-
-    this.runningScriptProcess.stderr?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      // Split by lines and add each as a log entry
-      const lines = output.split('\n').filter(line => line.trim());
-      lines.forEach(line => {
-        addSessionLog(sessionId, 'error', line, 'Application');
-      });
-      // Log output is now handled via addSessionLog above
-    });
-
-    // Handle process exit
-    this.runningScriptProcess.on('exit', (code) => {
-      addSessionLog(sessionId, 'info', `Process exited with code: ${code}`, 'Application');
-
-      this.setSessionRunning(sessionId, false);
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      // Update shared tracker
-      scriptExecutionTracker.stop('session', sessionId);
-    });
-
-    this.runningScriptProcess.on('error', (error) => {
-      addSessionLog(sessionId, 'error', `Error: ${error.message}`, 'Application');
-
-      this.setSessionRunning(sessionId, false);
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      // Update shared tracker
-      scriptExecutionTracker.stop('session', sessionId);
-    });
   }
 
   async runBuildScript(sessionId: string, commands: string[], workingDirectory: string): Promise<{ success: boolean; output: string }> {
@@ -1199,275 +971,5 @@ export class SessionManager extends EventEmitter {
         PATH: shellPath
       }, options.cwd)
     });
-  }
-
-  addScriptOutput(sessionId: string, data: string, type: 'stdout' | 'stderr' = 'stdout'): void {
-    // Send output to logs instead of terminal
-    const lines = data.split('\n').filter(line => line.trim());
-    lines.forEach(line => {
-      const level = type === 'stderr' ? 'error' : 'info';
-      addSessionLog(sessionId, level, line, 'Terminal');
-    });
-  }
-
-  /**
-   * Every descendant of `parentPid`. The per-platform enumeration lives in
-   * utils/platformProcess.ts; a failed walk degrades to a partial list.
-   */
-  private getAllDescendantPids(parentPid: number): Promise<number[]> {
-    return collectDescendantPidsAsync(parentPid);
-  }
-
-  /**
-   * Stop the running script and everything it spawned. The ladder is in
-   * {@link terminateScriptTree}; this method owns the bookkeeping around it.
-   */
-  stopRunningScript(): Promise<void> {
-    const isWin32 = process.platform === 'win32';
-    return new Promise((resolve) => {
-      if (!this.runningScriptProcess || !this.currentRunningSessionId) {
-        resolve();
-        return;
-      }
-
-      const sessionId = this.currentRunningSessionId;
-      const scriptProcess = this.runningScriptProcess;
-
-      // Mark as closing in shared tracker
-      scriptExecutionTracker.markClosing('session', sessionId);
-
-      // Immediately clear references to prevent new output
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      const pid = scriptProcess.pid;
-      if (!pid) {
-        // No process PID
-        this.finishStopScript(sessionId);
-        resolve();
-        return;
-      }
-
-      // Fail-soft by contract: a failed enumeration or session log must not
-      // reject the stop promise — finish the stop either way.
-      void this.terminateScriptTree(sessionId, pid, isWin32).finally(() => {
-        this.finishStopScript(sessionId);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Run the stop ladder for one script tree, reporting through the session log.
-   * Both platform ladders live in utils/platformProcess.ts (killTree); this
-   * site picks the timings and the wording. Never throws.
-   */
-  private async terminateScriptTree(sessionId: string, pid: number, isWin32: boolean): Promise<void> {
-    try {
-      // Enumerated up front, so children orphaned mid-ladder are still reached.
-      const descendantPids = await this.getAllDescendantPids(pid);
-
-      addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
-      addSessionLog(
-        sessionId,
-        'info',
-        isWin32
-          ? `[Forcefully terminating process ${pid} and its tree (taskkill)]`
-          : `[Sending SIGTERM to process ${pid} and its group]`,
-        'System'
-      );
-
-      const stopped = await killTree(pid, {
-        descendantPids,
-        // The ladder's own progress, in the bracketed form the session log
-        // uses. These lines are what the user watches while a stop runs.
-        logger: {
-          info: (message) => addSessionLog(sessionId, 'info', `[${message}]`, 'System'),
-          warn: (message) => addSessionLog(sessionId, 'warn', `[${message}]`, 'System'),
-        },
-        graceMode: 'fixed',
-        // Windows has no catchable signals, so there is nothing for a grace
-        // window to wait for — the ladder is taskkill either way.
-        graceMs: isWin32 ? 0 : 2000,
-        posixGroupMode: 'root',
-        listDescendants: () => this.getAllDescendantPids(pid),
-        onSurvivors: (remainingPids) => {
-          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-          addSessionLog(
-            sessionId,
-            'error',
-            isWin32
-              ? `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`
-              : `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`,
-            'System'
-          );
-        },
-        onError: (error) => console.warn('Error killing script process:', error),
-      });
-
-      if (stopped) {
-        addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-      }
-    } catch (error) {
-      console.warn('Error killing script process:', error);
-    }
-  }
-
-  private finishStopScript(sessionId: string): void {
-    // Update session state
-    this.setSessionRunning(sessionId, false);
-
-    // Update shared tracker
-    scriptExecutionTracker.stop('session', sessionId);
-
-    // Emit a final message to indicate the script was stopped
-    addSessionLog(sessionId, 'info', '\n[Script stopped by user]', 'System');
-  }
-
-  private setSessionRunning(sessionId: string, isRunning: boolean): void {
-    const session = this.activeSessions.get(sessionId);
-    if (session) {
-      session.isRunning = isRunning;
-      this.emit('session-updated', session);
-    }
-  }
-
-  getCurrentRunningSessionId(): string | null {
-    // Use shared tracker for consistency
-    return scriptExecutionTracker.getRunningScriptId('session') as string | null;
-  }
-
-  async cleanup(): Promise<void> {
-    this.stopRunningScript();
-    await this.terminalSessionManager.cleanup();
-  }
-
-  async runTerminalCommand(sessionId: string, command: string): Promise<void> {
-    // Add log entry for terminal command
-    addSessionLog(sessionId, 'info', `Running terminal command: ${command}`, 'Terminal');
-    
-    const session = this.activeSessions.get(sessionId);
-    if (!session) {
-      // Check if session exists in database and is archived
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession) {
-        throw new Error('Session not found');
-      }
-      if (dbSession.archived) {
-        throw new Error('Cannot access terminal for archived session');
-      }
-      throw new Error('Session not found');
-    }
-
-    // Don't allow running commands while a script is active
-    if (this.currentRunningSessionId === sessionId && this.runningScriptProcess) {
-      throw new Error('Cannot run terminal commands while a script is running');
-    }
-
-    const worktreePath = session.worktreePath;
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-        // Give the terminal a moment to initialize
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      // Send the command to the persistent terminal session
-      this.terminalSessionManager.sendCommand(sessionId, command);
-    } catch (error) {
-      // Don't write error to terminal for archived sessions
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (!errorMessage.includes('archived session')) {
-        this.addScriptOutput(sessionId, `\nError: ${error}\n`, 'stderr');
-      }
-      throw error;
-    }
-  }
-
-  async sendTerminalInput(sessionId: string, data: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
-    let worktreePath: string;
-    
-    if (!session) {
-      // Try to get session from database for terminal-only sessions
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession || !dbSession.worktree_path) {
-        throw new Error('Session not found');
-      }
-      
-      // Check if session is archived
-      if (dbSession.archived) {
-        throw new Error('Cannot access terminal for archived session');
-      }
-      
-      worktreePath = dbSession.worktree_path;
-    } else {
-      worktreePath = session.worktreePath;
-    }
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-        // Give the terminal a moment to initialize
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      // Send the raw input to the persistent terminal session
-      this.terminalSessionManager.sendInput(sessionId, data);
-    } catch (error) {
-      // Don't write error to terminal for archived sessions
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (!errorMessage.includes('archived session')) {
-        this.addScriptOutput(sessionId, `\nError: ${error}\n`, 'stderr');
-      }
-      throw error;
-    }
-  }
-
-  async closeTerminalSession(sessionId: string): Promise<void> {
-    await this.terminalSessionManager.closeTerminalSession(sessionId);
-  }
-
-  hasTerminalSession(sessionId: string): boolean {
-    return this.terminalSessionManager.hasSession(sessionId);
-  }
-
-  resizeTerminal(sessionId: string, cols: number, rows: number): void {
-    this.terminalSessionManager.resizeTerminal(sessionId, cols, rows);
-  }
-
-  async preCreateTerminalSession(sessionId: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
-    let worktreePath: string;
-    
-    if (!session) {
-      // Try to get session from database for terminal-only sessions
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession || !dbSession.worktree_path) {
-        throw new Error('Session not found');
-      }
-      
-      // Check if session is archived
-      if (dbSession.archived) {
-        throw new Error('Cannot create terminal for archived session');
-      }
-      
-      worktreePath = dbSession.worktree_path;
-    } else {
-      worktreePath = session.worktreePath;
-    }
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-      }
-    } catch (error) {
-      console.error(`[SessionManager] Failed to pre-create terminal session: ${error}`);
-      // Don't throw - this is a best-effort optimization
-    }
   }
 }

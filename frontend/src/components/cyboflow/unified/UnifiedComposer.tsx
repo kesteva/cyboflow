@@ -118,8 +118,6 @@ export interface UnifiedComposerProps {
   effortSlot?: React.ReactNode;
   /** Per-panel substrate override for added chats. */
   substrateSlot?: React.ReactNode;
-  /** compact-context control (SDK quick) — host supplies the node. */
-  compactSlot?: React.ReactNode;
 }
 
 const READONLY_HINT = 'Set at session start — mid-session change coming later';
@@ -153,7 +151,6 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     fastSlot,
     effortSlot,
     substrateSlot,
-    compactSlot,
   } = props;
 
   const [atts, setAtts] = useState<ComposerAttachments>(emptyAttachments);
@@ -431,9 +428,6 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
             order: model → permission → speed → effort. */}
         {visibility.showQuickPills && fastSlot}
         {visibility.showQuickPills && effortSlot}
-
-        {/* compact-context (SDK) */}
-        {visibility.isSDK && compactSlot}
 
         {/* right cluster */}
         <div className="ml-auto flex items-center gap-2">

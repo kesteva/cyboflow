@@ -60,15 +60,9 @@ vi.mock('../../../../hooks/useClaudePanel', () => ({
     input: '',
     setInput: vi.fn(),
     textareaRef: { current: null },
-    handleTerminalCommand: vi.fn(),
     handleSendInput: vi.fn(),
     handleContinueConversation: vi.fn(),
-    ultrathink: false,
-    setUltrathink: vi.fn(),
     gitCommands: null,
-    handleCompactContext: vi.fn(),
-    hasConversationHistory: false,
-    contextCompacted: false,
     handleStopSession: vi.fn(),
   }),
 }));
@@ -892,5 +886,41 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
       expect(mockGetResumeState).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slash-command autocomplete source
+// ---------------------------------------------------------------------------
+
+describe('ClaudePanel — slash commands for the composer autocomplete', () => {
+  it("stores the newest system/init's slash_commands under slashCommands_<sessionId>", () => {
+    localStorage.removeItem('slashCommands_s1');
+    mocks.holder.messages = [
+      {
+        id: 'init-1',
+        role: 'system',
+        timestamp: '2026-06-12T00:00:00.000Z',
+        segments: [],
+        metadata: { systemSubtype: 'init', sessionInfo: { slash_commands: ['old'] } },
+      },
+      {
+        id: 'init-2',
+        role: 'system',
+        timestamp: '2026-06-12T00:01:00.000Z',
+        segments: [],
+        metadata: { systemSubtype: 'init', sessionInfo: { slash_commands: ['review', 'compact'] } },
+      },
+    ];
+    renderWithProvider(makeSession({ id: 's1' }));
+
+    expect(JSON.parse(localStorage.getItem('slashCommands_s1') ?? 'null')).toEqual(['review', 'compact']);
+  });
+
+  it('writes nothing when the transcript carries no init event', () => {
+    localStorage.removeItem('slashCommands_s1');
+    renderWithProvider(makeSession({ id: 's1' }));
+
+    expect(localStorage.getItem('slashCommands_s1')).toBeNull();
   });
 });

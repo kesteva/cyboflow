@@ -339,7 +339,7 @@ export type McpQueryMessage =
       type: 'mcp-request-verification';
       requestId: string;
       runId: string;
-      /** Natural-language acceptance the VlmJudge checks (required). */
+      /** Natural-language acceptance the verifier checks (required unless a task is passed). */
       intent: string;
       /**
        * PREFERRED dual-format form (redesign §5.2): the composed VerificationTaskV1
@@ -357,7 +357,6 @@ export type McpQueryMessage =
       htmlPath?: string;
       /** Responsive viewport list (camelCase wire); passed through UNVALIDATED — narrowed by the handler. */
       viewports?: unknown;
-      baselineKey?: string;
       /**
        * The lane's display ref (e.g. "TASK-008") or opaque task id — verdict→lane
        * attribution for the visual merge-gate (locked decision #2). Carried into

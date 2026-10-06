@@ -774,7 +774,6 @@ describe('WorkflowEditorModal — edit mode', () => {
 
   it('"Run with modifications" threads a stored `workflow:<id>` model default into runs.start.mutate', async () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       runTypeDefaults: { [`workflow:${EDIT_WORKFLOW_ID}`]: { model: 'sonnet' } },
     };
     act(() => {
@@ -801,7 +800,6 @@ describe('WorkflowEditorModal — edit mode', () => {
     // persist() resolves to (mirrors "Save as new" minting a brand-new id) —
     // the lookup misses and the floor applies, without throwing.
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       runTypeDefaults: { 'workflow:some-other-id': { model: 'sonnet' } },
     };
     act(() => {
@@ -829,7 +827,6 @@ describe('WorkflowEditorModal — edit mode', () => {
     // other launch seam honours it, and so must this one (it used to skip
     // straight to DEFAULT_WORKFLOW_MODEL).
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: 'sonnet',
       runTypeDefaults: {},
     };
@@ -853,7 +850,6 @@ describe('WorkflowEditorModal — edit mode', () => {
 
   it('"Run with modifications": a stored per-workflow model OUTRANKS the global launch model', async () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: 'sonnet',
       runTypeDefaults: { [`workflow:${EDIT_WORKFLOW_ID}`]: { model: 'haiku' } },
     };
@@ -872,7 +868,6 @@ describe('WorkflowEditorModal — edit mode', () => {
 
   it('"Run with modifications": a BLANK global defaultLaunchModel is unset, not a model', async () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: '   ',
       runTypeDefaults: {},
     };
@@ -1870,7 +1865,6 @@ describe('WorkflowEditorModal — create mode', () => {
     // edit-mode stand-in: the run must both target the minted id and resolve
     // its launch model under `workflow:<minted id>`.
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: 'haiku',
       runTypeDefaults: { [`workflow:${NEW_CUSTOM_ROW.id}`]: { model: 'sonnet' } },
     };
@@ -1902,7 +1896,6 @@ describe('WorkflowEditorModal — create mode', () => {
 
   it('"Run with modifications" in CREATE mode falls back to the global launch model for an unknown minted id', async () => {
     const config: AppConfig = {
-      gitRepoPath: '/repo',
       defaultLaunchModel: 'haiku',
       runTypeDefaults: { 'workflow:some-other-id': { model: 'sonnet' } },
     };

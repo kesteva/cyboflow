@@ -29,10 +29,6 @@
  *  (b) Project not found → TRPCError NOT_FOUND.
  *  (d) Deps not wired → TRPCError METHOD_NOT_SUPPORTED (also covered in router.test.ts).
  *
- * runs.listMessages (TASK-759 — wrapper-layer guard coverage):
- *  (a) Empty raw_events returns [].
- *  (b) Missing ctx.db → TRPCError PRECONDITION_FAILED.
- *
  * runs.getPhaseState (TASK-766):
  *  (a) Returns correct WorkflowDefinition for known CyboflowWorkflowName.
  *  (b) Throws NOT_FOUND for unknown workflow name.
@@ -54,9 +50,6 @@ import type { MockInstance } from 'vitest';
 import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
 import Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
@@ -3322,43 +3315,6 @@ describe('boot-recovery live-state skip for persistent interactive runs (IDEA-03
 });
 
 // ---------------------------------------------------------------------------
-// runs.listMessages wrapper-layer tests (TASK-759)
-//
-// These tests exercise the two conditional branches in the listMessages
-// procedure body at the tRPC layer. The underlying selectRunMessages logic
-// is covered in main/src/orchestrator/__tests__/runMessagesListing.test.ts.
-// ---------------------------------------------------------------------------
-
-describe('cyboflow.runs.listMessages', () => {
-  // -------------------------------------------------------------------------
-  // (a) Empty raw_events returns []
-  // -------------------------------------------------------------------------
-  it('(a) empty raw_events returns []', async () => {
-    // Use createTestDb with includeStuckDetectedAt because the raw_events table
-    // is part of the GATE_SCHEMA already — no extra migration needed.
-    const db = createTestDb({ includeStuckDetectedAt: true });
-    const adapter = dbAdapter(db);
-    const caller = appRouter.createCaller(createContext({ db: adapter }));
-
-    const result = await caller.cyboflow.runs.listMessages({ runId: 'run-no-messages' });
-    expect(result).toEqual([]);
-  });
-
-  // -------------------------------------------------------------------------
-  // (b) Missing ctx.db → PRECONDITION_FAILED
-  // -------------------------------------------------------------------------
-  it('(b) missing ctx.db → TRPCError PRECONDITION_FAILED', async () => {
-    const caller = appRouter.createCaller(createContext());
-
-    await expect(
-      caller.cyboflow.runs.listMessages({ runId: 'any-run-id' }),
-    ).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // runs.getPhaseState integration tests (TASK-766)
 //
 // Tests use createTestDb (GATE_SCHEMA + migration 007) plus migration 011
@@ -4104,89 +4060,6 @@ describe('end-to-end stepId contract parity (INITIAL_STEP_IDS resolves into WORK
 
   afterEach(() => {
     stepTransitionEvents.removeAllListeners('transition');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// runs.listFiles / runs.readFile — File Explorer wrapper-layer integration
-//
-// Handler-level behavior (path safety, binary detection, sorting, symlink
-// containment) is covered by
-// main/src/orchestrator/__tests__/runFileExplorer.test.ts. These tests target
-// the tRPC layer: the ctx.db guard and the RunFileError -> TRPCError code map
-// (NOT_FOUND / PRECONDITION_FAILED / BAD_REQUEST) wired in runs.ts.
-// ---------------------------------------------------------------------------
-
-describe('cyboflow.runs.listFiles / readFile', () => {
-  let db: Database.Database;
-  let worktree: string;
-  const RUN = 'run-files-1';
-
-  beforeEach(() => {
-    db = createTestDb();
-    worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-files-'));
-    seedRun(db, { id: RUN, projectId: 1, worktreePath: worktree });
-  });
-
-  afterEach(() => {
-    fs.rmSync(worktree, { recursive: true, force: true });
-  });
-
-  function caller() {
-    return appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-  }
-
-  it('listFiles returns the worktree entries', async () => {
-    fs.writeFileSync(path.join(worktree, 'a.txt'), 'hi');
-    fs.mkdirSync(path.join(worktree, 'dir'));
-    const entries = await caller().cyboflow.runs.listFiles({ runId: RUN });
-    expect(entries.map((e) => e.name).sort()).toEqual(['a.txt', 'dir']);
-  });
-
-  it('readFile returns file content', async () => {
-    fs.writeFileSync(path.join(worktree, 'note.md'), 'body');
-    const result = await caller().cyboflow.runs.readFile({ runId: RUN, path: 'note.md' });
-    expect(result).toMatchObject({ path: 'note.md', content: 'body', unviewableReason: null });
-  });
-
-  it('listFiles: missing ctx.db → PRECONDITION_FAILED', async () => {
-    const c = appRouter.createCaller(createContext());
-    await expect(c.cyboflow.runs.listFiles({ runId: RUN })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
-    );
-  });
-
-  it('listFiles: unknown runId → NOT_FOUND (run-not-found mapping)', async () => {
-    await expect(caller().cyboflow.runs.listFiles({ runId: 'nope' })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
-    );
-  });
-
-  it('listFiles: run with no worktree → PRECONDITION_FAILED (no-worktree mapping)', async () => {
-    seedRun(db, { id: 'run-nowt', projectId: 1 });
-    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run('run-nowt');
-    await expect(caller().cyboflow.runs.listFiles({ runId: 'run-nowt' })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
-    );
-  });
-
-  it('listFiles: traversal path → BAD_REQUEST (invalid-path mapping)', async () => {
-    await expect(caller().cyboflow.runs.listFiles({ runId: RUN, path: '../..' })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
-    );
-  });
-
-  it('readFile: directory target → BAD_REQUEST (not-a-file mapping)', async () => {
-    fs.mkdirSync(path.join(worktree, 'sub'));
-    await expect(caller().cyboflow.runs.readFile({ runId: RUN, path: 'sub' })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
-    );
-  });
-
-  it('readFile: missing file → NOT_FOUND (not-found mapping)', async () => {
-    await expect(caller().cyboflow.runs.readFile({ runId: RUN, path: 'gone.txt' })).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
-    );
   });
 });
 

@@ -44,51 +44,6 @@ import type { SessionSummaryPayload } from '../../../../../shared/types/sessionS
 export type SessionOpsError = { success: false; error: string };
 
 /**
- * Structural mirror of the `projects` row (source of truth:
- * main/src/database/models.ts `Project`) — what `getAllWithProjects` spreads
- * into each entry before attaching its sessions and folders.
- */
-export interface SessionProjectRow {
-  id: number;
-  name: string;
-  path: string;
-  system_prompt?: string | null;
-  run_script?: string | null;
-  build_script?: string | null;
-  active: boolean;
-  created_at: string;
-  updated_at: string;
-  default_permission_mode?: 'approve' | 'ignore';
-  open_ide_command?: string | null;
-  main_branch?: string | null;
-  display_order?: number;
-  worktree_folder?: string | null;
-  lastUsedModel?: string;
-  permission_trust?: 'trusted' | 'untrusted' | null;
-}
-
-/**
- * A folder as the renderer sees it — the camelCase projection
- * `convertDbFolderToFolder` (main/src/ipc/folders.ts, source of truth) makes of
- * the snake_case `folders` row.
- */
-export interface SessionFolderRow {
-  id: string;
-  name: string;
-  projectId: number;
-  parentFolderId?: string | null;
-  displayOrder: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** One entry of `getAllWithProjects`: a project plus its sessions and folders. */
-export type ProjectWithSessions = SessionProjectRow & {
-  sessions: Session[];
-  folders: SessionFolderRow[];
-};
-
-/**
  * What `rename` echoes back: the updated row DatabaseService.updateSession
  * returns — the snake_case `sessions` DB row (source of truth:
  * main/src/database/models.ts `Session`), NOT the camelCase renderer
@@ -131,11 +86,9 @@ export interface ArchiveProgressPayload {
 
 /**
  * The `getStatistics` payload, mirroring the handler's object literal EXACTLY —
- * this is a wire shape the session meter and the Stats panel both read, so no
- * field may be added, dropped or renamed here without changing them too. The
- * renderer's twin is `SessionStatistics` in
- * frontend/src/components/panels/claude/SessionStats.tsx (and the narrower
- * runtime shape guard in frontend/src/hooks/useSessionMetrics.ts).
+ * this is a wire shape the session meter reads, so no field may be added,
+ * dropped or renamed here without changing it too. The renderer reads it through
+ * the narrower runtime shape guard in frontend/src/hooks/useSessionMetrics.ts.
  *
  * Two notes carried over from the handler: `session.model` comes from the
  * session's Claude PANEL settings (model is panel-level, not a session column),
@@ -198,12 +151,6 @@ export interface SessionOpsLike {
 
   /** Mirrors legacy `sessions:get`. A missing session is `'Session not found'`, not a throw. */
   get(request: { sessionId: string }): Promise<{ success: true; data: Session } | SessionOpsError>;
-
-  /**
-   * Mirrors legacy `sessions:get-all-with-projects`. Every project with its
-   * sessions and its (camelCased) folders attached.
-   */
-  getAllWithProjects(): Promise<{ success: true; data: ProjectWithSessions[] } | SessionOpsError>;
 
   /**
    * Mirrors legacy `sessions:get-summary`. `catchUp` DEFAULTS TO TRUE in the ops
@@ -311,11 +258,4 @@ export interface SessionOpsLike {
   reorder(request: {
     sessionOrders: Array<{ id: string; displayOrder: number }>;
   }): Promise<{ success: true } | SessionOpsError>;
-
-  /**
-   * Mirrors legacy `sessions:set-active-session`. Tells GitStatusManager which
-   * session the user is looking at, so its polling can favour it. `null` clears
-   * the selection.
-   */
-  setActiveSession(request: { sessionId: string | null }): Promise<{ success: true } | SessionOpsError>;
 }

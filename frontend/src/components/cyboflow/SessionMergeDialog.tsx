@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { GitMerge, GitBranch, CheckCircle2 } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
-import { Textarea } from '../ui/Textarea';
+import { Textarea } from '../ui/Input';
 import { API } from '../../utils/api';
 import { useErrorStore } from '../../stores/errorStore';
 import { cn } from '../../utils/cn';
@@ -257,6 +257,8 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
               value={commitMessage}
               onChange={(e) => setCommitMessage(e.target.value)}
               rows={3}
+              fullWidth
+              className="resize-y"
             />
           </div>
         )}

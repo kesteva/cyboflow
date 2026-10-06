@@ -455,11 +455,11 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
   // Same full-suite flake profile as the advanced-tip test below (see its
   // comment): forks ~15 git subprocesses; 5s default flakes under full-suite
   // CPU/fork contention while passing in isolation.
-  it('squashes a clean multi-commit branch into ONE footer-stamped commit and fast-forwards main', { timeout: 30_000 }, async () => {
+  it('squashes a clean multi-commit branch into ONE commit and fast-forwards main', { timeout: 30_000 }, async () => {
     await withTempDir('worktree-squash-ok-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);
-      const manager = new WorktreeManager(); // no configManager → footer enabled by default
+      const manager = new WorktreeManager();
       const { worktreePath } = await manager.createWorktree(tmpDir, 'feat');
       ensureUser(worktreePath);
       commitFile(worktreePath, 'f1.txt', 'one', 'w1');
@@ -472,10 +472,9 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
       const count = execSync(`git rev-list --count ${mainBefore}..${main}`, { cwd: tmpDir }).toString().trim();
       expect(count).toBe('1');
 
-      // The squashed commit carries the caller message AND the Cyboflow footer.
+      // The squashed commit message is the caller's message verbatim — no footer or trailer appended.
       const body = execSync(`git log -1 --format=%B ${main}`, { cwd: tmpDir }).toString();
-      expect(body).toContain('my squash message');
-      expect(body).toMatch(/Built using \[Cyboflow\]/);
+      expect(body.trim()).toBe('my squash message');
 
       // Both files' content is present on main (nothing dropped by the squash).
       expect(execSync(`git show ${main}:f1.txt`, { cwd: tmpDir }).toString().trim()).toBe('one');
@@ -713,7 +712,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
     await withTempDir('worktree-rm-inval-', async (tmpDir) => {
       initRepo(tmpDir);
       const invalidate = vi.fn();
-      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const manager = new WorktreeManager(undefined, { invalidate });
       const { worktreePath } = await manager.createWorktree(tmpDir, 'inv1');
       invalidate.mockClear();
 
@@ -732,7 +731,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
     await withTempDir('worktree-rmpath-inval-', async (tmpDir) => {
       initRepo(tmpDir);
       const invalidate = vi.fn();
-      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const manager = new WorktreeManager(undefined, { invalidate });
       const { worktreePath } = await manager.createWorktree(tmpDir, 'inv2');
       invalidate.mockClear();
 
@@ -750,7 +749,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
     await withTempDir('worktree-create-inval-', async (tmpDir) => {
       initRepo(tmpDir);
       const invalidate = vi.fn();
-      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const manager = new WorktreeManager(undefined, { invalidate });
 
       const { worktreePath } = await manager.createWorktree(tmpDir, 'inv-create');
       expect(invalidate).toHaveBeenCalledTimes(1);
@@ -766,7 +765,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
     await withTempDir('worktree-create-inval-fail-', async (tmpDir) => {
       initRepo(tmpDir);
       const invalidate = vi.fn();
-      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const manager = new WorktreeManager(undefined, { invalidate });
       await expect(manager.createWorktree(tmpDir, 'bad-base', undefined, 'no-such-branch')).rejects.toThrow(/Failed to create worktree/);
       expect(invalidate).not.toHaveBeenCalled();
     });
@@ -776,7 +775,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
     await withTempDir('worktree-create-parent-du-', async (tmpDir) => {
       initRepo(tmpDir);
       const svc = new DiskUsageService({ runDu: async () => 1024, sleep: async () => {}, staggerMs: 0 });
-      const manager = new WorktreeManager(undefined, undefined, svc);
+      const manager = new WorktreeManager(undefined, svc);
       // Prime the parent's cache: measured before the child exists.
       svc.getUsage(tmpDir);
       await vi.waitFor(() => expect(svc.getUsage(tmpDir).status).toBe('measured'));
@@ -797,10 +796,10 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
       initRepo(tmpDir);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        const throwing = new WorktreeManager(undefined, undefined, {
+        const throwing = new WorktreeManager(undefined, {
           invalidate: () => { throw new Error('boom'); },
         });
-        const rejecting = new WorktreeManager(undefined, undefined, {
+        const rejecting = new WorktreeManager(undefined, {
           invalidate: () => Promise.reject(new Error('nope')),
         });
         const a = await throwing.createWorktree(tmpDir, 'inv3');
@@ -822,7 +821,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
   it('does not invalidate when removal fails with an unrelated git error', async () => {
     await withTempDir('worktree-rm-inval-fail-', async (tmpDir) => {
       const invalidate = vi.fn();
-      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const manager = new WorktreeManager(undefined, { invalidate });
       await expect(manager.removeWorktree(tmpDir, 'whatever')).rejects.toThrow(/Failed to remove worktree/);
       expect(invalidate).not.toHaveBeenCalled();
     });
@@ -830,95 +829,10 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// checkForRebaseConflicts / rebaseMainIntoWorktree / abortRebase — the
-// pre-merge conflict gate and the mid-rebase recovery path.
+// createWorktree — placement, base-branch selection, and name collision.
 // ---------------------------------------------------------------------------
 
-describe('WorktreeManager rebase-conflict gate (integration)', () => {
-  it('checkForRebaseConflicts reports the conflicting file for same-file divergent edits', async () => {
-    await withTempDir('worktree-cfc-conflict-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'cfc');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'shared.txt', 'branch line', 'w1');
-      commitFile(tmpDir, 'shared.txt', 'main line', 'm1'); // main advances on the same file
-
-      const res = await manager.checkForRebaseConflicts(worktreePath, main);
-      expect(res.hasConflicts).toBe(true);
-      expect(res.conflictingFiles).toContain('shared.txt');
-      expect(res.canAutoMerge).toBe(false);
-    });
-  });
-
-  it('checkForRebaseConflicts reports NO conflicts for divergent edits to different files', async () => {
-    await withTempDir('worktree-cfc-clean-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'cfnc');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'branch.txt', 'b', 'w1');
-      commitFile(tmpDir, 'mainonly.txt', 'm', 'm1'); // main advances on a DIFFERENT file
-
-      const res = await manager.checkForRebaseConflicts(worktreePath, main);
-      expect(res.hasConflicts).toBe(false);
-      expect(res.canAutoMerge).toBe(true);
-    });
-  });
-
-  it('rebaseMainIntoWorktree replays main\'s commits into the worktree on a clean divergence', async () => {
-    await withTempDir('worktree-rebase-ok-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'rbok');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'branch.txt', 'b', 'w1');
-      commitFile(tmpDir, 'mainonly.txt', 'mmm', 'm1');
-
-      await manager.rebaseMainIntoWorktree(worktreePath, main);
-
-      // The worktree now contains main's file AND its own, and both commits appear.
-      expect(existsSync(join(worktreePath, 'mainonly.txt'))).toBe(true);
-      expect(existsSync(join(worktreePath, 'branch.txt'))).toBe(true);
-      const log = execSync('git log --format=%s', { cwd: worktreePath }).toString();
-      expect(log).toContain('m1');
-      expect(log).toContain('w1');
-    });
-  });
-
-  it('leaves the worktree mid-rebase on conflict; abortRebase restores the pre-rebase HEAD cleanly', async () => {
-    await withTempDir('worktree-rebase-abort-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'rbconf');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'shared.txt', 'branch', 'w1');
-      commitFile(tmpDir, 'shared.txt', 'main', 'm1');
-      const preHead = shaOf(worktreePath, 'HEAD');
-
-      // rebaseMainIntoWorktree does NOT self-abort — it leaves the rebase in progress.
-      await expect(manager.rebaseMainIntoWorktree(worktreePath, main)).rejects.toThrow(/Failed to rebase/);
-      expect(() => execSync('git rev-parse --verify REBASE_HEAD', { cwd: worktreePath, stdio: 'pipe' })).not.toThrow();
-
-      await manager.abortRebase(worktreePath);
-
-      expect(shaOf(worktreePath, 'HEAD')).toBe(preHead);
-      expect(execSync('git status --porcelain', { cwd: worktreePath }).toString().trim()).toBe('');
-      expect(() => execSync('git rev-parse --verify REBASE_HEAD', { cwd: worktreePath, stdio: 'pipe' })).toThrow();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// createWorktree / initializeProject — placement, base-branch selection,
-// name collision, and idempotent bootstrap.
-// ---------------------------------------------------------------------------
-
-describe('WorktreeManager.createWorktree / initializeProject (integration)', () => {
+describe('WorktreeManager.createWorktree (integration)', () => {
   it('creates a worktree at baseDir/<name> off the default HEAD', async () => {
     await withTempDir('worktree-create-default-', async (tmpDir) => {
       initRepo(tmpDir);
@@ -959,24 +873,10 @@ describe('WorktreeManager.createWorktree / initializeProject (integration)', () 
       expect(existsSync(res2.worktreePath)).toBe(true);
     });
   });
-
-  it('initializeProject creates the worktrees base dir idempotently (default + custom folder)', async () => {
-    await withTempDir('worktree-init-project-', async (tmpDir) => {
-      const manager = new WorktreeManager();
-      await manager.initializeProject(tmpDir);
-      expect(existsSync(join(tmpDir, 'worktrees'))).toBe(true);
-      // Second call is a no-op (mkdir recursive) — must not throw.
-      await expect(manager.initializeProject(tmpDir)).resolves.toBeUndefined();
-
-      // A nested custom folder is bootstrapped too.
-      await manager.initializeProject(tmpDir, join('.cyboflow', 'worktrees'));
-      expect(existsSync(join(tmpDir, '.cyboflow', 'worktrees'))).toBe(true);
-    });
-  });
 });
 
 // ---------------------------------------------------------------------------
-// gitPull / gitPush / getLastCommits — remote sync surfacing + commit shape.
+// gitPush / getLastCommits — remote sync surfacing + commit shape.
 // Each test stands up its own bare remote + one or two clones.
 // ---------------------------------------------------------------------------
 
@@ -1005,34 +905,6 @@ function initRemoteAndClone(tmp: string): { remote: string; a: string; b: string
 }
 
 describe('WorktreeManager remote sync (integration)', () => {
-  it('gitPull fast-forwards local to a commit pushed by another clone', async () => {
-    await withTempDir('worktree-pull-ff-', async (tmpDir) => {
-      const { a, b } = initRemoteAndClone(tmpDir);
-      commitFile(b, 'fromb.txt', 'B', 'fromb');
-      execSync('git push', { cwd: b, stdio: 'pipe' });
-
-      const manager = new WorktreeManager();
-      const res = await manager.gitPull(a);
-
-      expect(res.output).toBeTruthy();
-      expect(existsSync(join(a, 'fromb.txt'))).toBe(true); // FF pulled the remote commit
-    });
-  });
-
-  it('gitPull surfaces a diverged/conflicting pull as a rejection', async () => {
-    await withTempDir('worktree-pull-diverge-', async (tmpDir) => {
-      const { a, b } = initRemoteAndClone(tmpDir);
-      // Remote advances shared.txt one way…
-      commitFile(b, 'shared.txt', 'B', 'fromb');
-      execSync('git push', { cwd: b, stdio: 'pipe' });
-      // …local commits shared.txt a different way (unpushed) → divergence.
-      commitFile(a, 'shared.txt', 'A', 'froma');
-
-      const manager = new WorktreeManager();
-      await expect(manager.gitPull(a)).rejects.toThrow();
-    });
-  });
-
   it('gitPush advances the remote branch to the local HEAD on success', async () => {
     await withTempDir('worktree-push-ok-', async (tmpDir) => {
       const { a, remote } = initRemoteAndClone(tmpDir);
@@ -1101,7 +973,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       execSync(`git worktree add -b quick-X "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
 
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await manager.removeWorktree(tmpDir, 'quick-X');
 
@@ -1115,7 +987,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       initRepo(tmpDir);
       const bogus = join(tmpDir, 'worktrees', 'never-existed');
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await expect(manager.removeWorktreeByPath(tmpDir, bogus)).resolves.toBeUndefined();
 
@@ -1130,7 +1002,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       execSync(`git worktree add -b quick-Y "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
 
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockRejectedValue(new Error('boom'));
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await expect(manager.removeWorktree(tmpDir, 'quick-Y')).resolves.toBeUndefined();
       expect(existsSync(wtPath)).toBe(false);

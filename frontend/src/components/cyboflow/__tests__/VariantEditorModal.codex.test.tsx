@@ -106,7 +106,6 @@ beforeEach(() => {
   // out of the picker until the user opts in. Switch it on for this suite.
   useConfigStore.setState({
     config: {
-      gitRepoPath: '/repo',
       agentProviderAccess: { claude: true, codex: true, omp: true },
     } as AppConfig,
   });
@@ -178,7 +177,6 @@ describe('VariantEditorModal — per-variant OMP runtime', () => {
   it('hides the OMP pin while the provider is switched off', () => {
     useConfigStore.setState({
       config: {
-        gitRepoPath: '/repo',
         agentProviderAccess: { claude: true, codex: true, omp: false },
       } as AppConfig,
     });

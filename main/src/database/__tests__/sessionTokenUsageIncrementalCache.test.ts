@@ -75,31 +75,11 @@ describe('getSessionTokenUsage incremental cache', () => {
     expect(second).toEqual(first);
   });
 
-  it('invalidates the cache when session_outputs is cleared, so a fresh read starts from zero', () => {
-    db.addSessionOutput(sessionId, 'json', resultOutput({ input_tokens: 10, output_tokens: 5 }));
-    db.getSessionTokenUsage(sessionId);
-
-    db.clearSessionOutputs(sessionId);
-    expect(db.getSessionTokenUsage(sessionId)).toMatchObject({
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      messageCount: 0,
-    });
-
-    db.addSessionOutput(sessionId, 'json', resultOutput({ input_tokens: 1, output_tokens: 1 }));
-    expect(db.getSessionTokenUsage(sessionId)).toMatchObject({
-      totalInputTokens: 1,
-      totalOutputTokens: 1,
-      messageCount: 1,
-    });
-  });
-
   it('invalidates the cache when the session is archived', () => {
     db.addSessionOutput(sessionId, 'json', resultOutput({ input_tokens: 10, output_tokens: 5 }));
     db.getSessionTokenUsage(sessionId);
 
     db.archiveSession(sessionId);
-    db.restoreSession(sessionId);
 
     // No rows changed, so re-deriving from scratch must land on the same total.
     expect(db.getSessionTokenUsage(sessionId)).toMatchObject({

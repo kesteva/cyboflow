@@ -9,12 +9,11 @@
  * push a SEMANTIC ACTION back to the renderer.
  *
  * `shared/types/keyboardShortcuts.ts` alone is not enough for that.
- * {@link ShortcutAction} holds exactly eight remappable actions, but five real
+ * {@link ShortcutAction} holds exactly eight remappable actions, but four real
  * app-level chords are hand-rolled in their own hooks and are absent from it —
  * Cmd-Shift-S (add quick session), Cmd-Shift-C (add Claude panel),
- * Cmd-Shift-` (add terminal), Cmd-E (edit workflow) and Cmd-Shift-T (the
- * dev-only token-test dialog). Resolving only the eight would leave those five
- * silently dead whenever the viewer had focus. So this module is the union, and
+ * Cmd-Shift-` (add terminal) and Cmd-E (edit workflow). Resolving only the
+ * eight would leave those four silently dead whenever the viewer had focus. So this module is the union, and
  * it is what both sides read.
  *
  * Electron-free and DOM-free, like its sibling: the match event is a structural
@@ -39,8 +38,7 @@ export type FixedChordAction =
   | 'addQuickSession'
   | 'addClaudePanel'
   | 'addTerminal'
-  | 'editWorkflow'
-  | 'tokenTest';
+  | 'editWorkflow';
 
 /** Every {@link FixedChordAction}, for callers that iterate the full set. */
 export const FIXED_CHORD_ACTIONS: readonly FixedChordAction[] = [
@@ -48,7 +46,6 @@ export const FIXED_CHORD_ACTIONS: readonly FixedChordAction[] = [
   'addClaudePanel',
   'addTerminal',
   'editWorkflow',
-  'tokenTest',
 ] as const;
 
 /**
@@ -74,12 +71,12 @@ export interface ReservedChord {
    * Treat 'mod' as satisfied by EITHER Cmd or Ctrl, rather than by the
    * platform's own key.
    *
-   * Set for the five fixed chords, and set to preserve their existing contract,
+   * Set for the four fixed chords, and set to preserve their existing contract,
    * not to be permissive on purpose: each was hand-rolled as
    * `event.metaKey || event.ctrlKey` with no platform sniff, so Ctrl-Shift-C has
    * always worked on a Mac and Cmd-Shift-C on Linux. The remappable eight go
    * through {@link eventMatchesBinding}'s strict rule, which REJECTS the other
-   * modifier — tightening the five to match would silently break whoever relies
+   * modifier — tightening the four to match would silently break whoever relies
    * on the current behaviour, which is not this change's business.
    */
   eitherMod?: boolean;
@@ -106,7 +103,6 @@ export const FIXED_CHORD_BINDINGS: Readonly<Record<FixedChordAction, ReservedCho
     eitherMod: true,
   },
   editWorkflow: { action: 'editWorkflow', binding: 'mod+e', code: 'KeyE', eitherMod: true },
-  tokenTest: { action: 'tokenTest', binding: 'mod+shift+t', code: 'KeyT', eitherMod: true },
 };
 
 /**
@@ -120,18 +116,13 @@ export interface ReservedChordMatchEvent extends ShortcutMatchEvent {
 
 /**
  * THE resolved reserved-chord table: the eight remappable actions at their
- * effective bindings, plus the five fixed ones. Order is remappable-first, so a
+ * effective bindings, plus the four fixed ones. Order is remappable-first, so a
  * user who remaps an action onto a fixed chord gets their remap — the same
  * precedence the renderer has today, where the registry-driven engine runs
  * before the hand-rolled hooks' own listeners.
- *
- * `devMode` gates `tokenTest`, which is development-only (App.tsx checks
- * `process.env.NODE_ENV`). Leaving it out of the table in production means a
- * packaged build does not silently swallow Cmd-Shift-T from a page.
  */
 export function resolveReservedChords(
   overrides: KeyboardShortcutOverrides | undefined,
-  opts?: { devMode?: boolean },
 ): readonly ReservedChord[] {
   const resolved = resolveAllShortcuts(overrides);
   const chords: ReservedChord[] = SHORTCUT_ACTIONS.map((action) => ({
@@ -139,7 +130,6 @@ export function resolveReservedChords(
     binding: resolved[action],
   }));
   for (const action of FIXED_CHORD_ACTIONS) {
-    if (action === 'tokenTest' && opts?.devMode !== true) continue;
     chords.push(FIXED_CHORD_BINDINGS[action]);
   }
   return chords;

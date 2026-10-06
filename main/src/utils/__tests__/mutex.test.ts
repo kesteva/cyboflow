@@ -80,38 +80,6 @@ describe('Mutex', () => {
     expect(m.isLocked('res')).toBe(false);
   });
 
-  it('releaseAll() unblocks a pending waiter', async () => {
-    const m = new Mutex();
-    await m.acquire('r'); // held, never released via its fn
-
-    let acquired = false;
-    const waiter = m.acquire('r').then((rel) => {
-      acquired = true;
-      return rel;
-    });
-
-    await sleep(30);
-    expect(acquired).toBe(false);
-
-    m.releaseAll();
-
-    const rel = await waiter;
-    expect(acquired).toBe(true);
-    rel();
-  });
-
-  it('releaseAll() with no waiters clears all tracked locks', async () => {
-    const m = new Mutex();
-    await m.acquire('a');
-    await m.acquire('b');
-    expect(m.getActiveLockCount()).toBe(2);
-    expect(m.getLockedResources().sort()).toEqual(['a', 'b']);
-
-    m.releaseAll();
-    expect(m.getActiveLockCount()).toBe(0);
-    expect(m.getLockedResources()).toEqual([]);
-  });
-
   it('different resource names never block each other', async () => {
     const m = new Mutex();
     const relA = await m.acquire('a');

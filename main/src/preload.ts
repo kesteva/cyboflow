@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
-import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { ProviderModelCatalogs } from '../../shared/types/agentModels';
@@ -59,25 +59,6 @@ interface DialogOptions {
   properties?: Electron.OpenDialogOptions['properties'];
 }
 
-interface DashboardUpdateData {
-  type: 'status' | 'session' | 'project';
-  projectId?: number;
-  sessionId?: string;
-  data: unknown;
-}
-
-interface GitStatusUpdateData {
-  sessionId: string;
-  gitStatus: {
-    state: string;
-    ahead?: number;
-    behind?: number;
-    additions?: number;
-    deletions?: number;
-    filesChanged?: number;
-  };
-}
-
 interface SessionOutputData {
   sessionId: string;
   type: 'stdout' | 'stderr' | 'json' | 'error';
@@ -90,16 +71,6 @@ interface SessionOutputAvailableData {
   sessionId: string;
   panelId?: string;
   hasNewOutput?: boolean;
-}
-
-interface Folder {
-  id: string;
-  name: string;
-  project_id: number;
-  parent_folder_id?: string | null;
-  display_order: number;
-  created_at: string;
-  updated_at: string;
 }
 
 // Increase max listeners for ipcRenderer to prevent warnings when many components listen to events
@@ -131,23 +102,6 @@ try {
       window.dispatchEvent(new CustomEvent('project-script-closing', { detail: data }));
     } catch (e) {
       console.error('Failed to dispatch project-script-closing to window:', e);
-    }
-  });
-
-  // Bridge session script events (for consistency)
-  ipcRenderer.on('script-session-changed', (_event, data) => {
-    try {
-      window.dispatchEvent(new CustomEvent('script-session-changed', { detail: data }));
-    } catch (e) {
-      console.error('Failed to dispatch script-session-changed to window:', e);
-    }
-  });
-
-  ipcRenderer.on('script-closing', (_event, data) => {
-    try {
-      window.dispatchEvent(new CustomEvent('script-closing', { detail: data }));
-    } catch (e) {
-      console.error('Failed to dispatch script-closing to window:', e);
     }
   });
 } catch (e) {
@@ -226,7 +180,6 @@ interface IPCResponse<T = unknown> {
 // ===========================================================================
 export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   // App / system
-  'openExternal',
   'app:consume-open-update-settings',
 
   // Onboarding detection (renderer passes this as an imported constant —
@@ -244,7 +197,6 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   'panels:update',
   'panels:initialize',
   'panels:checkInitialized',
-  'panels:emitEvent',
   'panels:clearUnviewedContent',
 
   // Terminal panel PTY bridge
@@ -290,10 +242,10 @@ contextBridge.exposeInMainWorld('__cyboflowPerf', {
 // Verification identity (the cdp-token attestation channel of
 // .cyboflow/verify-runbook.json). Present ONLY when the launcher injected the
 // token, so a developer's own `pnpm dev` instance evaluates to null and can
-// never satisfy a verification's attestation — which the previous channel,
-// `electronAPI.getAppVersion()`, could not distinguish. Same pattern and same
-// justification as the __cyboflowPerf bridge above: preload runs in the Node
-// context, so process.env is available, and the value is a plain string.
+// never satisfy a verification's attestation — which the previous channel, a
+// version-number read (since removed), could not distinguish. Same pattern and
+// same justification as the __cyboflowPerf bridge above: preload runs in the
+// Node context, so process.env is available, and the value is a plain string.
 contextBridge.exposeInMainWorld('__CYBOFLOW_VERIFY__', {
   token: process.env.CYBOFLOW_VERIFY_TOKEN ?? null,
 });
@@ -302,10 +254,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Generic invoke method for direct IPC calls. Gated by the
   // GENERIC_INVOKE_CHANNELS allowlist above (security boundary).
   invoke: (channel: string, ...args: unknown[]) => invokeAllowlistedChannel(channel, args),
-
-  // Basic app info
-  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
-  isPackaged: () => ipcRenderer.invoke('is-packaged'),
 
   // Version info
   getVersionInfo: (): Promise<IPCResponse> => ipcRenderer.invoke('version:get-info'),
@@ -346,29 +294,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('sessions:open-idea-session', request),
     delete: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:delete', sessionId),
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
-    continue: (sessionId: string, prompt?: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:continue', sessionId, prompt, model),
     getInteractiveResumeState: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-interactive-resume-state', sessionId, panelId),
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resume-interactive', sessionId, panelId, acknowledgeProviderDisabled),
     restartInteractive: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:restart-interactive', sessionId, panelId),
-    getOutput: (sessionId: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-output', sessionId, limit),
-    getConversation: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation', sessionId),
-    getConversationMessages: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation-messages', sessionId),
-    generateCompactedContext: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:generate-compacted-context', sessionId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-or-create-main-repo', projectId),
     
-    // Script operations
-    hasRunScript: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:has-run-script', sessionId),
-    getRunningSession: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-running-session'),
-    runScript: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:run-script', sessionId),
-    stopScript: (sessionId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop-script', sessionId),
-    runTerminalCommand: (sessionId: string, command: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:run-terminal-command', sessionId, command),
-    sendTerminalInput: (sessionId: string, data: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:send-terminal-input', sessionId, data),
-    preCreateTerminal: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:pre-create-terminal', sessionId),
-    resizeTerminal: (sessionId: string, cols: number, rows: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resize-terminal', sessionId, cols, rows),
-
     // IDE operations
     openIDE: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:open-ide', sessionId),
     
@@ -381,7 +314,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Log operations
     getLogs: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-logs', sessionId),
     clearLogs: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:clear-logs', sessionId),
-    addLog: (sessionId: string, entry: LogEntry): Promise<IPCResponse> => ipcRenderer.invoke('sessions:add-log', sessionId, entry),
   },
 
   // Idea image attachments (migration 028) — raw file IO, returns plain values
@@ -456,34 +388,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Project management
   projects: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-all'),
-    getActive: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-active'),
     create: (projectData: CreateProjectRequest): Promise<IPCResponse> => ipcRenderer.invoke('projects:create', projectData),
-    activate: (projectId: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:activate', projectId),
     update: (projectId: string, updates: UpdateProjectRequest): Promise<IPCResponse> => ipcRenderer.invoke('projects:update', projectId, updates),
     delete: (projectId: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:delete', projectId),
     detectBranch: (path: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:detect-branch', path),
     reorder: (projectOrders: Array<{ id: number; displayOrder: number }>): Promise<IPCResponse> => ipcRenderer.invoke('projects:reorder', projectOrders),
     listBranches: (projectId: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:list-branches', projectId),
-    refreshGitStatus: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('projects:refresh-git-status', projectId),
     runScript: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('projects:run-script', projectId),
     getRunningScript: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-running-script'),
     stopScript: (projectId?: number): Promise<IPCResponse> => ipcRenderer.invoke('projects:stop-script', projectId),
-  },
-
-  // Git operations
-  git: {
-    detectBranch: (path: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('projects:detect-branch', path),
-  },
-
-  // Folders
-  folders: {
-    getByProject: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('folders:get-by-project', projectId),
-    create: (name: string, projectId: number, parentFolderId?: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:create', name, projectId, parentFolderId),
-    update: (folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }): Promise<IPCResponse> => ipcRenderer.invoke('folders:update', folderId, updates),
-    delete: (folderId: string): Promise<IPCResponse> => ipcRenderer.invoke('folders:delete', folderId),
-    reorder: (projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>): Promise<IPCResponse> => ipcRenderer.invoke('folders:reorder', projectId, folderOrders),
-    moveSession: (sessionId: string, folderId: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:move-session', sessionId, folderId),
-    move: (folderId: string, parentFolderId: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:move', folderId, parentFolderId),
   },
 
   // Configuration
@@ -525,22 +438,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openDirectory: (options?: DialogOptions): Promise<IPCResponse<string | null>> => ipcRenderer.invoke('dialog:open-directory', options),
   },
 
-  // Dashboard
-  dashboard: {
-    getProjectStatus: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('dashboard:get-project-status', projectId),
-    getProjectStatusProgressive: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('dashboard:get-project-status-progressive', projectId),
-    onUpdate: (callback: (data: DashboardUpdateData) => void) => {
-      const subscription = (_event: Electron.IpcRendererEvent, data: DashboardUpdateData) => callback(data);
-      ipcRenderer.on('dashboard:update', subscription);
-      return () => ipcRenderer.removeListener('dashboard:update', subscription);
-    },
-    onSessionUpdate: (callback: (data: DashboardUpdateData) => void) => {
-      const subscription = (_event: Electron.IpcRendererEvent, data: DashboardUpdateData) => callback(data);
-      ipcRenderer.on('dashboard:session-update', subscription);
-      return () => ipcRenderer.removeListener('dashboard:session-update', subscription);
-    },
-  },
-
   // First-run onboarding + Settings — per-provider login/runtime probe
   // ("Check again"). Provider-keyed: one channel, the provider as its argument.
   providers: {
@@ -569,9 +466,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // UI State management
   uiState: {
     getExpanded: (): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:get-expanded'),
-    saveExpanded: (projectIds: number[], folderIds: string[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded', projectIds, folderIds),
-    saveExpandedProjects: (projectIds: number[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded-projects', projectIds),
-    saveExpandedFolders: (folderIds: string[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded-folders', folderIds),
+    saveExpanded: (projectIds: number[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded', projectIds),
   },
 
   // Event listeners for real-time updates
@@ -596,16 +491,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, sessions: Session[]) => callback(sessions);
       ipcRenderer.on('sessions:loaded', wrappedCallback);
       return () => ipcRenderer.removeListener('sessions:loaded', wrappedCallback);
-    },
-    onGitStatusUpdated: (callback: (data: GitStatusUpdateData) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: GitStatusUpdateData) => callback(data);
-      ipcRenderer.on('git-status-updated', wrappedCallback);
-      return () => ipcRenderer.removeListener('git-status-updated', wrappedCallback);
-    },
-    onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { sessionId: string }) => callback(data);
-      ipcRenderer.on('git-status-loading', wrappedCallback);
-      return () => ipcRenderer.removeListener('git-status-loading', wrappedCallback);
     },
     onSessionOutput: (callback: (output: SessionOutputData) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, output: SessionOutputData) => callback(output);
@@ -647,23 +532,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('panel:updated', wrappedCallback);
     },
     
-    // Folder events
-    onFolderCreated: (callback: (folder: Folder) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folder: Folder) => callback(folder);
-      ipcRenderer.on('folder:created', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:created', wrappedCallback);
-    },
-    onFolderUpdated: (callback: (folder: Folder) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folder: Folder) => callback(folder);
-      ipcRenderer.on('folder:updated', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:updated', wrappedCallback);
-    },
-    onFolderDeleted: (callback: (folderId: string) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folderId: string) => callback(folderId);
-      ipcRenderer.on('folder:deleted', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:deleted', wrappedCallback);
-    },
-    
     // Panel events
     onPanelPromptAdded: (callback: (data: { panelId: string; content: string }) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { panelId: string; content: string }) => callback(data);
@@ -683,23 +551,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('terminal:output', wrappedCallback);
     },
 
-    // Generic event cleanup
-    removeAllListeners: (channel: string) => {
-      ipcRenderer.removeAllListeners(channel);
-    },
-    
     // Main process logging
     onMainLog: (callback: (level: string, message: string) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, level: string, message: string) => callback(level, message);
       ipcRenderer.on('main-log', wrappedCallback);
       return () => ipcRenderer.removeListener('main-log', wrappedCallback);
-    },
-
-    // Process management events
-    onZombieProcessesDetected: (callback: (data: { count: number; processes: string[] }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { count: number; processes: string[] }) => callback(data);
-      ipcRenderer.on('zombie-processes-detected', wrappedCallback);
-      return () => ipcRenderer.removeListener('zombie-processes-detected', wrappedCallback);
     },
   },
 
@@ -709,7 +565,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // positional args and REBUILD the request here, which silently dropped every
     // field the signature did not name — `substrate` (the Add-chat picker's
     // per-panel override, so an added PTY chat always launched as SDK) and
-    // `metadata` (the dashboard/setup-tasks `permanent` flag). A structural
+    // `metadata` (e.g. the `permanent` flag). A structural
     // request type keeps renderer and main in type parity: a new field on
     // CreatePanelRequest reaches the handler without touching this line.
     createPanel: (request: {
@@ -722,11 +578,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }): Promise<IPCResponse> => ipcRenderer.invoke('panels:create', request),
     getSessionPanels: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:list', sessionId),
     deletePanel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:delete', panelId),
-    renamePanel: (panelId: string, name: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:update', panelId, { name }),
     setActivePanel: (sessionId: string, panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:set-active', sessionId, panelId),
-    resizeTerminal: (panelId: string, cols: number, rows: number): Promise<IPCResponse> => ipcRenderer.invoke('panels:resize-terminal', panelId, cols, rows),
-    sendTerminalInput: (panelId: string, data: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:send-terminal-input', panelId, data),
-    getOutput: (panelId: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-output', panelId, limit),
     getConversationMessages: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-conversation-messages', panelId),
     getJsonMessages: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-json-messages', panelId),
     getPrompts: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-prompts', panelId),
@@ -735,8 +587,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string): Promise<IPCResponse<{ queued: boolean }>> =>
       ipcRenderer.invoke('panels:queue-input', panelId, id, text),
-    listQueuedInput: (panelId: string): Promise<IPCResponse<QueuedPanelInput[]>> =>
-      ipcRenderer.invoke('panels:list-queued-input', panelId),
     dequeueInput: (panelId: string, id: string): Promise<IPCResponse<{ dequeued: boolean }>> =>
       ipcRenderer.invoke('panels:dequeue-input', panelId, id),
   },
@@ -744,9 +594,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude Panels - specific API for Claude panels
   claudePanels: {
     getModel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-model', panelId),
-    getSubstrate: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-substrate', panelId),
-    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null): Promise<IPCResponse> =>
-      ipcRenderer.invoke('claude-panels:set-substrate', panelId, substrate),
     setModel: (panelId: string, model: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-model', panelId, model),
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
     getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),
@@ -762,15 +609,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Logs panel operations
   logs: {
-    runScript: (sessionId: string, command: string, cwd: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:runScript', sessionId, command, cwd),
     stopScript: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:stopScript', panelId),
-    isRunning: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:isRunning', sessionId),
-  },
-
-  // Nimbalyst integration
-  nimbalyst: {
-    checkInstalled: (): Promise<IPCResponse> => ipcRenderer.invoke('nimbalyst:check-installed'),
-    openWorktree: (worktreePath: string): Promise<IPCResponse> => ipcRenderer.invoke('nimbalyst:open-worktree', worktreePath),
   },
 });
 
@@ -779,59 +618,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
 // Cyboflow's existing contextBridge surfaces above are preserved — this is additive.
 exposeElectronTRPC();
 
-// Wrapper storage for the 'electron' contextBridge on/off pair.
-// Outer map: channel string → Inner map: user callback → ipcRenderer wrapper.
-// This ensures off() removes the exact wrapper that on() registered, not the
-// bare callback (which would be a no-op since ipcRenderer never saw it directly).
-const electronListenerWrappers = new Map<
-  string,
-  Map<(...args: unknown[]) => void, (event: Electron.IpcRendererEvent, ...args: unknown[]) => void>
->();
+// The raw push channels the 'electron' bridge's on() lets through: the
+// structured run stream, the interactive-PTY bytes and the worktree-shell bytes.
+const BRIDGED_EVENT_PREFIXES = ['cyboflow:stream:', 'cyboflow:pty:', 'cyboflow:shell:'] as const;
 
 // Expose electron event listeners for the streaming/PTY/shell push channels
 contextBridge.exposeInMainWorld('electron', {
-  openExternal: (url: string) => ipcRenderer.invoke('openExternal', url),
   // Gated by the GENERIC_INVOKE_CHANNELS allowlist above (security boundary).
   invoke: (channel: string, ...args: unknown[]) => invokeAllowlistedChannel(channel, args),
   on: (channel: string, callback: (...args: unknown[]) => void): (() => void) | undefined => {
-    const validChannels: string[] = [];
-    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
-      const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
-      if (!electronListenerWrappers.has(channel)) {
-        electronListenerWrappers.set(channel, new Map());
-      }
-      electronListenerWrappers.get(channel)!.set(callback, wrapper);
-      ipcRenderer.on(channel, wrapper);
-      // Return a disposer bound to THIS wrapper. Function identity is NOT
-      // preserved across the contextBridge (the renderer's callback arrives here
-      // as a fresh proxy on every call), so `off(channel, callback)` cannot find
-      // the wrapper in the Map and silently leaks the listener — the renderer
-      // MUST prefer this disposer over `off`.
-      return () => {
-        ipcRenderer.removeListener(channel, wrapper);
-        const inner = electronListenerWrappers.get(channel);
-        if (inner) {
-          inner.delete(callback);
-          if (inner.size === 0) electronListenerWrappers.delete(channel);
-        }
-      };
+    if (!BRIDGED_EVENT_PREFIXES.some((prefix) => channel.startsWith(prefix))) {
+      return undefined;
     }
-    return undefined;
-  },
-  off: (channel: string, callback: (...args: unknown[]) => void) => {
-    const validChannels: string[] = [];
-    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
-      const inner = electronListenerWrappers.get(channel);
-      if (inner) {
-        const wrapper = inner.get(callback);
-        if (wrapper) {
-          ipcRenderer.removeListener(channel, wrapper);
-          inner.delete(callback);
-          if (inner.size === 0) {
-            electronListenerWrappers.delete(channel);
-          }
-        }
-      }
-    }
+    const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
+    ipcRenderer.on(channel, wrapper);
+    // Return a disposer bound to THIS wrapper. Function identity is NOT
+    // preserved across the contextBridge (the renderer's callback arrives here
+    // as a fresh proxy on every call), so an off(channel, callback) could never
+    // find the wrapper — the disposer is the only way to unsubscribe.
+    return () => {
+      ipcRenderer.removeListener(channel, wrapper);
+    };
   },
 });

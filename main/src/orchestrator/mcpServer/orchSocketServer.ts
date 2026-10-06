@@ -112,13 +112,6 @@ export function isNamedPipePath(p: string): boolean {
 // OrchSocketServer
 // ---------------------------------------------------------------------------
 
-/**
- * Structurally satisfies `OrchSocketProvider` (runLauncher.ts) via
- * `getSocketPath`. The `OrchSocketProvider` interface is not imported here
- * because runLauncher.ts drags concrete service types (WorktreeManager,
- * RunExecutor, …) that would violate the standalone-typecheck invariant; the
- * structural match is asserted in the unit test instead.
- */
 export class OrchSocketServer {
   private readonly handler: McpQueryHandler;
   private server: net.Server | null = null;
@@ -442,7 +435,7 @@ export class OrchSocketServer {
     });
   }
 
-  /** The socket path this server listens on (satisfies OrchSocketProvider). */
+  /** The socket path this server listens on. */
   getSocketPath(): string {
     return this.socketPath;
   }

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { ToolPanel, CreatePanelRequest, PanelEventType, ToolPanelState, ToolPanelMetadata, ToolPanelType, LogsPanelState } from '../../../shared/types/panels';
+import { ToolPanel, CreatePanelRequest, PanelEventType, ToolPanelState, ToolPanelMetadata, LogsPanelState } from '../../../shared/types/panels';
 import { databaseService } from './database';
 import { panelEventBus } from './panelEventBus';
 import { mainWindow } from '../index';
@@ -8,14 +8,13 @@ import { withLock } from '../utils/mutex';
 export class PanelManager {
   private panels = new Map<string, ToolPanel>();
 
-  constructor() {
-    // Load panels from database on startup (but don't initialize processes)
-    this.loadPanelsFromDatabase();
-  }
-  
-  private loadPanelsFromDatabase(): void {
-    // This will be called on app startup to restore panel state
-    // But we don't start any processes - that happens lazily
+  /**
+   * Restore panel state from the database. Called once by index.ts right after
+   * the database is initialized and registered (setDatabaseService) — not at
+   * construction, which happens at import time, before the DB exists. Starts no
+   * processes; those spawn lazily.
+   */
+  loadPanelsFromDatabase(): void {
     console.log('[PanelManager] Loading panels from database...');
     
     // Load all panels from database
@@ -306,11 +305,6 @@ export class PanelManager {
     return panels;
   }
   
-  getPanelsBySessionAndType(sessionId: string, type: ToolPanelType): ToolPanel[] {
-    const panels = this.getPanelsForSession(sessionId);
-    return panels.filter(p => p.type === type);
-  }
-  
   async emitPanelEvent(panelId: string, eventType: PanelEventType, data: unknown): Promise<void> {
     const panel = this.getPanel(panelId);
     if (!panel) {
@@ -361,24 +355,7 @@ export class PanelManager {
     const maxPosition = Math.max(...panels.map(p => p.metadata.position));
     return maxPosition + 1;
   }
-  
-  // Clean up all panels for a session (called when session is deleted)
-  async cleanupSessionPanels(sessionId: string): Promise<void> {
-    const panels = this.getPanelsForSession(sessionId);
-    
-    for (const panel of panels) {
-      // Unsubscribe from events
-      panelEventBus.unsubscribePanel(panel.id);
-      
-      // Remove from cache
-      this.panels.delete(panel.id);
-    }
-    
-    // Delete all from database (cascade delete should handle this too)
-    databaseService.deletePanelsForSession(sessionId);
-    
-    console.log(`[PanelManager] Cleaned up ${panels.length} panels for session ${sessionId}`);
-  }
+
 }
 
 // Export singleton instance

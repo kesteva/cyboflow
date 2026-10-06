@@ -7,7 +7,6 @@ import type { GitDiffManager } from '../services/gitDiffManager';
 import type { GitStatusManager } from '../services/gitStatusManager';
 import type { ExecutionTracker } from '../services/executionTracker';
 import type { DatabaseService } from '../database/database';
-import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
 import type { ClaudeModelCatalogService } from '../services/claudeModelCatalogService';
@@ -24,6 +23,7 @@ import type {
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { Logger } from '../utils/logger';
 import type { ArchiveProgressManager } from '../services/archiveProgressManager';
+import type { PermissionTrustPrompter } from '../services/permissionTrustPrompt';
 import type { WorkflowRegistry } from '../orchestrator/workflowRegistry';
 import type { RunLauncher } from '../orchestrator/runLauncher';
 import type { SessionSummarySchedulerLike } from '../orchestrator/sessionSummary/sessionSummaryScheduler';
@@ -134,11 +134,17 @@ export interface AppServices {
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
-  runCommandManager: RunCommandManager;
   taskQueue: TaskQueue | null;
   getMainWindow: () => BrowserWindow | null;
   logger?: Logger;
   archiveProgressManager?: ArchiveProgressManager;
+  /**
+   * The one-time per-project permission-trust prompt (migration 127), shared by
+   * `projects:create` and the launch-time trigger wired in main/src/index.ts so
+   * both respect the same at-most-once guard. Optional only so IPC test fixtures
+   * can omit it; production always injects it.
+   */
+  permissionTrustPrompter?: PermissionTrustPrompter;
   cyboflow: {
     workflowRegistry: WorkflowRegistry;
     runLauncher: RunLauncher;

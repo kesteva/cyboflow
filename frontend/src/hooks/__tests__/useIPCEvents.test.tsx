@@ -37,12 +37,8 @@ vi.mock('../../stores/sessionStore', () => ({
       updateSession: vi.fn(),
       deleteSession: vi.fn(),
     }),
-    { getState: () => ({ setGitStatusLoading: vi.fn() }) },
+    { getState: () => ({}) },
   ),
-}));
-
-vi.mock('../../stores/errorStore', () => ({
-  useErrorStore: () => ({ showError: vi.fn() }),
 }));
 
 vi.mock('../../utils/api', () => ({
@@ -71,11 +67,6 @@ function makeEvents() {
     onSessionOutput: vi.fn(noop),
     onTerminalOutput: vi.fn(noop),
     onSessionOutputAvailable: vi.fn(noop),
-    onZombieProcessesDetected: vi.fn(noop),
-    onGitStatusUpdated: vi.fn(noop),
-    onGitStatusLoading: vi.fn(noop),
-    onGitStatusLoadingBatch: vi.fn(noop),
-    onGitStatusUpdatedBatch: vi.fn(noop),
   };
 }
 

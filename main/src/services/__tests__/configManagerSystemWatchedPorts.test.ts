@@ -63,14 +63,14 @@ describe('ConfigManager.getSystemWatchedPorts', () => {
   });
 
   it('reads undefined when unset and is not seeded into the constructor defaults', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().systemWatchedPorts).toBeUndefined();
     expect(mgr.getSystemWatchedPorts()).toBeUndefined();
   });
 
   it('reads a hand-edited malformed value as unset', async () => {
     await fs.writeFile(path.join(tempDir, 'config.json'), JSON.stringify({ systemWatchedPorts: ['3000', 99999] }));
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     expect(mgr.getSystemWatchedPorts()).toBeUndefined();
   });
@@ -78,7 +78,7 @@ describe('ConfigManager.getSystemWatchedPorts', () => {
 
 describe('config:update systemWatchedPorts boundary', () => {
   it('stores a custom list deduplicated and reads it back', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const result = await configOpsFor(mgr).updateConfig({ systemWatchedPorts: [3000, 4000, 3000] });
     expect(result.success).toBe(true);
@@ -87,14 +87,14 @@ describe('config:update systemWatchedPorts boundary', () => {
   });
 
   it('stores an explicit empty list as "watch nothing"', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await configOpsFor(mgr).updateConfig({ systemWatchedPorts: [] });
     expect(mgr.getSystemWatchedPorts()).toEqual([]);
   });
 
   it('stores a list matching the packaged defaults explicitly', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await configOpsFor(mgr).updateConfig({ systemWatchedPorts: [3000, 5000, 8080] });
     expect((await readPersisted(tempDir)).systemWatchedPorts).toEqual([3000, 5000, 8080]);
@@ -102,7 +102,7 @@ describe('config:update systemWatchedPorts boundary', () => {
   });
 
   it('rejects a malformed payload without touching the stored list', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
     await ops.updateConfig({ systemWatchedPorts: [4000] });

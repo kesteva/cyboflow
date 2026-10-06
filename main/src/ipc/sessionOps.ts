@@ -22,7 +22,6 @@
  */
 import type { AppServices } from './types';
 import type { SessionOpsLike } from '../orchestrator/trpc/contracts/sessionOps';
-import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
 import { aggregateExecutionDiffTotals } from './executionDiffAggregation';
 import { computeSessionFileStats, type SessionFileStats } from './sessionFileStats';
@@ -90,26 +89,6 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     } catch (error) {
       console.error('Failed to get session:', error);
       return { success: false, error: 'Failed to get session' };
-    }
-  };
-
-  const getAllWithProjects = async (): Promise<OpsResult<'getAllWithProjects'>> => {
-    try {
-      const allProjects = databaseService.getAllProjects();
-      const projectsWithSessions = allProjects.map(project => {
-        const sessions = sessionManager.getSessionsForProject(project.id);
-        const folders = databaseService.getFoldersForProject(project.id);
-        const convertedFolders = folders.map(convertDbFolderToFolder);
-        return {
-          ...project,
-          sessions,
-          folders: convertedFolders
-        };
-      });
-      return { success: true, data: projectsWithSessions };
-    } catch (error) {
-      console.error('Failed to get sessions with projects:', error);
-      return { success: false, error: 'Failed to get sessions with projects' };
     }
   };
 
@@ -215,9 +194,8 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
   // the board (mirrors getSummary's `enabled` contract); (3) at most
   // once per QUICK_GIT_WARM_INTERVAL_MS, a fire-and-forget cache WARM kicks
   // getGitStatus (TTL-aware, coalesced, concurrency-bounded) for the resting
-  // rows — the git watcher pipeline (badge auto-refresh) is disabled in
-  // production (GIT_STATUS_BADGE_ENABLED=false), so the cache this seam reads
-  // would otherwise stay cold. The warm deliberately rides the POLL rather than
+  // rows — nothing refreshes the cache automatically (there is no per-session
+  // git watcher), so the cache this seam reads would otherwise stay cold. The warm deliberately rides the POLL rather than
   // a dedicated endpoint of its own — that scopes warming to exactly "while a
   // board is polling", and it stayed that way when the listing moved onto the
   // cyboflow.sessions tRPC router.
@@ -583,28 +561,18 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
         };
       })();
 
-      // MIGRATION FIX: Get prompt count and messages using appropriate method
+      // Prompt count and messages come from the session's first Claude panel; a
+      // session with no Claude panel (created before its panel, or whose panel
+      // create failed) reads the session-scoped rows instead.
       const statsPanels = panelManager.getPanelsForSession(sessionId);
-      const statsClaudePanels = statsPanels.filter(p => p.type === 'claude');
+      const statsClaudePanel = statsPanels.find(p => p.type === 'claude');
 
-      let promptMarkers, messageCount;
-      if (statsClaudePanels.length > 0) {
-        // Use panel-based methods for migrated sessions
-        const claudePanel = statsClaudePanels[0];
-        console.log(`[IPC] Using panel-based prompt/message counts for session ${sessionId} with Claude panel ${claudePanel.id}`);
-
-        promptMarkers = databaseService.getPanelPromptMarkers ?
-          databaseService.getPanelPromptMarkers(claudePanel.id) :
-          databaseService.getPromptMarkers(sessionId);
-
-        messageCount = databaseService.getPanelConversationMessageCount ?
-          databaseService.getPanelConversationMessageCount(claudePanel.id) :
-          databaseService.getConversationMessageCount(sessionId);
-      } else {
-        // Use session-based methods for non-migrated sessions
-        promptMarkers = databaseService.getPromptMarkers(sessionId);
-        messageCount = databaseService.getConversationMessageCount(sessionId);
-      }
+      const promptMarkers = statsClaudePanel
+        ? databaseService.getPanelPromptMarkers(statsClaudePanel.id)
+        : databaseService.getPromptMarkers(sessionId);
+      const messageCount = statsClaudePanel
+        ? databaseService.getPanelConversationMessageCount(statsClaudePanel.id)
+        : databaseService.getConversationMessageCount(sessionId);
 
       // Resolve the session's model from its Claude panel SETTINGS (model is
       // managed at panel level, not on the session row — stored in
@@ -614,9 +582,8 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // resolves families by substring, and the frontend defaults a missing /
       // 'auto' model to the quick-session default. Null when no setting exists.
       const statsPanelModel = ((): string | null => {
-        const p = statsClaudePanels[0];
-        if (!p) return null;
-        const m = databaseService.getPanelSettings(p.id).model;
+        if (!statsClaudePanel) return null;
+        const m = databaseService.getPanelSettings(statsClaudePanel.id).model;
         return typeof m === 'string' && m.length > 0 ? m : null;
       })();
 
@@ -683,22 +650,9 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     }
   };
 
-  // Set active session for smart git status polling
-  const setActiveSession = async ({ sessionId }: OpsInput<'setActiveSession'>): Promise<OpsResult<'setActiveSession'>> => {
-    try {
-      // Notify GitStatusManager about the active session change
-      gitStatusManager.setActiveSession(sessionId);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to set active session:', error);
-      return { success: false, error: 'Failed to set active session' };
-    }
-  };
-
   return {
     getAll,
     get,
-    getAllWithProjects,
     getSummary,
     listQuick,
     getStatistics,
@@ -711,6 +665,5 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     updateSessionMcps,
     updateSessionPlugins,
     reorder,
-    setActiveSession,
   };
 }

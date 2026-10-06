@@ -33,12 +33,8 @@
  *  (b) the TYPE  (only when enabled) via
  *        agent-declared/requested type > project/global defaultType > the floor
  *        'static-render-snapshot'.
- *  (c) the live chain = FALLBACK_CHAINS[type] ∩ the host-available backends.
- *      In the MVP only 'capturePage' is available (playwright / peekaboo /
- *      maestro are filtered out until their host-deps land), so a render-type
- *      chain collapses to ['capturePage'] and an interactive/native/mobile type
- *      collapses to [] (the scheduler SKIPs an empty chain — never a fabricated
- *      fail).
+ *  (c) the engine chain — `['agent']` (the verification-AGENT engine, the only
+ *      one) for an enabled run, `[]` for a disabled one.
  *
  * With the global master switch OFF (the default — getVisualVerifyEnabled floors
  * false), every run resolves { enabled:false, type:null, chain:[] } and stamps
@@ -50,46 +46,17 @@
  */
 import {
   type VerificationType,
-  type VisualBackendId,
   type VerifyChainEntry,
   type VerificationRequestInput,
-  FALLBACK_CHAINS,
   VERIFY_AGENT_CHAIN,
   isVerificationType,
 } from '../../../shared/types/visualVerification';
 
 /**
  * The hard floor verification type, used when enabled but no requested/default
- * type resolves to a recognized member. The cheapest, broadest type — its chain
- * is the only one that always contains the MVP's sole available backend.
+ * type resolves to a recognized member — the cheapest, broadest type.
  */
 export const DEFAULT_VERIFICATION_TYPE: VerificationType = 'static-render-snapshot';
-
-/**
- * The backends whose host-deps are available in the v1 MVP. Only the in-process
- * rung-0 capturePage backend ships first; playwright / peekaboo / maestro are
- * filtered out of every resolved chain until their host-deps + leases land.
- * Callers may pass a wider set as the resolver's `availableBackends` input.
- */
-export const MVP_AVAILABLE_BACKENDS: readonly VisualBackendId[] = ['capturePage'] as const;
-
-/**
- * The backends actually registered into the scheduler's VerificationBackendRegistry
- * at boot (index.ts). createRun passes this as the resolver's `availableBackends`
- * so the stamped `verify_chain` can list every SHIPPED rung (not just the rung-0
- * floor); the per-backend runtime `healthCheck()` at drain is the SECOND gate (a
- * shipped-but-unhealthy backend — e.g. chromium not installed, or 'playwright'
- * pruned from a packaged build as a devDependency — is skipped then, never a
- * fabricated pass). Keep this in sync with the index.ts registry; it grows as each
- * backend slice lands (S3 'playwright', S4 'peekaboo', …). The resolver's own
- * default stays MVP_AVAILABLE_BACKENDS so the standalone resolver never assumes a
- * richer host than it can prove.
- */
-export const SHIPPED_VERIFY_BACKENDS: readonly VisualBackendId[] = [
-  'capturePage',
-  'playwright',
-  'peekaboo',
-] as const;
 
 /**
  * Inputs for resolveVisualVerification. Every enablement / type level is
@@ -164,27 +131,6 @@ export interface VisualVerificationResolverInputs {
    * inference rung is skipped (resolution falls to the global default + floor).
    */
   deliverable?: VerificationRequestInput | null;
-
-  /**
-   * The backends whose host-deps are available on this host. The resolved chain
-   * is intersected with this set. Defaults to MVP_AVAILABLE_BACKENDS (only
-   * 'capturePage') so the standalone resolver never assumes a richer host.
-   *
-   * Consulted ONLY in the legacy engine (`legacyEngine: true`) — the default
-   * verification-AGENT engine stamps `['agent']` and never walks a
-   * host-capability chain, so `availableBackends` is inert there.
-   */
-  availableBackends?: readonly VisualBackendId[];
-
-  /**
-   * Route this run to the LEGACY capture-backend + VLM-judge engine (the kill
-   * switch, redesign §5.8). Wired from `CYBOFLOW_VERIFY_LEGACY=1` at the
-   * createRun stamp site. Absent/false (the production default) stamps the
-   * verification-AGENT chain `['agent']`; `true` keeps stamping the legacy
-   * host-capability chain exactly as before this redesign. Immutable per run
-   * either way (stamps never change mid-flight).
-   */
-  legacyEngine?: boolean;
 }
 
 /**
@@ -196,10 +142,8 @@ export interface ResolvedVisualVerification {
   enabled: boolean;
   type: VerificationType | null;
   /**
-   * The stamped chain (redesign §5.8). In the default AGENT engine this is the
-   * single-member `['agent']` selector; in the legacy engine it is the
-   * host-capability `VisualBackendId[]` intersection. `VerifyChainEntry` is the
-   * union of both so the one field carries either stamp.
+   * The stamped chain (redesign §5.8): the single-member `['agent']` engine
+   * selector when enabled, `[]` when disabled.
    */
   chain: VerifyChainEntry[];
 }
@@ -309,11 +253,7 @@ function resolveType(inputs: VisualVerificationResolverInputs): VerificationType
  *
  * When enabled, the TYPE is resolved (requestedType > project default >
  * inferred-from-deliverable-kind > global default > 'static-render-snapshot'
- * floor) and the chain is
- * FALLBACK_CHAINS[type] intersected with the host-available backends (default:
- * only 'capturePage'). Order follows FALLBACK_CHAINS (easy→hard), preserved
- * through the intersection. An empty intersection is returned as-is — the
- * scheduler treats an empty chain as a SKIP (missing precondition), never a fail.
+ * floor) and the chain is the verification-AGENT selector `['agent']`.
  */
 export function resolveVisualVerification(
   inputs: VisualVerificationResolverInputs,
@@ -324,20 +264,10 @@ export function resolveVisualVerification(
 
   const type = resolveType(inputs);
 
-  // Default engine (redesign §5.8): the verification AGENT. Stamp the single-member
-  // `['agent']` selector — the scheduler dispatches a run whose stamp equals it to
-  // the VerificationAgentRunner (which builds/serves/drives/judges the composed
-  // VerificationTaskV1 itself), so no host-capability chain is walked. The TYPE is
-  // still resolved (it rides the request + drives the agent's viewport handling).
-  if (!inputs.legacyEngine) {
-    return { enabled: true, type, chain: [...VERIFY_AGENT_CHAIN] };
-  }
-
-  // Legacy engine (CYBOFLOW_VERIFY_LEGACY=1): the capture-backend + VLM-judge
-  // waterfall. Stamp the host-capability chain exactly as before this redesign.
-  const available = inputs.availableBackends ?? MVP_AVAILABLE_BACKENDS;
-  // Preserve the easy→hard FALLBACK_CHAINS order through the intersection.
-  const chain = FALLBACK_CHAINS[type].filter((backend) => available.includes(backend));
-
-  return { enabled: true, type, chain };
+  // The verification AGENT (redesign §5.8). Stamp the single-member `['agent']`
+  // selector — the scheduler dispatches a run whose stamp equals it to the
+  // VerificationAgentRunner (which builds/serves/drives/judges the composed
+  // VerificationTaskV1 itself). The TYPE is still resolved (it rides the request +
+  // drives the agent's viewport handling).
+  return { enabled: true, type, chain: [...VERIFY_AGENT_CHAIN] };
 }

@@ -6,15 +6,6 @@ import { isSafeExternalOpenTarget } from './artifactFrameGuard';
 export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app } = services;
 
-  // Basic app info handlers
-  ipcMain.handle('get-app-version', () => {
-    return app.getVersion();
-  });
-
-  ipcMain.handle('is-packaged', () => {
-    return app.isPackaged;
-  });
-
   // System utilities
   ipcMain.handle('openExternal', async (_event, url: string) => {
     try {
@@ -45,7 +36,6 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   });
 
-
   // Demo-mode tour info — the Create Project dialog prefills the sandbox repo
   // from this so the user never has to type a path during the demo.
   ipcMain.handle('demo:get-info', () => {
@@ -69,27 +59,6 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
     app.exit(0);
   });
 
-  // App opens tracking
-  ipcMain.handle('app:record-open', (_event, welcomeHidden: boolean) => {
-    try {
-      services.databaseService.recordAppOpen(welcomeHidden);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to record app open:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to record app open' };
-    }
-  });
-
-  ipcMain.handle('app:get-last-open', () => {
-    try {
-      const lastOpen = services.databaseService.getLastAppOpen();
-      return { success: true, data: lastOpen };
-    } catch (error) {
-      console.error('Failed to get last app open:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to get last app open' };
-    }
-  });
-
   // User preferences handlers
   ipcMain.handle('preferences:get', (_event, key: string) => {
     try {
@@ -110,14 +79,4 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
       return { success: false, error: error instanceof Error ? error.message : 'Failed to set preference' };
     }
   });
-
-  ipcMain.handle('preferences:get-all', () => {
-    try {
-      const preferences = services.databaseService.getUserPreferences();
-      return { success: true, data: preferences };
-    } catch (error) {
-      console.error('Failed to get all preferences:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to get all preferences' };
-    }
-  });
-} 
+}

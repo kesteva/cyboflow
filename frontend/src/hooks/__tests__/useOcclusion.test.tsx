@@ -11,10 +11,7 @@ import { getOcclusionCount, isOccluded, resetOcclusionForTests } from '../../uti
 import { Modal } from '../../components/ui/Modal';
 import { Dropdown } from '../../components/ui/Dropdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { ContextMenuProvider, useContextMenu } from '../../contexts/ContextMenuContext';
 import { useResizable } from '../useResizable';
-import { useResizablePanel } from '../useResizablePanel';
-import type { ContextMenuPayload } from '../../types/session';
 
 afterEach(() => resetOcclusionForTests());
 
@@ -70,29 +67,10 @@ describe('central overlay sites hold a lease while open', () => {
     expect(isOccluded()).toBe(true);
   });
 
-  it('ContextMenuContext', () => {
-    let api: ReturnType<typeof useContextMenu> | null = null;
-    const Probe = (): null => {
-      api = useContextMenu();
-      return null;
-    };
-    render(
-      <ContextMenuProvider>
-        <Probe />
-      </ContextMenuProvider>,
+  it('useResizable holds a lease for the duration of a drag', () => {
+    const { result } = renderHook(() =>
+      useResizable({ defaultWidth: 200, minWidth: 100, maxWidth: 400 }),
     );
-    expect(isOccluded()).toBe(false);
-    act(() => api!.openMenu('session', { id: 's1' } as ContextMenuPayload, { x: 1, y: 1 }));
-    expect(isOccluded()).toBe(true);
-    act(() => api!.closeMenu());
-    expect(isOccluded()).toBe(false);
-  });
-
-  it.each([
-    ['useResizable', () => useResizable({ defaultWidth: 200, minWidth: 100, maxWidth: 400 })],
-    ['useResizablePanel', () => useResizablePanel({ defaultWidth: 200, minWidth: 100, maxWidth: 400 })],
-  ])('%s holds a lease for the duration of a drag', (_name, hook) => {
-    const { result } = renderHook(hook);
     expect(isOccluded()).toBe(false);
     act(() =>
       result.current.startResize({ preventDefault: noop, clientX: 200 } as unknown as React.MouseEvent),

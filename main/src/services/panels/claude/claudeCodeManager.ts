@@ -60,11 +60,10 @@ import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../../../
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { AgentStreamEvent } from '../../../../../shared/types/agentStream';
 import { LIVE_TASK_STATUSES } from '../../../../../shared/streamParser/taskLifecycle';
-import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
-import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
+import { reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { UserEvent } from '../../../../../shared/types/claudeStream';
-import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../../../shared/types/cliSpawn';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
@@ -1070,17 +1069,14 @@ interface PipelineTuple {
  */
 export class ClaudeCodeManager extends AbstractCliManager {
   /**
-   * Inject the orchestrator IPC socket path so the cyboflow MCP server entry
-   * can be included in per-session mcpServers options.
+   * Inject the orchestrator socket path. While it is set, composeMcpServers()
+   * adds the 'cyboflow' MCP server entry (CYBOFLOW_ORCH_SOCKET) to every spawned
+   * session's mcpServers; while it is null, no cyboflow_* tools are surfaced.
    *
-   * Call this once at boot after the permission IPC server has started.
-   * The socket path is reused for both crystal-permissions (via PreToolUse hook
-   * in this SDK path) and the cyboflow MCP server.
+   * Called once at boot (index.ts) after the orchestrator socket server is
+   * created.
    */
   setOrchSocketPath(socketPath: string): void {
-    // TODO(epic-7): first production caller is the OrchSocketProvider wiring task.
-    // Until that task lands, composeMcpServers() always takes the orchSocketPath=null branch
-    // and no cyboflow_* tools are surfaced to Claude sessions.
     this.orchSocketPath = socketPath;
     // Eagerly kick off node-path resolution at boot so the first session never
     // races against a not-yet-resolved promise.  The result is stored as a
@@ -1647,7 +1643,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Abort controller for cancellation.
       const abortController = new AbortController();
 
-      // Push stub into processes map so isPanelRunning / getAllProcesses work.
+      // Push stub into processes map so isPanelRunning works.
       const stub: StubCliProcess = {
         process: undefined as never,
         panelId,
@@ -4784,31 +4780,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
 
     return systemPromptParts.length > 0 ? systemPromptParts.join('\n\n') : undefined;
-  }
-
-  // @cyboflow-hidden: Day-3 integration point — no workflow_runs rows exist yet in v1.
-  // Re-enable by routing from ApprovalRouter.recordToolRequest() -> tryTransitionToAwaitingReview()
-  // once workflow_runs rows are auto-created on Claude spawn (TASK-302 territory).
-  /**
-   * Attempt to record a tool-use approval request for a running Claude process.
-   *
-   * Day-3 integration point: once workflow_runs rows are auto-created on Claude spawn
-   * (TASK-302 territory), this method replaces the inline SQL in ApprovalRouter with a
-   * single call to the canonical transitionToAwaitingReview() guard.
-   *
-   * In v1 (panelId-as-runId), no workflow_runs row exists and the call will throw
-   * TransitionRejectedError → caught and logged; no crash.
-   *
-   * Satisfies AC#4 production-callsite requirement for transitionToAwaitingReview.
-   */
-  private tryTransitionToAwaitingReview(params: TransitionToAwaitingReviewParams): void {
-    try {
-      transitionToAwaitingReview(this.db, params);
-    } catch (err) {
-      this.logger?.warn(
-        `[ClaudeCodeManager] transitionToAwaitingReview skipped (no workflow_runs row yet): ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
   }
 
   protected getCliNotAvailableMessage(error?: string): string {

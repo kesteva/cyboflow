@@ -49,7 +49,7 @@ import type { AgentProviderAccess } from '../../../../../shared/types/agentRunti
  */
 function setProviderAccess(access: AgentProviderAccess | undefined, ariaMode = false): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: access, ariaMode } as AppConfig,
+    config: { agentProviderAccess: access, ariaMode } as AppConfig,
   });
 }
 

@@ -17,7 +17,7 @@ vi.mock('../../utils/claudeCredentials', () => ({
     account: 'claude@example.com',
   })),
 }));
-vi.mock('../../utils/claudeCodeTest', () => ({
+vi.mock('../../utils/claudeBinaryDetection', () => ({
   detectClaudeBinary: vi.fn(async () => ({
     found: true,
     path: '/usr/local/bin/claude',

@@ -868,11 +868,10 @@ object; under the old default that stamped a literal `false`.
 `vv?.autoBootstrapRunbook ?? VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook`, so a
 persisted `false` wins over the new floor forever — `??` only ever sees an
 `undefined` on a config.json that has never been through Settings' save path.
-There is no config migration for this key (the only migration in
-`ConfigManager.initialize()` is `enableCrystalFooter` → `enableCyboflowFooter`).
+There is no config migration for this key (`ConfigManager.initialize()` carries
+no one-time migrations).
 
-The fix is a one-time migration in `ConfigManager.initialize()`, mirroring that
-existing one: on load, if `visualVerify.autoBootstrapRunbook === false` and a
+The fix is a one-time migration in `ConfigManager.initialize()`: on load, if `visualVerify.autoBootstrapRunbook === false` and a
 new migration marker is absent, delete the stored `false` (letting it fall
 through to the new floor) and stamp the marker so a later, deliberate opt-out
 is never re-flipped. `main/src/services/configManager.ts` is outside this

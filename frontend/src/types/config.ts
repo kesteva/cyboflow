@@ -11,15 +11,18 @@ import type { VisualVerifyConfig } from '../../../shared/types/visualVerificatio
 import type { WebViewerConfig } from '../../../shared/types/webViewer';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
+/** Desktop-notification preferences (Settings → Notifications). */
+export interface NotificationPreferences {
+  enabled: boolean;
+  playSound: boolean;
+  notifyOnStatusChange: boolean;
+  notifyOnWaiting: boolean;
+  notifyOnComplete: boolean;
+}
+
 export interface AppConfig {
-  // Optional to match main's mirror (main/src/types/config.ts) — a
-  // pre-existing type-parity drift (this field is unused in the frontend and
-  // was never actually guaranteed present) that only surfaces now that the
-  // cyboflow.config tRPC router type-checks the response end-to-end.
-  gitRepoPath?: string;
   verbose?: boolean;
   systemPromptAppend?: string;
-  runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
@@ -152,13 +155,7 @@ export interface AppConfig {
     thresholdMinutes?: number;
   };
   theme?: 'paper' | 'light' | 'dark';
-  notifications?: {
-    enabled: boolean;
-    playSound: boolean;
-    notifyOnStatusChange: boolean;
-    notifyOnWaiting: boolean;
-    notifyOnComplete: boolean;
-  };
+  notifications?: NotificationPreferences;
   devMode?: boolean;
   // DEV-ONLY testing affordance: forces the next AskUserQuestion gate to fail so
   // the durable recovery gate can be exercised live. Only takes effect in dev
@@ -183,24 +180,8 @@ export interface AppConfig {
     usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'fable' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
-  // Cyboflow commit footer setting (enabled by default)
-  enableCyboflowFooter?: boolean;
 }
 
 /**

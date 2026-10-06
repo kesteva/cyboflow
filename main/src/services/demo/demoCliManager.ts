@@ -96,7 +96,7 @@ export class DemoCliManager extends AbstractCliManager {
       logger: this.logger,
     });
 
-    // Stub process record so isPanelRunning / getAllProcesses keep working.
+    // Stub process record so isPanelRunning keeps working.
     this.processes.set(panelId, {
       process: undefined as never,
       panelId,

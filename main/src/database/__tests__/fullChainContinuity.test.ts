@@ -120,6 +120,26 @@ describe('Full-chain migration continuity', () => {
     raw.close();
   });
 
+  it('creates the live sessions columns on the FIRST initialize() of a fresh DB', () => {
+    // Regression: an inline Crystal timestamp-normalization rebuild used to
+    // recreate `sessions` from a hardcoded column list on every fresh install,
+    // dropping status_message until the second boot re-added it.
+    const svc = new DatabaseService(dbPath);
+    svc.initialize();
+    const raw = svc.getDb();
+
+    const cols = raw.prepare('PRAGMA table_info(sessions)').all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    const byName = new Map(cols.map((c) => [c.name, c.type]));
+    expect(byName.has('status_message')).toBe(true);
+    expect(byName.get('last_viewed_at')).toBe('DATETIME');
+    expect(byName.get('run_started_at')).toBe('DATETIME');
+
+    raw.close();
+  });
+
   it('re-initializing the same DB is idempotent and keeps user_version stable', () => {
     const svc1 = new DatabaseService(dbPath);
     svc1.initialize();

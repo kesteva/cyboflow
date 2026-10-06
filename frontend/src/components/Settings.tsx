@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { NotificationSettings } from './NotificationSettings';
 import { UpdateSettings } from './UpdateSettings';
-import { useNotifications } from '../hooks/useNotifications';
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
@@ -163,7 +163,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Demo mode is hidden in the stable DMG (it's a dev/internal affordance).
   const [buildVariant, setBuildVariant] = useState<'stable' | 'dev' | undefined>(undefined);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
-  const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   // Model alias for the global cyboflow assistant (the agent-rail chat). '' =
   // follow the app's default model (defaultModel / getDefaultModel()).
   const [assistantModel, setAssistantModel] = useState('');
@@ -271,13 +270,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
   const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState<number | ''>(5);
-  const [notificationSettings, setNotificationSettings] = useState({
-    enabled: true,
-    playSound: true,
-    notifyOnStatusChange: true,
-    notifyOnWaiting: true,
-    notifyOnComplete: true
-  });
+  const [notificationSettings, setNotificationSettings] = useState(DEFAULT_NOTIFICATION_PREFERENCES);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Whether a `RunTypeOverrideDetail` draft is open (Session settings →
   // "Session type overrides" → Configure). That sub-screen's Save/Cancel are
@@ -290,7 +283,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [runTypeOverrideDetailOpen, setRunTypeOverrideDetailOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'general' | 'shortcuts' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
-  const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
 
@@ -335,7 +327,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setAriaMode(data.ariaMode ?? false);
       setDemoMode(data.demoMode || false);
       setInitialDemoMode(data.demoMode || false);
-      setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setAssistantModel(data.assistantModel ?? '');
       setAssistantRuntimeChoice(isAssistantRuntime(data.assistantRuntime) ? data.assistantRuntime : '');
       setAssistantEnabled(data.assistantEnabled !== false);
@@ -383,8 +374,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       // Load notification settings
       if (data.notifications) {
         setNotificationSettings(data.notifications);
-        // Update the useNotifications hook with loaded settings
-        updateSettings(data.notifications);
       }
     } catch (err) {
       setError('Failed to load configuration');
@@ -421,7 +410,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // an undefined value would fail to overwrite a stored `true`.
         ariaMode,
         demoMode,
-        enableCyboflowFooter,
         // Empty ('App default') → undefined so getAssistantModel() floors to
         // getDefaultModel() and config.json stays free of the key.
         assistantModel: assistantModel.trim() ? assistantModel.trim() : undefined,
@@ -532,13 +520,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         { errorReportingEnabled, usageMetricsEnabled },
       );
 
-      // Update the useNotifications hook with new settings
-      updateSettings(notificationSettings);
-
       // Refresh config from server
       await fetchConfig();
 
-      // Also refresh the global config store
+      // Also refresh the global config store (the notification hooks read
+      // their preferences from it, so a save applies without a reload)
       await refreshConfigStore();
 
       // Demo mode is applied at boot — offer a relaunch when it was toggled.
@@ -937,8 +923,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 containers over the lifted state above and this form's shared
                 handleSubmit — no separate save round trip. */}
             <FeatureControlsSettings
-              enableCyboflowFooter={enableCyboflowFooter}
-              onEnableCyboflowFooterChange={setEnableCyboflowFooter}
               interactivePtyOnly={interactivePtyOnly}
               onInteractivePtyOnlyChange={setInteractivePtyOnly}
               computeCostFromRates={computeCostFromRates}

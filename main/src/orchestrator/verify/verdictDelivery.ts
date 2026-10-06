@@ -294,7 +294,7 @@ export function parseAttemptFromEnqueueKey(enqueueKey: string | null): number | 
 }
 
 /**
- * Map a VlmJudge issue severity ('low'|'medium'|'high') to the review_items
+ * Map a verdict issue severity ('low'|'medium'|'high') to the review_items
  * severity domain ('info'|'warning'|'error'). A finding with no issues (e.g. a
  * bare low_confidence verdict) defaults to 'warning'.
  */
@@ -756,20 +756,12 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     const hasFiles = Array.isArray(fileNames) && fileNames.length > 0;
     if (verdict || reportEntry || hasFiles) {
       try {
-        // R7: thread the hydrated baselineKey THROUGH delivery so the screenshots-tab
-        // Accept-as-baseline button files accepted PNGs under the SAME stable key the
-        // SSIM pre-diff later resolves baselines by. Omitted when the request carried
-        // no baselineKey.
-        const enrichedVerdict: VerdictV1 | undefined =
-          verdict && input?.baselineKey !== undefined && input.baselineKey.length > 0
-            ? { ...verdict, baselineKey: input.baselineKey }
-            : verdict;
         await ArtifactRouter.getInstance().mergeScreenshots(projectId, {
           op: 'merge-screenshots',
           runId,
           label: `${fileNames.length} screenshot${fileNames.length === 1 ? '' : 's'}`,
           ...(hasFiles ? { fileNames } : {}),
-          ...(enrichedVerdict ? { verdict: enrichedVerdict } : {}),
+          ...(verdict ? { verdict } : {}),
           ...(reportEntry ? { report: reportEntry } : {}),
           ...(captureOrigin ? { captureOrigin } : {}),
           ...(diagnostics && diagnostics.length > 0 ? { diagnostics } : {}),

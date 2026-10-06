@@ -60,8 +60,7 @@ Full index: `docs/README.md`. The load-bearing ones:
   lineages, and the restore procedure. Read before touching a backup: a daily backup alone
   has an EMPTY `raw_events`.
 - `docs/PROVENANCE.md` — fork lineage.
-- `docs/crystal-legacy/` and `docs/workflows-future/` — historical reference, not current
-  truth.
+- `docs/workflows-future/` — historical reference, not current truth.
 
 ## Gotchas
 
@@ -75,8 +74,9 @@ Full index: `docs/README.md`. The load-bearing ones:
   declarations that drift across an IPC/tRPC boundary silently drop fields instead of failing
   the build — read `docs/CODE-PATTERNS.md` → "IPC / type-parity rules" before touching any
   IPC surface.
-- `@cyboflow-hidden` marks intentionally unreachable code: do NOT delete it, and do NOT add
-  the marker to actively-called code (template and examples in `docs/CODE-PATTERNS.md`).
+- `@cyboflow-hidden` marks intentionally unreachable code: do NOT delete it (unless a task
+  explicitly mandates it), and do NOT add the marker to actively-called code (template in
+  `docs/CODE-PATTERNS.md`).
 - localStorage key renames go through `frontend/src/utils/migrateLocalStorageKey.ts` — never
   ad-hoc `getItem`/`setItem` logic.
 - Directory-scoped rules live in nested `AGENTS.md` files — currently
@@ -120,8 +120,8 @@ over `pnpm --filter` — filter recursion has broken bin PATH resolution in this
 `docs/ARCHITECTURE.md` → "Build & Run".
 
 Full test-tier and ABI mechanics: `docs/ARCHITECTURE.md` → "Build & Run".
-Packaging/releases: `docs/RELEASE-RUNBOOK.md` (per-arch DMGs — `build:mac:universal`
-currently fails).
+Packaging/releases: `docs/RELEASE-RUNBOOK.md` (per-arch DMGs; there is no
+universal build).
 
 ## Conventions
 

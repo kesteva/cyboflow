@@ -2,8 +2,7 @@
  * MessageProjection — main-process streaming projection of ClaudeStreamEvents
  * into UnifiedMessage shapes consumed by the renderer.
  *
- * Ported from:
- *   frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts
+ * Ported from Crystal's renderer-side ClaudeMessageTransformer (since deleted).
  *
  * Key design shift: the old transformer ran 3 passes over a batch array.
  * This implementation is STREAMING — one event in, zero-or-more messages out.
@@ -246,7 +245,7 @@ export class MessageProjection {
         metadata: {
           systemSubtype: 'context_compacted',
           // compactTrigger / preTokens: camelCase forward-compat (FIND-SPRINT-026-5).
-          // No current renderer consumer reads these — RichOutputView.tsx:842 dispatches
+          // No current renderer consumer reads these — the chat transcript dispatches
           // on systemSubtype only. When a renderer surfaces compact details, read from
           // here (not the wire-layer snake_case fields on compact_metadata).
           compactTrigger: compact.compact_metadata.trigger,

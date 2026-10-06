@@ -1,8 +1,7 @@
 /**
- * cyboflow.sessionGit sub-router — the session-worktree git surface: commit
- * history and diffs, rebase-from-main, merge-to-main (squash or preserve),
- * pull/push, the delivery/mark-complete bookkeeping the dismiss and Create-PR
- * dialogs read, and the git-status reads the sidebar drives.
+ * cyboflow.sessionGit sub-router — the session-worktree git surface: commit,
+ * the combined diff, merge-to-main (squash or preserve), push, and the
+ * delivery/mark-complete bookkeeping the dismiss and Create-PR dialogs read.
  *
  * Slice 3 — the FINAL slice — of the IPC→tRPC migration
  * (docs/CODE-PATTERNS.md), following the `config` PILOT and `workspaceFiles`
@@ -19,12 +18,8 @@
  *
  * Envelope passthrough is total: this router never re-shapes what the ops layer
  * returns, including the irregular envelopes the merge/dismiss dialogs depend on
- * (`needsRebase` / `alreadyUpToDate` / `gitError`, and getGitStatus's
- * `gitStatus`-keyed success). See the contract for why each exists.
- *
- * `getGitStatus` is a QUERY even though it can kick off a background refresh:
- * it is semantically a read, and the refresh is a cache-warming side effect the
- * legacy handler always had.
+ * (`needsRebase` / `alreadyUpToDate` / `gitError`). See the contract for why
+ * each exists.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
@@ -37,13 +32,9 @@ import { eventToAsyncIterable } from './events';
 import type {
   MergeToMainResult,
   PullPushGitError,
-  RebaseFromMainGitError,
-  SessionExecutionRow,
   SessionGitDiffResult,
   SessionGitError,
-  SessionLastCommitRow,
 } from '../contracts/sessionGitOps';
-import type { GitStatus } from '../../../types/session';
 import type { ComparisonBases } from '../../../../../shared/types/runFiles';
 
 function requireOps<T>(ops: T | undefined): T {
@@ -60,28 +51,10 @@ function requireOps<T>(ops: T | undefined): T {
 const sessionInput = z.object({ sessionId: z.string().min(1) });
 
 export const sessionGitRouter = router({
-  getExecutions: protectedProcedure
-    .input(sessionInput)
-    .query(async ({ ctx, input }): Promise<{ success: true; data: SessionExecutionRow[] } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).getExecutions(input);
-    }),
-
-  getExecutionDiff: protectedProcedure
-    .input(z.object({ sessionId: z.string().min(1), executionId: z.string().min(1) }))
-    .query(async ({ ctx, input }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).getExecutionDiff(input);
-    }),
-
   commit: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1), message: z.string().min(1) }))
     .mutation(async ({ ctx, input }): Promise<{ success: true } | SessionGitError> => {
       return requireOps(ctx.sessionGitOps).commit(input);
-    }),
-
-  diff: protectedProcedure
-    .input(sessionInput)
-    .query(async ({ ctx, input }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).diff(input);
     }),
 
   getCombinedDiff: protectedProcedure
@@ -100,27 +73,6 @@ export const sessionGitRouter = router({
       return requireOps(ctx.sessionGitOps).getCombinedDiff(input);
     }),
 
-  rebaseMainIntoWorktree: protectedProcedure
-    .input(sessionInput)
-    .mutation(async ({
-      ctx,
-      input,
-    }): Promise<
-      | { success: true; data: { message: string } }
-      | { success: false; error: string; gitError?: RebaseFromMainGitError }
-    > => {
-      return requireOps(ctx.sessionGitOps).rebaseMainIntoWorktree(input);
-    }),
-
-  abortRebaseAndUseClaude: protectedProcedure
-    .input(sessionInput)
-    .mutation(async ({
-      ctx,
-      input,
-    }): Promise<{ success: true; data: { message: string; panelId: string } } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).abortRebaseAndUseClaude(input);
-    }),
-
   squashAndRebaseToMain: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1), commitMessage: z.string().min(1) }))
     .mutation(async ({ ctx, input }): Promise<MergeToMainResult> => {
@@ -131,18 +83,6 @@ export const sessionGitRouter = router({
     .input(sessionInput)
     .mutation(async ({ ctx, input }): Promise<MergeToMainResult> => {
       return requireOps(ctx.sessionGitOps).rebaseToMain(input);
-    }),
-
-  pull: protectedProcedure
-    .input(sessionInput)
-    .mutation(async ({
-      ctx,
-      input,
-    }): Promise<
-      | { success: true; data: { output: string } }
-      | { success: false; error: string; isMergeConflict?: boolean; gitError?: PullPushGitError }
-    > => {
-      return requireOps(ctx.sessionGitOps).pull(input);
     }),
 
   push: protectedProcedure
@@ -194,20 +134,6 @@ export const sessionGitRouter = router({
     .input(sessionInput)
     .query(async ({ ctx, input }): Promise<{ success: true; data: { subjects: string[] } } | SessionGitError> => {
       return requireOps(ctx.sessionGitOps).getBranchCommitSubjects(input);
-    }),
-
-  getLastCommits: protectedProcedure
-    // The default (50) deliberately lives in the ops impl, not here — it is the
-    // legacy handler's own default and moved with the body.
-    .input(z.object({ sessionId: z.string().min(1), count: z.number().int().positive().optional() }))
-    .query(async ({ ctx, input }): Promise<{ success: true; data: SessionLastCommitRow[] } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).getLastCommits(input);
-    }),
-
-  hasChangesToRebase: protectedProcedure
-    .input(sessionInput)
-    .query(async ({ ctx, input }): Promise<{ success: true; data: boolean } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).hasChangesToRebase(input);
     }),
 
   getGitCommands: protectedProcedure
@@ -298,23 +224,6 @@ export const sessionGitRouter = router({
       input,
     }): Promise<{ success: true; data: { remoteUrl: string; branchName: string } } | SessionGitError> => {
       return requireOps(ctx.sessionGitOps).getRemoteUrl(input);
-    }),
-
-  getGitStatus: protectedProcedure
-    .input(
-      z.object({
-        sessionId: z.string().min(1),
-        nonBlocking: z.boolean().optional(),
-        isInitialLoad: z.boolean().optional(),
-      }),
-    )
-    .query(async ({
-      ctx,
-      input,
-    }): Promise<
-      { success: true; gitStatus: GitStatus | null; backgroundRefresh?: boolean } | SessionGitError
-    > => {
-      return requireOps(ctx.sessionGitOps).getGitStatus(input);
     }),
 
   cancelStatusForProject: protectedProcedure

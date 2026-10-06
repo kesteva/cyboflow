@@ -29,9 +29,9 @@
  *
  * WHY raw_events IS ARCHIVED SEPARATELY. `raw_events` is roughly 80% of the
  * database, so copying it into all seven retained backups is where this
- * directory's bulk comes from. It is NOT disposable — the `messages` table is
- * empty by design and `raw_events` is the source of truth for reconstructed
- * chat history, the context-usage view, the run inspector, and Insights — so
+ * directory's bulk comes from. It is NOT disposable — `raw_events` is the
+ * source of truth for reconstructed chat history (no separate messages table
+ * exists), the context-usage view, the run inspector, and Insights — so
  * it cannot simply be dropped. Instead it is stored ONCE: the table is
  * append-only with an AUTOINCREMENT id, so each tick appends the rows above
  * the previous high-water mark to an immutable delta file and the daily backup

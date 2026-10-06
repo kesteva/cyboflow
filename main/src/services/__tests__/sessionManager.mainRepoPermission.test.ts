@@ -28,16 +28,6 @@ vi.mock('../../ipc/logs', () => ({
   cleanupSessionLogs: vi.fn(),
 }));
 
-// scriptExecutionTracker imports ../index → electron chain; mock it to prevent that.
-vi.mock('../scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    markClosing: vi.fn(),
-    isRunning: vi.fn().mockReturnValue(false),
-  },
-}));
-
 // ------------------------------------------------------------------
 // Import the SUT *after* the mocks are wired.
 // ------------------------------------------------------------------

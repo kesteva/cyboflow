@@ -2219,6 +2219,6 @@ First signed, notarized, and auto-updating macOS builds.
 
 Cyboflow is a fork of [Crystal](https://github.com/stravu/crystal) at tag `0.3.5` and has
 diverged substantially in scope and architecture. The original upstream Crystal changelog is
-preserved at [`docs/archive/CHANGELOG-crystal.md`](docs/archive/CHANGELOG-crystal.md) — note
+is at [`stravu/crystal@0.3.5`](https://github.com/stravu/crystal/blob/0.3.5/CHANGELOG.md) — note
 that Cyboflow does **not** track the renamed successor product (Nimbalyst); see
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md).

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SpawnStepRunner, programmaticDisallowedTools } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import type { WorkflowDefinition, WorkflowStep } from '../../../../../shared/types/workflows';
 import type { ControllerStepContext } from '../types';
 

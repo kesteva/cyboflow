@@ -21,8 +21,6 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import { WorkflowRegistry } from '../../main/src/orchestrator/workflowRegistry';
 import { RunLauncher } from '../../main/src/orchestrator/runLauncher';
-import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../../main/src/orchestrator/runLauncher';
-import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
 import { DatabaseService } from '../../main/src/database/database';
@@ -327,15 +325,8 @@ export async function createHarness(options: CreateHarnessOptions = {}): Promise
         throw new Error(`launchPair: could not find seeded workflow rows for ${workflowA}/${workflowB}`);
       }
 
-      // RunLauncher — stub MCP collaborators: the gate uses SDK PreToolUse, not a bridge,
-      // so MCP config writes are no-ops.  All 4 collaborators are required by the constructor.
-      const stubOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => '' };
-      const stubBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '' };
-      const stubNodeResolver: NodeResolver = { getNodePath: async () => process.execPath };
-      const stubMcpConfigWriter = new McpConfigWriter();
       const runLauncher = new RunLauncher(
         dbLike, workflowRegistry, worktreeManager, harnessLogger,
-        stubMcpConfigWriter, stubOrchSocketProvider, stubBridgeScriptResolver, stubNodeResolver,
       );
 
       // Every run is session-hosted (permission-mode redesign slice 1b): launch

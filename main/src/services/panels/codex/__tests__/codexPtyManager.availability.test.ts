@@ -17,7 +17,6 @@ vi.mock('../../../../utils/shellPath', () => ({
 vi.mock('../../../../utils/nodeFinder', () => ({
   findNodeExecutable: () => Promise.resolve('/usr/bin/node'),
   findCliNodeScript: () => null,
-  findClaudeCodeScript: () => null,
   testNodeExecutable: () => Promise.resolve(true),
   clearNodeExecutableCache: () => undefined,
 }));

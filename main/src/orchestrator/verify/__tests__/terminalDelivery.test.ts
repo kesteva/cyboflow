@@ -144,7 +144,7 @@ describe('TerminalDelivery', () => {
       insertRow(db, { id: 'r1', status: 'running' });
       const delivery = new TerminalDelivery({ db: dbAdapter(db) });
 
-      const changes = delivery.markTerminal('r1', 'passed', { backend: 'playwright', verdict: PASS_VERDICT });
+      const changes = delivery.markTerminal('r1', 'passed', { verdict: PASS_VERDICT });
 
       expect(changes).toBe(1);
       const state = readRow(db, 'r1');
@@ -208,7 +208,7 @@ describe('TerminalDelivery', () => {
       await delivery.markTerminalAndDeliver(
         row('r1'),
         'passed',
-        { backend: 'playwright', captureOrigin: 'agent', diagnostics: ['console: ok'] },
+        { captureOrigin: 'agent', diagnostics: ['console: ok'] },
         PASS_VERDICT,
         ['default.png'],
         INPUT,

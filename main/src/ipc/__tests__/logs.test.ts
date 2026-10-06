@@ -109,19 +109,4 @@ describe('session log buffer bounds', () => {
       Array.from({ length: 10 }, (_, i) => `small-${i}`),
     );
   });
-
-  it('sessions:add-log IPC handler is also bounded by the same budgets', async () => {
-    const sessionId = 'sess-ipc-add-log';
-    const MAX_LOG_ENTRIES = 2000;
-    const addLog = getHandler('sessions:add-log');
-
-    for (let i = 0; i < MAX_LOG_ENTRIES + 10; i++) {
-      const entry: LogEntry = { timestamp: new Date().toISOString(), level: 'info', message: `m-${i}` };
-      await addLog({}, sessionId, entry);
-    }
-
-    const logs = await getLogs(sessionId);
-    expect(logs.length).toBe(MAX_LOG_ENTRIES);
-    expect(logs[0].message).toBe('m-10');
-  });
 });

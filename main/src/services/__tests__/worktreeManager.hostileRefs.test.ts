@@ -2,7 +2,7 @@
  * WorktreeManager against hostile repo-controlled refs.
  *
  * Branch names, remote names and refs come off disk and reach almost every
- * method here on an ordinary dashboard refresh. Two distinct attacks have to be
+ * method here on an ordinary git status refresh. Two distinct attacks have to be
  * closed, and they need different proofs:
  *
  *  1. SHELL injection — a branch literally named `$(id>/tmp/…)`. Proven end to
@@ -115,24 +115,6 @@ describe('option-injection: a ref starting with "-" never reaches git as an opti
     expect(args.some(a => a.includes('upload-pack'))).toBe(false);
   });
 
-  it('merge-tree, which predates --end-of-options, refuses the ref instead of passing it', async () => {
-    const manager = new WorktreeManager();
-    vi.spyOn(manager, 'hasChangesToRebase').mockResolvedValue(true);
-    vi.mocked(runGitCapture).mockResolvedValue({ stdout: 'deadbeef\n', stderr: '' });
-
-    await manager.checkForRebaseConflicts('/wt', OPTION_REF);
-
-    // assertNotOptionLike throws before the spawn, so merge-tree is never
-    // invoked; the method's existing "merge-tree unavailable" fallback takes
-    // over, and its diff/log reads are marker-guarded.
-    expect(callsFor('merge-tree')).toEqual([]);
-    const fallbackReads = [...callsFor('diff'), ...callsFor('log')];
-    expect(fallbackReads.length).toBeGreaterThan(0);
-    for (const [, args] of fallbackReads) {
-      expect(afterEndOfOptions(args)).toHaveLength(1);
-    }
-    expect(fallbackReads.some(([, args]) => args.some(a => a.includes(OPTION_REF)))).toBe(true);
-  });
 });
 
   // POSIX-only: the hostile fixture needs a refname containing '>' (a shell

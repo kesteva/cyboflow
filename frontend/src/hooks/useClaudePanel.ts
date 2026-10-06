@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
-import { useTheme } from '../contexts/ThemeContext';
 import { API } from '../utils/api';
 import { GitCommands } from '../types/session';
 import type { AttachedImage, AttachedText, Session } from '../types/session';
@@ -16,8 +15,8 @@ export async function dispatchQuickSessionInput(
   interrupt?: boolean,
   pendingId?: string,
   /**
-   * The panel's OWN substrate override, when it has one (Add-chat picker /
-   * claude-panels:set-substrate). Absent means the panel inherits its session.
+   * The panel's OWN substrate override, when it has one (set by the Add-chat
+   * picker). Absent means the panel inherits its session.
    */
   panelSubstrate?: CliSubstrate | null,
 ): Promise<{ success: boolean; error?: string; queued?: boolean }> {
@@ -66,12 +65,7 @@ export async function dispatchQuickSessionInput(
   return { success: response.success, error: response.error, queued };
 }
 
-export const useClaudePanel = (
-  panelId: string,
-  isActive: boolean
-) => {
-  const { theme } = useTheme();
-  
+export const useClaudePanel = (panelId: string) => {
   // Get the session associated with this panel
   // For now, we'll get the active session since panels are session-scoped
   // In the future, this could be refactored to store session association in panel metadata
@@ -97,151 +91,9 @@ export const useClaudePanel = (
 
   // States specific to Claude functionality
   const [input, setInput] = useState('');
-  const [isLoadingOutput, setIsLoadingOutput] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [outputLoadState, setOutputLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [gitCommands, setGitCommands] = useState<GitCommands | null>(null);
-  const [contextCompacted, setContextCompacted] = useState(false);
-  const [compactedContext, setCompactedContext] = useState<string | null>(null);
-  const [hasConversationHistory, setHasConversationHistory] = useState(false);
 
-  // Refs
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const loadingRef = useRef(false);
-  const loadingPanelIdRef = useRef<string | null>(null);
-  const isContinuingConversationRef = useRef(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const outputLoadTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Force reset stuck state
-  const forceResetLoadingState = useCallback(() => {
-    loadingRef.current = false;
-    loadingPanelIdRef.current = null;
-    setIsLoadingOutput(false);
-    setOutputLoadState('idle');
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    if (outputLoadTimeoutRef.current) {
-      clearTimeout(outputLoadTimeoutRef.current);
-      outputLoadTimeoutRef.current = null;
-    }
-  }, [panelId]);
-
-  // Load output content for the panel's associated session
-  const loadOutputContent = useCallback(async (sessionId: string, retryCount = 0) => {
-    
-    // Cancel any existing load request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    // Clear any pending timeout
-    if (outputLoadTimeoutRef.current) {
-      clearTimeout(outputLoadTimeoutRef.current);
-      outputLoadTimeoutRef.current = null;
-    }
-    
-    // Check if already loading this session for this panel
-    if (loadingRef.current && loadingPanelIdRef.current === panelId) {
-      return;
-    }
-    
-    // Check if session is still active
-    const currentActiveSession = useSessionStore.getState().getActiveSession();
-    if (!currentActiveSession || currentActiveSession.id !== sessionId) {
-      return;
-    }
-
-    // Set loading state
-    loadingRef.current = true;
-    loadingPanelIdRef.current = panelId;
-    setIsLoadingOutput(true);
-    setOutputLoadState('loading');
-    setLoadError(null);
-    
-    // Create new AbortController for this request
-    abortControllerRef.current = new AbortController();
-
-    try {
-      // Use panel-based API for Claude data
-      const response = await API.panels.getOutput(panelId);
-      if (!response.success) {
-        if (response.error && response.error.includes('not found')) {
-          loadingRef.current = false;
-          loadingPanelIdRef.current = null;
-          setIsLoadingOutput(false);
-          setOutputLoadState('idle');
-          return;
-        }
-        throw new Error(response.error || 'Failed to load output');
-      }
-      
-      const outputs = response.data || [];
-      
-      // Check if still the active session after async operation
-      const stillActiveSession = useSessionStore.getState().getActiveSession();
-      if (!stillActiveSession || stillActiveSession.id !== sessionId) {
-        loadingRef.current = false;
-        loadingPanelIdRef.current = null;
-        setIsLoadingOutput(false);
-        setOutputLoadState('idle');
-        return;
-      }
-      
-      // Set outputs in the session store
-      useSessionStore.getState().setSessionOutputs(sessionId, outputs);
-      
-      setOutputLoadState('loaded');
-      
-      // Reset continuing conversation flag after successfully loading output
-      if (isContinuingConversationRef.current) {
-        isContinuingConversationRef.current = false;
-      }
-      
-      setLoadError(null);
-    } catch (error: unknown) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        loadingRef.current = false;
-        loadingPanelIdRef.current = null;
-        setIsLoadingOutput(false);
-        setOutputLoadState('idle');
-        return;
-      }
-      
-      console.error(`[loadOutputContent] Error loading output for session ${sessionId} (panel ${panelId}):`, error);
-      setOutputLoadState('error');
-      
-      // Retry logic for new sessions only
-      const isNewSession = activeSession?.status === 'initializing';
-      const maxRetries = isNewSession ? 3 : 0;
-      
-      if (retryCount < maxRetries) {
-        const delay = 1000 * (retryCount + 1);
-        loadingRef.current = false;
-        loadingPanelIdRef.current = null;
-        setIsLoadingOutput(false);
-        outputLoadTimeoutRef.current = setTimeout(() => {
-          const currentActiveSession = useSessionStore.getState().getActiveSession();
-          if (currentActiveSession && currentActiveSession.id === sessionId) {
-            loadOutputContent(sessionId, retryCount + 1);
-          }
-        }, delay);
-      } else {
-        setLoadError(error instanceof Error ? error.message : 'Failed to load output content');
-      }
-    } finally {
-      // Always reset loading state
-      loadingRef.current = false;
-      loadingPanelIdRef.current = null;
-      setIsLoadingOutput(false);
-    }
-  }, [panelId, activeSession?.status]);
-
-  // Auto-resize textarea is now handled in ClaudeInputWithImages component
-  // Removed duplicate effect to prevent performance issues
 
   // Load git commands when session changes
   useEffect(() => {
@@ -260,35 +112,6 @@ export const useClaudePanel = (
     loadGitData();
   }, [activeSessionId]);
 
-  // Check if session has conversation history
-  useEffect(() => {
-    if (!activeSession) {
-      setHasConversationHistory(false);
-      return;
-    }
-    
-    const checkConversationHistory = async () => {
-      try {
-        // Use panel-based API for Claude conversation data
-        const response = await API.panels.getConversationMessages(panelId);
-        if (response.success && response.data) {
-          setHasConversationHistory((response.data as unknown[]).length > 0);
-        }
-      } catch (error) {
-        console.error('Failed to check conversation history:', error);
-        setHasConversationHistory(false);
-      }
-    };
-    checkConversationHistory();
-  }, [activeSession?.id]);
-
-  // Load output when panel becomes active and has an associated session
-  useEffect(() => {
-    if (isActive && activeSession && outputLoadState === 'idle') {
-      loadOutputContent(activeSession.id);
-    }
-  }, [isActive, activeSession?.id, outputLoadState, loadOutputContent, panelId]);
-
   // Dispatch a message to the panel. The composer owns the draft (it clears the
   // input INSTANTLY on submit and tracks a pending-send entry), so these handlers
   // no longer read/clear `input` and no longer restore it on failure — they take
@@ -304,16 +127,7 @@ export const useClaudePanel = (
     }
 
     let finalInput = text;
-    
-    // Check if we have compacted context to inject
-    if (contextCompacted && compactedContext) {
-      finalInput = `<session_context>\n${compactedContext}\n</session_context>\n\n${finalInput}`;
-      
-      // Clear the compacted context after using it
-      setContextCompacted(false);
-      setCompactedContext(null);
-    }
-    
+
     // Collect all attachments (text and images)
     const attachmentPaths = [];
     
@@ -374,20 +188,8 @@ export const useClaudePanel = (
   ): Promise<{ success: boolean; error?: string; queued?: boolean }> => {
     if (!text.trim() || !activeSession) return { success: false, error: 'Nothing to send' };
 
-    // Mark that we're continuing a conversation to prevent output reload
-    isContinuingConversationRef.current = true;
-
     let finalInput = text;
-    
-    // Check if we have compacted context to inject
-    if (contextCompacted && compactedContext) {
-      finalInput = `<session_context>\n${compactedContext}\n</session_context>\n\n${finalInput}`;
-      
-      // Clear the compacted context after using it
-      setContextCompacted(false);
-      setCompactedContext(null);
-    }
-    
+
     // Collect all attachments (text and images)
     const attachmentPaths = [];
     
@@ -435,81 +237,21 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    // Output will be loaded automatically when session status changes.
     return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt, pendingId, panelSubstrate);
-  };
-
-  const handleTerminalCommand = async () => {
-    if (!input.trim() || !activeSession) return;
-    const response = await API.sessions.runTerminalCommand(activeSession.id, input);
-    if (response.success) setInput('');
   };
 
   const handleStopSession = async () => {
     if (activeSession) await API.sessions.stop(activeSession.id);
   };
 
-  const handleCompactContext = async () => {
-    if (!activeSession) return;
-    
-    try {
-      
-      // Generate the compacted context
-      const response = await API.sessions.generateCompactedContext(activeSession.id);
-      
-      if (response.success && response.data) {
-        const summary = response.data.summary;
-        setCompactedContext(summary);
-        setContextCompacted(true);
-      } else {
-        console.error('[Context Compaction] Failed to compact context:', response.error);
-      }
-    } catch (error) {
-      console.error('[Context Compaction] Error during compaction:', error);
-    }
-  };
-
-  // Cleanup on unmount or panel change
-  useEffect(() => {
-    return () => {
-      // Cancel any pending operations
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-      if (outputLoadTimeoutRef.current) {
-        clearTimeout(outputLoadTimeoutRef.current);
-      }
-    };
-  }, [panelId]);
-  
   return {
-    // Session and panel info
     activeSession,
-    panelId,
-    isActive,
-    
-    // UI state
-    theme,
     input,
     setInput,
-    isLoadingOutput,
-    outputLoadState,
-    loadError,
     textareaRef,
-    contextCompacted,
-    compactedContext,
-    hasConversationHistory,
     gitCommands,
-    
-    // Actions
     handleSendInput,
     handleContinueConversation,
-    handleTerminalCommand,
     handleStopSession,
-    handleCompactContext,
-    
-    // Utilities
-    loadOutputContent,
-    forceResetLoadingState,
   };
 };

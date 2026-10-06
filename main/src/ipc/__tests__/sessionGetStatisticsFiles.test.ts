@@ -133,6 +133,8 @@ function makeServices(opts: {
       getSessionToolUsage: vi.fn(() => ({ tools: [], totalToolCalls: 0 })),
       getPromptMarkers: vi.fn(() => []),
       getConversationMessageCount: vi.fn(() => 0),
+      getPanelPromptMarkers: vi.fn(() => []),
+      getPanelConversationMessageCount: vi.fn(() => 0),
       getPanelSettings: vi.fn(() => ({})),
       getDb: vi.fn(() => fakeDb),
     },

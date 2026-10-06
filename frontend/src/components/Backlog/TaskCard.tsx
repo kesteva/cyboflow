@@ -108,9 +108,9 @@ interface TaskBodyProps {
  * The marker row (flow / review / done) — only renders when something applies.
  * Each flow pill sits on its OWN line (a long "agent · session" label was
  * overflowing the card when sharing a wrap row) and, when the run has a hosting
- * session, clicking it opens that session (SessionListItem's activate gesture:
- * setActiveSession + navigateToSessions, via getState() like ProjectDashboard
- * so this presentational row subscribes to nothing).
+ * session, clicking it opens that session (setActiveSession +
+ * navigateToSessions, via getState() so this presentational row
+ * subscribes to nothing).
  */
 function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | null {
   const hasAny = task.inFlow.length > 0 || task.awaitingReview || task.isDone;

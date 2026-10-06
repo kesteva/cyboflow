@@ -22,22 +22,7 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../panelManager', () => ({
   panelManager: { ensureDiffPanel: vi.fn(), getPanelsForSession: vi.fn().mockReturnValue([]) },
 }));
-vi.mock('../terminalSessionManager', () => ({
-  TerminalSessionManager: class {
-    on = vi.fn();
-    closeTerminalSession = vi.fn();
-  },
-}));
 vi.mock('../../ipc/logs', () => ({ addSessionLog: vi.fn(), cleanupSessionLogs: vi.fn() }));
-vi.mock('../scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    markClosing: vi.fn(),
-    isRunning: vi.fn().mockReturnValue(false),
-  },
-}));
-
 import { SessionManager } from '../sessionManager';
 
 type DbCtorArg = ConstructorParameters<typeof SessionManager>[0];
@@ -64,7 +49,6 @@ function dbRow(overrides: Record<string, unknown> = {}) {
 function managerFor(row: Record<string, unknown>): SessionManager {
   const db = {
     getAllSessions: vi.fn().mockReturnValue([row]),
-    getActiveProject: vi.fn().mockReturnValue(null),
   };
   return new SessionManager(db as unknown as DbCtorArg);
 }

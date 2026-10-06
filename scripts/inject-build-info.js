@@ -31,19 +31,10 @@ try {
   gitCommit = 'unknown';
 }
 
-// Check if this is a canary build
-const isCanaryBuild = process.env.CANARY_BUILD === 'true';
 // CYBOFLOW_BUILD_VERSION is the dev-release stamp (`<next-patch>-dev.<run>`);
 // configure-build.js feeds the same value to electron-builder's extraMetadata,
 // so buildInfo.version and app.getVersion() agree without touching package.json.
-let version = process.env.CYBOFLOW_BUILD_VERSION || packageJson.version;
-
-if (isCanaryBuild) {
-  // For canary builds, append -canary.{git-hash}
-  const shortHash = gitCommit.includes('(modified)') ? gitCommit.split(' ')[0] : gitCommit;
-  version = `${packageJson.version}-canary.${shortHash}`;
-  console.log(`Canary build detected, using version: ${version}`);
-}
+const version = process.env.CYBOFLOW_BUILD_VERSION || packageJson.version;
 
 // Create build info
 const buildInfo = {
@@ -54,15 +45,13 @@ const buildInfo = {
   nodeVersion: process.version,
   platform: process.platform,
   arch: process.arch,
-  isCanary: isCanaryBuild,
   // Which app variant this build is: 'stable' (default) or 'dev'. Surfaced in
   // the About dialog and used to confirm the right artifact was built.
   variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable',
   // Telemetry environment. Resolution:
   //   1. CYBOFLOW_BUILD_ENV ('stable' | 'dev' | 'local') — explicit override.
-  //      The release pipeline sets it (release:mac -> 'stable',
-  //      release:mac:dev -> 'dev'); set 'local' by hand for a throwaway build
-  //      that must not pollute release telemetry.
+  //      The Windows installer workflow sets it to the variant; set 'local'
+  //      by hand for a throwaway build that must not pollute release telemetry.
   //   2. Otherwise the build VARIANT: 'dev' for build:mac:dev*, else 'stable'.
   // Every packaged .dmg is distributable in practice, so it must report a
   // filterable environment. The old default ('local' unless the release

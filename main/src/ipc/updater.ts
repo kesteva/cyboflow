@@ -44,10 +44,6 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('version:get-info', () => {
     try {
-      console.log('🚀 [WORKTREE DEBUG] version:get-info called - NEW BUILD!');
-      console.log('🚀 [WORKTREE DEBUG] app.isPackaged:', app.isPackaged);
-      console.log('🚀 [WORKTREE DEBUG] process.cwd():', process.cwd());
-      
       let buildDate: string | undefined;
       let gitCommit: string | undefined;
       let buildTimestamp: number | undefined;
@@ -67,47 +63,40 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
             variant = buildInfo.variant === 'dev' ? 'dev' : 'stable';
           }
         } catch (err) {
-          console.log('Could not read build info:', err);
+          console.warn('Could not read build info:', err);
         }
       }
 
       // For development builds, try to get git commit hash dynamically
       if (!app.isPackaged) {
-        console.log('[Version Debug] Development mode detected, getting git info...');
         try {
           // gitExeFinder: a dev launch may still have git off the inherited PATH.
           const gitCommand = quoteForShellString(resolveGitCommand());
           const gitHash = commandExecutor.execSync(`${gitCommand} rev-parse --short HEAD`, {
             encoding: 'utf8',
-            cwd: process.cwd()
+            cwd: process.cwd(),
+            silent: true
           }).trim();
 
           // Check if the working directory is clean (no uncommitted changes)
           try {
-            interface ExtendedExecOptions {
-              encoding: 'utf8';
-              cwd: string;
-              silent?: boolean;
-            }
             commandExecutor.execSync(`${gitCommand} diff-index --quiet HEAD --`, {
               encoding: 'utf8',
               cwd: process.cwd(),
               silent: true
-            } as ExtendedExecOptions);
+            });
             gitCommit = gitHash;
           } catch {
             // Working directory has uncommitted changes
             gitCommit = `${gitHash} (modified)`;
           }
-          console.log('[Version Debug] Git commit:', gitCommit);
         } catch (err) {
-          console.log('Could not get git commit:', err);
+          console.warn('Could not get git commit:', err);
           gitCommit = 'unknown';
         }
 
         // Detect current worktree name for development builds only
         worktreeName = getCurrentWorktreeName(process.cwd());
-        console.log('[Version Debug] Worktree name:', worktreeName);
 
         // A renamed session is far more legible than its auto-generated
         // worktree slug, and the name only exists in the HOSTING instance's
@@ -118,7 +107,6 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
           if (hostSessionName && hostSessionName !== worktreeName) {
             sessionName = hostSessionName;
           }
-          console.log('[Version Debug] Host session name:', sessionName);
         }
       }
 
@@ -147,9 +135,6 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
       // Only include worktreeName in development builds and when defined
       if (!app.isPackaged && worktreeName) {
         responseData.worktreeName = worktreeName;
-        console.log('[Version Debug] Adding worktreeName to response:', worktreeName);
-      } else {
-        console.log('[Version Debug] Not adding worktreeName. isPackaged:', app.isPackaged, 'worktreeName:', worktreeName);
       }
 
       // Same dev-only gate as worktreeName: the session name is a dogfooding
@@ -158,7 +143,6 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         responseData.sessionName = sessionName;
       }
 
-      console.log('[Version Debug] Final response data:', responseData);
       return {
         success: true,
         data: responseData

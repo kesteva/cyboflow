@@ -108,7 +108,6 @@ beforeEach(() => {
     isEnabled: () => true,
     persistLogin: () => true,
     shortcutOverrides: () => undefined,
-    devMode: false,
     platform: 'mac',
     now: () => clock,
   });

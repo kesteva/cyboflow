@@ -1,13 +1,9 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
-import { BaseAIPanelHandler } from './baseAIPanelHandler';
 import { ClaudePanelManager } from '../services/panels/claude/claudePanelManager';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { panelManager } from '../services/panelManager';
-import { ClaudePanelState } from '../../../shared/types/panels';
-import type { SessionOutput } from '../database/models';
 import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import { isCliSubstrate, type CliSubstrate } from '../../../shared/types/substrate';
 import { DEFAULT_CODEX_MODEL, normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
@@ -19,8 +15,8 @@ import { providerForSession } from '../services/panelLane';
  * provider's family claims the value. Onboarding's Model step (step 3) can
  * persist a Codex catalog id into the GLOBAL `defaultLaunchModel` when Codex is
  * the chosen default runtime, and a per-panel setting can independently carry a
- * stale cross-provider id — either would otherwise flow straight into
- * ClaudePanelManager.startPanel, which is ALWAYS the Claude CLI.
+ * stale cross-provider id — either would otherwise surface as the panel's model
+ * even though it belongs to a different provider.
  *
  * The provider is a parameter because every provider's chat rides a
  * 'claude'-typed panel and therefore reads its model through THIS handler: a
@@ -48,414 +44,162 @@ function resolveQuickModelForProvider(provider: AgentProvider, candidate: unknow
   }
 }
 
-/**
- * The Claude-only arm, for `claude-panels:start` — that path is always the
- * Claude CLI regardless of what the panel's session says, so it keeps the
- * Claude floor unconditionally.
- */
-function resolveClaudeQuickModel(candidate: unknown): string {
-  return resolveQuickModelForProvider('claude', candidate) ?? DEFAULT_QUICK_MODEL;
-}
-
 let claudePanelManager: ClaudePanelManager;
 
-class ClaudePanelHandler extends BaseAIPanelHandler {
-  protected createPanelManager(): ClaudePanelManager {
-    const { sessionManager, claudeCodeManager, logger, configManager } = this.services;
-    return new ClaudePanelManager(
-      claudeCodeManager,
-      sessionManager,
-      logger,
-      configManager,
-      this.services.interactiveCliManager,
-      (panelId) => panelManager.getPanel(panelId)?.substrate,
-    );
+/**
+ * The provider owning a panel's session — the family its stored model is
+ * normalized against. Unknown panel / session (tests, a panel mid-delete)
+ * keeps the Claude floor, matching `providerForSession`'s own default.
+ */
+function providerForPanel(services: AppServices, panelId: string): AgentProvider {
+  const panel = panelManager.getPanel(panelId);
+  const dbSession = panel ? services.sessionManager.getDbSession(panel.sessionId) : undefined;
+  return providerForSession(dbSession);
+}
+
+/**
+ * Re-register the persisted Claude-typed panels with the freshly built manager
+ * (restoration from the database, so not user-initiated).
+ */
+function registerExistingClaudePanels(services: AppServices): void {
+  const { databaseService, logger } = services;
+  logger?.info('[Claude] Registering existing Claude panels from database...');
+  const claudePanels = databaseService.getActivePanels().filter((panel) => panel.type === 'claude');
+  for (const panel of claudePanels) {
+    try {
+      claudePanelManager.registerPanel(panel.id, panel.sessionId, undefined, false);
+      logger?.info(`[Claude] Registered existing panel ${panel.id} for session ${panel.sessionId}`);
+    } catch (error) {
+      logger?.error(`[Claude] Failed to register existing panel ${panel.id}: ${error}`);
+    }
   }
-
-  protected getInitialPanelState(): Partial<ClaudePanelState> {
-    return {
-      isInitialized: false,
-      claudeResumeId: undefined,
-      contextUsage: null
-    };
-  }
-
-  /**
-   * Apply Claude-specific default settings
-   */
-  /**
-   * The provider owning a panel's session — the family its stored model is
-   * normalized against. Unknown panel / session (tests, a panel mid-delete)
-   * keeps the Claude floor, matching `providerForSession`'s own default.
-   */
-  private providerForPanel(panelId: string | undefined): AgentProvider {
-    if (!panelId) return 'claude';
-    const panel = panelManager.getPanel(panelId);
-    const dbSession = panel ? this.services.sessionManager.getDbSession(panel.sessionId) : undefined;
-    return providerForSession(dbSession);
-  }
-
-  protected applySettingsDefaults(
-    settings: Record<string, unknown>,
-    panelId?: string,
-  ): Record<string, unknown> {
-    const { configManager } = this.services;
-    const modelCandidate = settings.model || configManager.getDefaultLaunchModel('quick');
-    return {
-      systemPrompt: settings.systemPrompt || null,
-      maxTokens: settings.maxTokens || 4096,
-      temperature: settings.temperature || 0.7,
-      ...settings,
-      // AFTER the spread: `settings.model` (when present) would otherwise win
-      // back over the normalized value below, defeating it for exactly the
-      // case it exists to guard (a stale/cross-provider id already stored in
-      // panel settings).
-      model: resolveQuickModelForProvider(this.providerForPanel(panelId), modelCandidate),
-    };
-  }
-
-  protected registerCustomHandlers(): void {
-    const { sessionManager, databaseService, configManager, logger } = this.services;
-
-    // Start Claude in a panel
-    this.ipcMain.handle('claude-panels:start', async (_event, panelId: string, prompt: string, model?: string) => {
-      try {
-        console.log('[IPC] claude-panels:start called for panelId:', panelId);
-
-        // Get the panel to verify it exists
-        const panel = panelManager.getPanel(panelId);
-        if (!panel) {
-          return { success: false, error: 'Panel not found' };
-        }
-
-        // Get session details
-        const session = sessionManager.getSession(panel.sessionId);
-        if (!session) {
-          return { success: false, error: 'Session not found' };
-        }
-
-        // Get model from panel settings if not provided
-        let modelToUse = model;
-        if (!modelToUse) {
-          const settings = databaseService.getPanelSettings(panelId);
-          modelToUse = (typeof settings?.model === 'string' ? settings.model : null) || configManager.getDefaultLaunchModel('quick') || 'auto';
-        }
-        // Normalize the fully-resolved candidate to the Claude family — see
-        // resolveClaudeQuickModel's doc comment. Applied last so an explicit
-        // arg, a stored panel setting, and the global default are all guarded
-        // the same way before reaching ClaudePanelManager.startPanel.
-        modelToUse = resolveClaudeQuickModel(modelToUse);
-
-        // Start Claude via the panel manager
-        await (this.panelManager as ClaudePanelManager).startPanel(
-          panelId, 
-          session.worktreePath, 
-          prompt, 
-          undefined, // permissionMode 
-          modelToUse
-        );
-        
-        // Update panel state
-        await this.handlePanelStart(panelId, prompt, {
-          model: modelToUse
-        });
-
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to start Claude panel:', error);
-        return { success: false, error: 'Failed to start Claude panel' };
-      }
-    });
-
-    // Continue conversation in a panel
-    this.ipcMain.handle('claude-panels:continue', async (_event, panelId: string, prompt?: string, model?: string) => {
-      try {
-        console.log('[IPC] claude-panels:continue called for panelId:', panelId);
-
-        // Get the panel to verify it exists
-        const panel = panelManager.getPanel(panelId);
-        if (!panel) {
-          return { success: false, error: 'Panel not found' };
-        }
-
-        // Get session details
-        const session = sessionManager.getSession(panel.sessionId);
-        if (!session) {
-          return { success: false, error: 'Session not found' };
-        }
-
-        // Get conversation history
-        const conversationHistory = sessionManager.getPanelConversationMessages ? 
-          sessionManager.getPanelConversationMessages(panelId) :
-          sessionManager.getConversationMessages(panel.sessionId);
-
-        // Continue via the panel manager
-        await (this.panelManager as ClaudePanelManager).continuePanel(
-          panelId, 
-          session.worktreePath, 
-          prompt || '', 
-          conversationHistory, 
-          model
-        );
-        
-        // Update panel state
-        await this.handlePanelContinue(panelId, prompt);
-
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to continue Claude panel:', error);
-        return { success: false, error: 'Failed to continue Claude panel' };
-      }
-    });
-
-    // Get Claude panel model settings (backward compatibility - delegates to get-settings)
-    this.ipcMain.handle('claude-panels:get-model', async (_event, panelId: string) => {
-      try {
-        console.log('[IPC] claude-panels:get-model called for panelId:', panelId);
-        
-        const settings = databaseService.getPanelSettings(panelId);
-        const settingsWithDefaults = this.applySettingsDefaults(settings, panelId);
-        
-        return { success: true, data: settingsWithDefaults.model };
-      } catch (error) {
-        console.error('Failed to get Claude panel model:', error);
-        return { success: false, error: 'Failed to get Claude panel model' };
-      }
-    });
-
-    // Set Claude panel model settings (backward compatibility - delegates to set-settings)
-    this.ipcMain.handle('claude-panels:set-model', async (_event, panelId: string, model: string) => {
-      try {
-        console.log('[IPC] claude-panels:set-model called for panelId:', panelId, 'model:', model);
-        
-        databaseService.updatePanelSettings(panelId, { model });
-
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to set Claude panel model:', error);
-        return { success: false, error: 'Failed to set Claude panel model' };
-      }
-    });
-
-    // Set the per-panel fast-mode opt-in (quick-session launch toggle). Persisted
-    // in tool_panels.settings and read by sessions:input on every respawn, where
-    // it threads into buildSdkOptions' `settings.fastMode`. Default off — fast mode
-    // is the premium, Opus-only research preview; see claudeCodeManager.
-    this.ipcMain.handle('claude-panels:set-fast-mode', async (_event, panelId: string, fastMode: boolean) => {
-      try {
-        console.log('[IPC] claude-panels:set-fast-mode called for panelId:', panelId, 'fastMode:', fastMode);
-
-        databaseService.updatePanelSettings(panelId, { fastMode: fastMode === true });
-
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to set Claude panel fast mode:', error);
-        return { success: false, error: 'Failed to set Claude panel fast mode' };
-      }
-    });
-
-    this.ipcMain.handle('claude-panels:get-substrate', async (_event, panelId: string) => {
-      try {
-        const panel = panelManager.getPanel(panelId);
-        return { success: true, data: panel?.substrate ?? null };
-      } catch (error) {
-        console.error('Failed to get Claude panel substrate:', error);
-        return { success: false, error: 'Failed to get Claude panel substrate' };
-      }
-    });
-
-    this.ipcMain.handle('claude-panels:set-substrate', async (_event, panelId: string, substrate: CliSubstrate | null) => {
-      try {
-        if (substrate !== null && !isCliSubstrate(substrate)) {
-          return { success: false, error: 'Invalid panel substrate' };
-        }
-        const panel = panelManager.getPanel(panelId);
-        if (!panel || panel.type !== 'claude') {
-          return { success: false, error: 'Claude panel not found' };
-        }
-        await panelManager.updatePanel(panelId, { substrate });
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to set Claude panel substrate:', error);
-        return { success: false, error: 'Failed to set Claude panel substrate' };
-      }
-    });
-
-    // Read the per-panel fast-mode opt-in so the composer toggle can reflect the
-    // launch choice. Mirrors get-model; defaults to false when never set.
-    this.ipcMain.handle('claude-panels:get-fast-mode', async (_event, panelId: string) => {
-      try {
-        const settings = databaseService.getPanelSettings(panelId);
-        const settingsWithDefaults = this.applySettingsDefaults(settings ?? {}, panelId);
-        return { success: true, data: settingsWithDefaults.fastMode === true };
-      } catch (error) {
-        console.error('Failed to get Claude panel fast mode:', error);
-        return { success: false, error: 'Failed to get Claude panel fast mode' };
-      }
-    });
-
-    // Latest CLI-reported fast-mode state for the panel (null until a turn has
-    // reported). The composer combines it with the persisted toggle to warn when
-    // a requested opt-in didn't actually engage (entitlement / cooldown). Live
-    // updates arrive over the 'fast-mode-state' push (events.ts); this getter is
-    // the mount-time snapshot. Only the real SDK manager tracks it — the demo /
-    // PTY managers report null.
-    this.ipcMain.handle('claude-panels:get-fast-mode-state', async (_event, panelId: string) => {
-      try {
-        const { claudeCodeManager } = this.services;
-        const report =
-          claudeCodeManager instanceof ClaudeCodeManager ? claudeCodeManager.getFastModeReport(panelId) : null;
-        return { success: true, data: report };
-      } catch (error) {
-        console.error('Failed to get Claude panel fast-mode state:', error);
-        return { success: false, error: 'Failed to get Claude panel fast-mode state' };
-      }
-    });
-
-    // Set the per-panel reasoning-effort selection (IDEA-029; wizard select / the
-    // in-composer EffortPill). Persisted in tool_panels.settings and read by
-    // sessions:input / panels:continue on every respawn, where it threads into
-    // ClaudeSpawnOptions.reasoningEffort (→ buildSdkOptions' `sdkOptions.effort`,
-    // or the Codex turn options). Mirrors claude-panels:set-fast-mode. `null`
-    // clears the persisted selection back to the provider default.
-    this.ipcMain.handle('claude-panels:set-effort', async (_event, panelId: string, effort: ReasoningEffort | null) => {
-      try {
-        console.log('[IPC] claude-panels:set-effort called for panelId:', panelId, 'effort:', effort);
-
-        if (effort !== null && !isAnyEffortLevel(effort)) {
-          return { success: false, error: `Invalid reasoning effort: ${String(effort)}` };
-        }
-
-        databaseService.updatePanelSettings(panelId, { reasoningEffort: effort ?? undefined });
-
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to set Claude panel reasoning effort:', error);
-        return { success: false, error: 'Failed to set Claude panel reasoning effort' };
-      }
-    });
-
-    // Read the per-panel reasoning-effort selection so the composer pill can
-    // reflect the launch/last-set choice. Mirrors get-fast-mode; null when never set.
-    this.ipcMain.handle('claude-panels:get-effort', async (_event, panelId: string) => {
-      try {
-        const settings = databaseService.getPanelSettings(panelId);
-        const stored = settings?.reasoningEffort;
-        return { success: true, data: isAnyEffortLevel(stored) ? stored : null };
-      } catch (error) {
-        console.error('Failed to get Claude panel reasoning effort:', error);
-        return { success: false, error: 'Failed to get Claude panel reasoning effort' };
-      }
-    });
-
-    // Generate compacted context for a Claude panel
-    this.ipcMain.handle('claude-panels:generate-compacted-context', async (_event, panelId: string) => {
-      try {
-        console.log('[IPC] claude-panels:generate-compacted-context called for panelId:', panelId);
-
-        // Get the panel to find the session
-        const panel = panelManager.getPanel(panelId);
-        if (!panel) {
-          return { success: false, error: 'Panel not found' };
-        }
-
-        // Implement the same logic as the session handler - compaction is session-wide
-        const session = await sessionManager.getSession(panel.sessionId);
-        if (!session) {
-          return { success: false, error: 'Session not found' };
-        }
-
-        // Get the database session for the compactor (it expects the database model)
-        const dbSession = databaseService.getSession(panel.sessionId);
-        if (!dbSession) {
-          return { success: false, error: 'Session not found in database' };
-        }
-
-        // Use panel-based methods for Claude data
-        const conversationMessages = sessionManager.getPanelConversationMessages ? 
-          await sessionManager.getPanelConversationMessages(panelId) :
-          await sessionManager.getConversationMessages(panel.sessionId);
-        const promptMarkers = databaseService.getPanelPromptMarkers ? 
-          databaseService.getPanelPromptMarkers(panelId) :
-          databaseService.getPromptMarkers(panel.sessionId);
-        const executionDiffs = databaseService.getPanelExecutionDiffs ? 
-          databaseService.getPanelExecutionDiffs(panelId) :
-          databaseService.getExecutionDiffs(panel.sessionId);
-        const sessionOutputs = sessionManager.getPanelOutputs ? 
-          await sessionManager.getPanelOutputs(panelId) :
-          await sessionManager.getSessionOutputs(panel.sessionId);
-        
-        // Import the compactor utility
-        const { ProgrammaticCompactor } = await import('../utils/contextCompactor');
-        const compactor = new ProgrammaticCompactor(databaseService);
-        
-        // Generate the compacted summary
-        const summary = await compactor.generateSummary(panel.sessionId, {
-          session: dbSession,
-          conversationMessages,
-          promptMarkers,
-          executionDiffs,
-          sessionOutputs: sessionOutputs
-        });
-        
-        // Set flag to skip --resume on the next execution
-        console.log('[IPC] Setting skip_continue_next flag to true for session:', panel.sessionId);
-        await sessionManager.updateSession(panel.sessionId, { skip_continue_next: true });
-        
-        // Verify the flag was set
-        const updatedSession = databaseService.getSession(panel.sessionId);
-        console.log('[IPC] Verified skip_continue_next flag after update:', {
-          raw_value: updatedSession?.skip_continue_next,
-          type: typeof updatedSession?.skip_continue_next,
-          is_truthy: !!updatedSession?.skip_continue_next
-        });
-        console.log('[IPC] Generated compacted context summary and set skip_continue_next flag');
-        
-        // Add a system message to the session outputs so it appears in rich output view
-        const contextCompactionMessage = {
-          type: 'system',
-          subtype: 'context_compacted',
-          timestamp: new Date().toISOString(),
-          summary: summary,
-          message: 'Context has been compacted. You can continue chatting - your next message will automatically include the context summary above.'
-        };
-        
-        // Add context compaction message using panel-based method
-        if (sessionManager.addPanelOutput) {
-          await sessionManager.addPanelOutput(panelId, {
-            type: 'json',
-            data: contextCompactionMessage,
-            timestamp: new Date()
-          });
-        } else {
-          await sessionManager.addSessionOutput(panel.sessionId, {
-            type: 'json',
-            data: contextCompactionMessage,
-            timestamp: new Date()
-          });
-        }
-        
-        return { success: true, data: { summary } };
-      } catch (error) {
-        console.error('Failed to generate compacted context for Claude panel:', error);
-        return { success: false, error: 'Failed to generate compacted context for Claude panel' };
-      }
-    });
-  }
+  logger?.info(`[Claude] Registered ${claudePanels.length} existing panels`);
 }
 
 export function registerClaudePanelHandlers(ipcMain: IpcMain, services: AppServices): void {
-  // DB injection now happens at construction time via cliManagerFactory.createManager()
+  const { sessionManager, claudeCodeManager, databaseService, configManager, logger } = services;
+
+  // DB injection happens at construction time via cliManagerFactory.createManager()
   // in main/src/index.ts (additionalOptions.db). No setter call required here.
-  const handler = new ClaudePanelHandler(ipcMain, services, {
-    panelType: 'claude',
-    panelTypeName: 'Claude',
-    ipcPrefix: 'claude-panels',
-    defaultTitle: 'Claude'
+  claudePanelManager = new ClaudePanelManager(
+    claudeCodeManager,
+    sessionManager,
+    logger,
+    configManager,
+    services.interactiveCliManager,
+    (panelId) => panelManager.getPanel(panelId)?.substrate,
+  );
+  registerExistingClaudePanels(services);
+
+  // The panel's model, normalized to the family of the provider that owns the
+  // panel's session (see resolveQuickModelForProvider), falling back to the
+  // global quick-launch default when the panel has none stored.
+  ipcMain.handle('claude-panels:get-model', async (_event, panelId: string) => {
+    try {
+      const settings = databaseService.getPanelSettings(panelId);
+      const modelCandidate = settings.model || configManager.getDefaultLaunchModel('quick');
+      return { success: true, data: resolveQuickModelForProvider(providerForPanel(services, panelId), modelCandidate) };
+    } catch (error) {
+      console.error('Failed to get Claude panel model:', error);
+      return { success: false, error: 'Failed to get Claude panel model' };
+    }
   });
 
-  // Export the manager for use by other modules
-  claudePanelManager = handler['panelManager'] as ClaudePanelManager;
+  // Persist the panel's model selection in tool_panels.settings.
+  ipcMain.handle('claude-panels:set-model', async (_event, panelId: string, model: string) => {
+    try {
+      console.log('[IPC] claude-panels:set-model called for panelId:', panelId, 'model:', model);
+      
+      databaseService.updatePanelSettings(panelId, { model });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to set Claude panel model:', error);
+      return { success: false, error: 'Failed to set Claude panel model' };
+    }
+  });
+
+  // Set the per-panel fast-mode opt-in (quick-session launch toggle). Persisted
+  // in tool_panels.settings and read by sessions:input on every respawn, where
+  // it threads into buildSdkOptions' `settings.fastMode`. Default off — fast mode
+  // is the premium, Opus-only research preview; see claudeCodeManager.
+  ipcMain.handle('claude-panels:set-fast-mode', async (_event, panelId: string, fastMode: boolean) => {
+    try {
+      console.log('[IPC] claude-panels:set-fast-mode called for panelId:', panelId, 'fastMode:', fastMode);
+
+      databaseService.updatePanelSettings(panelId, { fastMode: fastMode === true });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to set Claude panel fast mode:', error);
+      return { success: false, error: 'Failed to set Claude panel fast mode' };
+    }
+  });
+
+  // Read the per-panel fast-mode opt-in so the composer toggle can reflect the
+  // launch choice. Mirrors get-model; defaults to false when never set.
+  ipcMain.handle('claude-panels:get-fast-mode', async (_event, panelId: string) => {
+    try {
+      const settings = databaseService.getPanelSettings(panelId);
+      return { success: true, data: settings?.fastMode === true };
+    } catch (error) {
+      console.error('Failed to get Claude panel fast mode:', error);
+      return { success: false, error: 'Failed to get Claude panel fast mode' };
+    }
+  });
+
+  // Latest CLI-reported fast-mode state for the panel (null until a turn has
+  // reported). The composer combines it with the persisted toggle to warn when
+  // a requested opt-in didn't actually engage (entitlement / cooldown). Live
+  // updates arrive over the 'fast-mode-state' push (events.ts); this getter is
+  // the mount-time snapshot. Only the real SDK manager tracks it — the demo /
+  // PTY managers report null.
+  ipcMain.handle('claude-panels:get-fast-mode-state', async (_event, panelId: string) => {
+    try {
+      const report =
+        claudeCodeManager instanceof ClaudeCodeManager ? claudeCodeManager.getFastModeReport(panelId) : null;
+      return { success: true, data: report };
+    } catch (error) {
+      console.error('Failed to get Claude panel fast-mode state:', error);
+      return { success: false, error: 'Failed to get Claude panel fast-mode state' };
+    }
+  });
+
+  // Set the per-panel reasoning-effort selection (IDEA-029; wizard select / the
+  // in-composer EffortPill). Persisted in tool_panels.settings and read by
+  // sessions:input / panels:continue on every respawn, where it threads into
+  // ClaudeSpawnOptions.reasoningEffort (→ buildSdkOptions' `sdkOptions.effort`,
+  // or the Codex turn options). Mirrors claude-panels:set-fast-mode. `null`
+  // clears the persisted selection back to the provider default.
+  ipcMain.handle('claude-panels:set-effort', async (_event, panelId: string, effort: ReasoningEffort | null) => {
+    try {
+      console.log('[IPC] claude-panels:set-effort called for panelId:', panelId, 'effort:', effort);
+
+      if (effort !== null && !isAnyEffortLevel(effort)) {
+        return { success: false, error: `Invalid reasoning effort: ${String(effort)}` };
+      }
+
+      databaseService.updatePanelSettings(panelId, { reasoningEffort: effort ?? undefined });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to set Claude panel reasoning effort:', error);
+      return { success: false, error: 'Failed to set Claude panel reasoning effort' };
+    }
+  });
+
+  // Read the per-panel reasoning-effort selection so the composer pill can
+  // reflect the launch/last-set choice. Mirrors get-fast-mode; null when never set.
+  ipcMain.handle('claude-panels:get-effort', async (_event, panelId: string) => {
+    try {
+      const settings = databaseService.getPanelSettings(panelId);
+      const stored = settings?.reasoningEffort;
+      return { success: true, data: isAnyEffortLevel(stored) ? stored : null };
+    } catch (error) {
+      console.error('Failed to get Claude panel reasoning effort:', error);
+      return { success: false, error: 'Failed to get Claude panel reasoning effort' };
+    }
+  });
 }
 
 // Export the manager instance for use by other modules

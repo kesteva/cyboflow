@@ -28,9 +28,9 @@ backups/
 
 `raw_events` is roughly 80% of `sessions.db`. Copying it into all seven retained
 dailies is what made the backups directory an order of magnitude larger than the
-database it protects. It is also **not** disposable data: the `messages` table is
-empty by design, and `raw_events` is the source of truth for reconstructed chat
-history, the context-usage view, the run inspector, and Insights.
+database it protects. It is also **not** disposable data: `raw_events` is the
+source of truth for reconstructed chat history (no separate messages table
+exists), the context-usage view, the run inspector, and Insights.
 
 So it is stored **once**. The table is append-only with an `AUTOINCREMENT` id, so
 each daily pass appends the rows above the previous high-water mark to a new

@@ -96,25 +96,21 @@ function makeHarness(initialOutputs: SessionOutput[]) {
     sessionManager: {
       on: vi.fn(),
       getPanelOutputs,
-      // Skip the unrelated post-exit git summary branch.
+      setSessionExitCode: vi.fn().mockResolvedValue(undefined),
+      // Skip the unrelated session-status branch.
       getSession: vi.fn(() => null),
     },
-    executionTracker: {},
-    runCommandManager: { on: vi.fn() },
-    gitDiffManager: {},
+    executionTracker: {
+      isTracking: vi.fn(() => false),
+    },
     gitStatusManager: {
-      on: vi.fn(),
       refreshSessionGitStatus,
     },
-    worktreeManager: {},
     databaseService: {},
   } as unknown as AppServices;
 
   setupEventListeners(services, () => null);
 
-  // setupEventListeners registers the generic lifecycle listener first and the
-  // quick-session context refresh listener second. Drive the latter directly so
-  // this test stays focused on the hidden-probe regression.
   const exitListener = listeners.get('exit')?.at(-1) as ExitListener | undefined;
   if (!exitListener) {
     throw new Error('Expected the Claude exit listener to be registered');
@@ -170,7 +166,8 @@ describe('Claude exit context refresh', () => {
     await harness.exitListener({ panelId, sessionId, exitCode: 0, signal: '' });
 
     expect(harness.getPanelOutputs).toHaveBeenCalledWith(panelId, 200);
-    expect(updatePanelMock).toHaveBeenCalledTimes(1);
+    // One panel-status write plus one context-usage write per exit.
+    expect(updatePanelMock).toHaveBeenCalledTimes(2);
     expect(panel.state.customState).toMatchObject({
       permissionMode: 'approve',
       panelStatus: 'stopped',
@@ -190,7 +187,7 @@ describe('Claude exit context refresh', () => {
     await Promise.all([firstExit, queuedExit]);
 
     expect(harness.continuePanel).not.toHaveBeenCalled();
-    expect(updatePanelMock).toHaveBeenCalledTimes(2);
+    expect(updatePanelMock).toHaveBeenCalledTimes(4);
     expect(panel.state.customState).toMatchObject({
       permissionMode: 'approve',
       panelStatus: 'stopped',

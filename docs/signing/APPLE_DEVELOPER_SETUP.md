@@ -328,7 +328,7 @@ export CSC_KEY_PASSWORD="<passphrase>"
 
 ### Minimal signed build invocation
 
-> **Per-arch, not universal.** `build:mac:universal` currently fails to merge
+> **Per-arch, not universal.** A universal build cannot merge
 > the bundled `claude`/`codex` binaries — see
 > [`../RELEASE-RUNBOOK.md`](../RELEASE-RUNBOOK.md) ("Why per-arch, not
 > universal"). Build each arch separately; a release needs both.
@@ -391,7 +391,7 @@ table under "Build-Time Environment Variables"); `package.json` is the pristine
 source and is never rewritten.
 
 **Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:arm64`
-/ `pnpm run build:mac:x64` (or another per-arch `build:mac:*` script — the universal `build:mac` / `release:mac` variants currently fail).
+/ `pnpm run build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` runs both arches in sequence).
 Skipping the npm script skips `configure-build.js`, leaving the signed/unsigned
 posture determined by whatever is committed in `package.json` rather than by
 the env vars in your shell.
@@ -553,7 +553,7 @@ present at build time are what actually drive the credentials and notarization
 posture. A contributor invoking `electron-builder` directly (bypassing the npm
 `build:mac:*` scripts) will not get configure-build.js's rewrite and may get
 unexpected behavior. Always use `pnpm run build:mac:arm64` / `pnpm run
-build:mac:x64` (or another per-arch `build:mac:*` script — the universal `build:mac` / `release:mac` variants currently fail). See the
+build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` runs both arches in sequence). See the
 "configure-build.js contract" subsection under Build-Time Environment
 Variables for the full field list.
 

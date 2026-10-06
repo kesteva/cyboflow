@@ -47,7 +47,7 @@ import type { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, WorkflowRegistryLike } from '../orchestrator/runExecutor';
 import type { LoggerLike } from '../orchestrator/types';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
-import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../shared/types/cliSpawn';
 import type { WorkflowRunRow } from '../../../shared/types/workflows';
 import { isPtyLane, type PanelLane } from './panelLane';
 import {

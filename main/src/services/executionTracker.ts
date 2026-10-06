@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import type { Logger } from '../utils/logger';
 import type { SessionManager } from './sessionManager';
 import { GitDiffManager, type GitDiffResult } from './gitDiffManager';
-import type { CreateExecutionDiffData, ExecutionDiff } from '../database/models';
+import type { CreateExecutionDiffData } from '../database/models';
 import { runGitAsync } from '../utils/runGit';
 
 interface ExecutionContext {
@@ -172,65 +172,5 @@ export class ExecutionTracker extends EventEmitter {
    */
   isTracking(sessionId: string): boolean {
     return this.activeExecutions.has(sessionId);
-  }
-
-  /**
-   * Get execution context for a session
-   */
-  getExecutionContext(sessionId: string): ExecutionContext | undefined {
-    return this.activeExecutions.get(sessionId);
-  }
-
-  /**
-   * Get combined diff for multiple executions
-   */
-  async getCombinedDiff(sessionId: string, executionIds?: number[]): Promise<GitDiffResult> {
-    const executions = await this.sessionManager.getExecutionDiffs(sessionId);
-    
-    // Commented out verbose logging
-    // console.log(`[ExecutionTracker] getCombinedDiff for session ${sessionId}, found ${executions.length} executions`);
-    
-    let filteredExecutions = executions;
-    if (executionIds && executionIds.length > 0) {
-      filteredExecutions = executions.filter((exec: ExecutionDiff) => executionIds.includes(exec.id));
-      // console.log(`[ExecutionTracker] Filtered to ${filteredExecutions.length} executions`);
-    }
-    
-    const diffs: GitDiffResult[] = filteredExecutions
-      .filter((exec: ExecutionDiff) => exec.git_diff) // Only include executions with actual diffs
-      .map((exec: ExecutionDiff) => ({
-        diff: exec.git_diff!,
-        stats: {
-          additions: exec.stats_additions,
-          deletions: exec.stats_deletions,
-          filesChanged: exec.stats_files_changed
-        },
-        changedFiles: exec.files_changed || [],
-        beforeHash: exec.before_commit_hash,
-        afterHash: exec.after_commit_hash
-      }));
-    
-    // console.log(`[ExecutionTracker] Found ${diffs.length} diffs to combine`);
-    
-    return this.gitDiffManager.combineDiffs(diffs);
-  }
-
-  async getExecutionDiffs(sessionId: string): Promise<ExecutionDiff[]> {
-    const diffs = await this.sessionManager.getExecutionDiffs(sessionId);
-    // Commented out verbose logging
-    // console.log(`[ExecutionTracker] getExecutionDiffs returned ${diffs.length} diffs for session ${sessionId}`);
-    // if (diffs.length > 0) {
-    //   console.log(`[ExecutionTracker] First diff:`, {
-    //     id: diffs[0].id,
-    //     hasGitDiff: !!diffs[0].git_diff,
-    //     gitDiffLength: diffs[0].git_diff?.length || 0,
-    //     stats: {
-    //       additions: diffs[0].stats_additions,
-    //       deletions: diffs[0].stats_deletions,
-    //       filesChanged: diffs[0].stats_files_changed
-    //     }
-    //   });
-    // }
-    return diffs;
   }
 }

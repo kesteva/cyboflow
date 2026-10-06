@@ -120,18 +120,3 @@ export const Switch = forwardRef<
 });
 
 Switch.displayName = 'Switch';
-
-// Compact Switch variant for inline use
-export const InlineSwitch = forwardRef<
-  React.ElementRef<typeof SwitchPrimitive.Root>,
-  Omit<SwitchProps, 'size'>
->(({ className, ...props }, ref) => (
-  <Switch 
-    ref={ref} 
-    size="sm" 
-    className={cn('inline-flex', className)} 
-    {...props} 
-  />
-));
-
-InlineSwitch.displayName = 'InlineSwitch';

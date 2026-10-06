@@ -123,7 +123,7 @@ describe('parseFileHunks', () => {
   });
 
   it('findFileDiff locates a file by new path and by old path (rename/delete)', () => {
-    // Combined exactly as production does: combineDiffs joins file blocks with '\n\n'.
+    // File blocks joined with a blank-line separator ('\n\n').
     const combined = [MODIFY, RENAME, DELETE].join('\n\n');
     expect(findFileDiff(combined, 'src/a.ts')?.type).toBe('modified');
     expect(findFileDiff(combined, 'new/name.ts')?.type).toBe('renamed');

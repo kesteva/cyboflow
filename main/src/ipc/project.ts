@@ -1,65 +1,13 @@
-import { IpcMain, dialog } from 'electron';
+import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import type { CreateProjectRequest, UpdateProjectRequest } from '../../../frontend/src/types/project';
-import type { Project } from '../database/models';
-import type { DatabaseService } from '../database/database';
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
+import { logsManager } from '../services/panels/logPanel/logsManager';
 import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import { makeLoggerLike } from '../orchestrator/loggerAdapter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
 import { seedDemoInsightsHistory } from '../services/demo/demoInsightsSeed';
-import { projectSettingsContainAllowRules } from '../orchestrator/permissionRules';
-
-/**
- * One-time per-project trust prompt for repo-supplied permission ALLOW rules
- * (migration 127). Shown at project activation/creation, never more
- * than once — `permission_trust` is terminal once set, either answer. Skips
- * entirely when the project's `.claude/settings*` carries no `allow` rules,
- * since there is nothing to decide trust over.
- *
- * Fire-and-forget from the caller (not awaited): the dialog must not block
- * `projects:activate` / `projects:create` from returning to the renderer.
- * Fail-soft — any error here must never fail activation/creation.
- */
-async function maybePromptPermissionTrust(
-  databaseService: DatabaseService,
-  getMainWindow: AppServices['getMainWindow'],
-  project: Project | undefined,
-): Promise<void> {
-  if (!project) return;
-  if (project.permission_trust != null) return; // already decided ('trusted' | 'untrusted')
-
-  try {
-    if (!projectSettingsContainAllowRules(project.path)) return; // nothing to trust
-
-    const mainWindow = getMainWindow();
-    const options: Electron.MessageBoxOptions = {
-      type: 'question',
-      title: 'Trust project permission rules?',
-      message: `"${project.name}" ships permission allow rules`,
-      detail:
-        `This project's .claude/settings.json (or settings.local.json) contains ` +
-        `permission "allow" rules. By default cyboflow only honors allow rules from your ` +
-        `personal ~/.claude/settings.json — a repo cannot grant itself auto-approval.\n\n` +
-        `Trusting this project lets commands matching ITS allow list run without an approval ` +
-        `prompt in sessions of this project, same as if they were in your personal settings. ` +
-        `Only do this for repos you trust.`,
-      buttons: ['Trust This Project', "Don't Trust"],
-      defaultId: 1, // "Don't Trust" — the safe choice, including on Escape/close.
-      cancelId: 1,
-      noLink: true,
-    };
-    const result = mainWindow
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options);
-
-    const permission_trust: NonNullable<Project['permission_trust']> = result.response === 0 ? 'trusted' : 'untrusted';
-    databaseService.updateProject(project.id, { permission_trust });
-  } catch (error) {
-    console.error('[Main] Permission-trust prompt failed (continuing):', error);
-  }
-}
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -77,9 +25,6 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 
       // Mark as closing
       scriptExecutionTracker.markClosing('project', projectIdToStop);
-
-      const { panelManager } = require('../services/panelManager');
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
 
       const panels = await panelManager.getPanelsForSession(runningScript.sessionId);
       const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
@@ -134,7 +79,7 @@ async function isEstablishedRepo(projectPath: string): Promise<boolean> {
 }
 
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow, getMainWindow } = services;
+  const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow } = services;
   // (demo seeding below reads services.configManager directly)
 
   ipcMain.handle('projects:get-all', async () => {
@@ -147,16 +92,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to get projects:', error);
       return { success: false, error: 'Failed to get projects' };
-    }
-  });
-
-  ipcMain.handle('projects:get-active', async () => {
-    try {
-      const activeProject = sessionManager.getActiveProject();
-      return { success: true, data: activeProject };
-    } catch (error) {
-      console.error('Failed to get active project:', error);
-      return { success: false, error: 'Failed to get active project' };
     }
   });
 
@@ -184,10 +119,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         console.log('[Main] Directory is not a git repository, initializing...');
       }
 
-      // The detected default branch, persisted at create time. Never trust
-      // projectData.mainBranch — always derive it from the on-disk repo.
-      let mainBranch: string | undefined;
-
       // Initialize git if needed
       if (!isGitRepo) {
         try {
@@ -204,20 +135,9 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           // Create initial commit
           nodeExecSync(`cd "${projectData.path}" && git commit -m "Initial commit" --allow-empty`, { encoding: 'utf-8', windowsHide: true });
           console.log('[Main] Created initial empty commit');
-
-          // git-init path deterministically checks out 'main' above.
-          mainBranch = branchName;
         } catch (error) {
           console.error('[Main] Failed to initialize git repository:', error);
           // Continue anyway - let the user handle git setup manually if needed
-        }
-      } else {
-        try {
-          mainBranch = await worktreeManager.getProjectMainBranch(projectData.path);
-          console.log('[Main] Detected main branch:', mainBranch);
-        } catch (error) {
-          console.log('[Main] Could not detect main branch, skipping:', error);
-          // Not a git repository or error detecting, that's okay
         }
       }
 
@@ -228,28 +148,14 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         projectData.runScript,
         projectData.buildScript,
         undefined, // default_permission_mode
-        projectData.openIdeCommand,
-        mainBranch
+        projectData.openIdeCommand
       );
-
-      // If run_script was provided, also create run commands
-      if (projectData.runScript && project) {
-        const commands = projectData.runScript.split('\n').filter((cmd: string) => cmd.trim());
-        commands.forEach((command: string, index: number) => {
-          databaseService.createRunCommand(
-            project.id,
-            command.trim(),
-            `Command ${index + 1}`,
-            index
-          );
-        });
-      }
 
       console.log('[Main] Project created successfully:', project);
 
       // Per-project permission-trust prompt — fire-and-forget, must
       // not delay the create response back to the renderer.
-      void maybePromptPermissionTrust(databaseService, getMainWindow, project);
+      void services.permissionTrustPrompter?.maybePrompt(project);
 
       // Demo mode: seed the tour backlog (idea + ready tasks) so the planner
       // and sprint pickers have content right after the project is added.
@@ -337,48 +243,10 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('projects:activate', async (_event, projectId: string) => {
-    try {
-      const project = databaseService.setActiveProject(parseInt(projectId));
-      if (project) {
-        sessionManager.setActiveProject(project);
-        await worktreeManager.initializeProject(project.path);
-        // Fire-and-forget: must not delay the activate response.
-        void maybePromptPermissionTrust(databaseService, getMainWindow, project);
-      }
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to activate project:', error);
-      return { success: false, error: 'Failed to activate project' };
-    }
-  });
-
   ipcMain.handle('projects:update', async (_event, projectId: string, updates: UpdateProjectRequest) => {
     try {
       // Update the project
       const project = databaseService.updateProject(parseInt(projectId), updates);
-
-      // If run_script was updated, also update the run commands table
-      if (updates.run_script !== undefined) {
-        const projectIdNum = parseInt(projectId);
-
-        // Delete existing run commands
-        databaseService.deleteProjectRunCommands(projectIdNum);
-
-        // Add new run commands from the multiline script
-        // Treat empty string and null the same - both mean no commands
-        if (updates.run_script && updates.run_script.trim()) {
-          const commands = updates.run_script.split('\n').filter((cmd: string) => cmd.trim());
-          commands.forEach((command: string, index: number) => {
-            databaseService.createRunCommand(
-              projectIdNum,
-              command.trim(),
-              `Command ${index + 1}`,
-              index
-            );
-          });
-        }
-      }
 
       // Emit event to notify frontend about project update
       if (project) {
@@ -405,28 +273,14 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       
       // Get all sessions for this project (including archived) to clean up worktrees
       const allProjectSessions = databaseService.getAllSessionsIncludingArchived().filter(s => s.project_id === projectIdNum);
-      const projectSessions = databaseService.getAllSessions(projectIdNum);
       
       console.log(`[Main] Deleting project ${project.name} with ${allProjectSessions.length} total sessions`);
       
-      // Check if any session from this project has a running script
+      // Stop this project's run script (logs panel) before its rows go away
       const runningScript = scriptExecutionTracker.getRunningScript();
-      if (runningScript) {
-        const runningSession = projectSessions.find(s => s.id === runningScript.id);
-        if (runningSession && runningScript.type === 'session') {
-          console.log(`[Main] Stopping running script for session ${runningScript.id} before deleting project`);
-          await sessionManager.stopRunningScript();
-          // Ensure tracker is updated even if sessionManager's internal update fails
-          scriptExecutionTracker.stop('session', runningScript.id);
-        }
-      }
-      
-      // Close all terminal sessions for this project
-      for (const session of projectSessions) {
-        if (sessionManager.hasTerminalSession(session.id)) {
-          console.log(`[Main] Closing terminal session ${session.id} before deleting project`);
-          await sessionManager.closeTerminalSession(session.id);
-        }
+      if (runningScript?.type === 'project' && runningScript.id === projectIdNum) {
+        console.log(`[Main] Stopping running script for project ${projectIdNum} before deleting it`);
+        await stopProjectScriptInternal(projectIdNum);
       }
       
       // Clean up all worktrees for this project (including archived sessions)
@@ -631,26 +485,9 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         // Mark the old script as closing
         scriptExecutionTracker.markClosing(runningScript.type, runningScript.id);
 
-        // Stop the script based on its type
-        if (runningScript.type === 'project') {
-          // Call internal stop function
-          const stopResult = await stopProjectScriptInternal(runningScript.id as number);
-          if (!stopResult?.success) {
-            console.warn('[Main] Failed to stop running project script, continuing anyway');
-          }
-        } else if (runningScript.type === 'session') {
-          // Stop session script through logs panel
-          const sessionIdToStop = runningScript.id as string;
-          const panels = await panelManager.getPanelsForSession(sessionIdToStop);
-          const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-          if (logsPanel) {
-            const { logsManager } = require('../services/panels/logPanel/logsManager');
-            await logsManager.stopScript(logsPanel.id);
-          }
-          // Also try old mechanism as fallback
-          await sessionManager.stopRunningScript();
-          // Mark as stopped in tracker
-          scriptExecutionTracker.stop('session', sessionIdToStop);
+        const stopResult = await stopProjectScriptInternal(runningScript.id as number);
+        if (!stopResult?.success) {
+          console.warn('[Main] Failed to stop running project script, continuing anyway');
         }
       }
 
@@ -663,7 +500,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       const sessionId = mainRepoSession.id;
 
       // Run the script in the project root using logsManager
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
       await logsManager.runScript(sessionId, project.run_script, project.path);
 
       // Track the running project

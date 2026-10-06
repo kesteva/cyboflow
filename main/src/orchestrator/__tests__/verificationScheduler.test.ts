@@ -1,23 +1,21 @@
 /**
- * VerificationScheduler — drain loop, ResourceLeasePool contention, and lifecycle
- * tests against an in-memory SQLite DB with FAKE backends + a FAKE judge.
- *
- * Proves the collision doctrine (scarce resources serialize; lanes keep flowing):
- *   - happy path  queued → running → passed (capture + judge)
- *   - lease contention: a single-screen lease SERIALIZES two requests; a
- *     null-lease backend PARALLELIZES them
- *   - an empty / unavailable chain → 'skipped' (never failed)
+ * VerificationScheduler — lifecycle, dispatch and lease-pool tests against an
+ * in-memory SQLite DB:
+ *   - a request not on the agent engine (no / a retired capture-backend stamp)
+ *     settles 'skipped' with its terminal event, never stranding 'queued'
  *   - cancelForRun terminates a run's outstanding requests
- *   - low-confidence demotion + capture-failure → 'failed'
+ *   - runRecovery re-drains orphaned leased/running rows through delivery
+ *   - ResourceLeasePool slot semantics
+ * The agent engine itself is covered by verify/__tests__/verificationSchedulerAgent.test.ts.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  RETIRED_ENGINE_SKIP_REASON,
   ResourceLeasePool,
   VerificationScheduler,
-  VERIFY_SCREEN_LEASE,
   verificationEvents,
   verificationChannel,
   type OnVerdict,
@@ -25,15 +23,6 @@ import {
 } from '../verify/verificationScheduler';
 import { Mutex } from '../../utils/mutex';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import type {
-  CaptureContext,
-  CaptureResult,
-  VerdictV1,
-  VisualBackend,
-  VisualBackendId,
-  VlmJudge,
-} from '../../../../shared/types/visualVerification';
-import { VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
 
 const MIG_DIR = join(__dirname, '..', '..', 'database', 'migrations');
 const THROUGH_078 = [
@@ -86,38 +75,6 @@ async function flushDrain(): Promise<void> {
   await new Promise((r) => setImmediate(r));
 }
 
-const PASS_VERDICT: VerdictV1 = {
-  status: 'pass',
-  confidence: 0.95,
-  issues: [],
-  feedback: 'looks right',
-  judgedFileNames: ['shot.png'],
-  baselineUsed: false,
-  model: 'fake',
-};
-
-function fakeJudge(verdict: VerdictV1 = PASS_VERDICT): VlmJudge {
-  return { judge: vi.fn(async () => verdict) };
-}
-
-/** A fake backend; lease + capture behavior is configurable. */
-function fakeBackend(opts: {
-  id: VisualBackendId;
-  rung: number;
-  lease: string | null;
-  capture?: (ctx: CaptureContext, signal: AbortSignal) => Promise<CaptureResult>;
-}): VisualBackend {
-  return {
-    id: opts.id,
-    rung: opts.rung,
-    requiredLease: () => opts.lease,
-    healthCheck: async () => true,
-    capture:
-      opts.capture ??
-      (async () => ({ ok: true, fileNames: ['shot.png'] }) satisfies CaptureResult),
-  };
-}
-
 function status(db: Database.Database, id: string): string {
   return (db.prepare('SELECT status FROM verification_requests WHERE id = ?').get(id) as { status: string })
     .status;
@@ -137,46 +94,15 @@ describe('VerificationScheduler', () => {
     db.close();
   });
 
-  it('drains a queued request through running → passed (capture + judge)', async () => {
-    const judge = fakeJudge();
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-      judge,
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'header is centered' },
-      chain: ['capturePage'],
-    });
-    expect(status(db, id)).toBe('queued');
-
-    await flushDrain();
-
-    expect(status(db, id)).toBe('passed');
-    expect(judge.judge).toHaveBeenCalledOnce();
-    const row = db
-      .prepare('SELECT current_backend, verdict_json, ended_at FROM verification_requests WHERE id = ?')
-      .get(id) as { current_backend: string; verdict_json: string; ended_at: string };
-    expect(row.current_backend).toBe('capturePage');
-    expect(JSON.parse(row.verdict_json).status).toBe('pass');
-    expect(row.ended_at).not.toBeNull();
-  });
-
-  it('emits a VerificationTerminalEvent on the run channel for every terminal verdict', async () => {
+  it('terminalizes a request that is not on the agent engine as SKIPPED (retired engine) and emits its terminal event', async () => {
+    // run-1 carries no verify_chain stamp and the request's own chain is empty,
+    // so nothing routes it to the agent engine: it must settle rather than strand.
     const events: VerificationTerminalEvent[] = [];
     const onEvent = (e: VerificationTerminalEvent): void => void events.push(e);
     verificationEvents.on(verificationChannel('run-1'), onEvent);
     try {
       const sched = VerificationScheduler.initialize({
         db: dbAdapter(db),
-        backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-        judge: fakeJudge(),
         artifactsDirResolver: (runId) => `/tmp/${runId}`,
         leasePool: new ResourceLeasePool(new Mutex()),
       });
@@ -184,45 +110,15 @@ describe('VerificationScheduler', () => {
         runId: 'run-1',
         projectId: 1,
         type: 'static-render-snapshot',
-        input: { intent: 'header centered', taskRef: 'TASK-008' },
-        chain: ['capturePage'],
-      });
-      await flushDrain();
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({
-        runId: 'run-1',
-        requestId: id,
-        projectId: 1,
-        status: 'passed',
-        type: 'static-render-snapshot',
-        taskRef: 'TASK-008',
-      });
-    } finally {
-      verificationEvents.off(verificationChannel('run-1'), onEvent);
-    }
-  });
-
-  it('emits a terminal event even for a SKIPPED request (no backend / empty chain)', async () => {
-    const events: VerificationTerminalEvent[] = [];
-    const onEvent = (e: VerificationTerminalEvent): void => void events.push(e);
-    verificationEvents.on(verificationChannel('run-1'), onEvent);
-    try {
-      const sched = VerificationScheduler.initialize({
-        db: dbAdapter(db),
-        backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-        judge: fakeJudge(),
-        artifactsDirResolver: (runId) => `/tmp/${runId}`,
-        leasePool: new ResourceLeasePool(new Mutex()),
-      });
-      const id = sched.enqueue({
-        runId: 'run-1',
-        projectId: 1,
-        type: 'static-render-snapshot',
-        input: { intent: 'native only' },
-        chain: [], // empty → skipped
+        input: { intent: 'legacy-stamped run' },
+        chain: [],
       });
       await flushDrain();
       expect(status(db, id)).toBe('skipped');
+      const row = db
+        .prepare('SELECT error_message FROM verification_requests WHERE id = ?')
+        .get(id) as { error_message: string };
+      expect(row.error_message).toBe(RETIRED_ENGINE_SKIP_REASON);
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ requestId: id, status: 'skipped' });
     } finally {
@@ -230,136 +126,12 @@ describe('VerificationScheduler', () => {
     }
   });
 
-  it('picks the cheapest backend in the chain by rung', async () => {
-    const cheap = fakeBackend({ id: 'capturePage', rung: 0, lease: null });
-    const dear = fakeBackend({ id: 'peekaboo', rung: 2, lease: VERIFY_SCREEN_LEASE });
-    const dearCapture = vi.spyOn(dear, 'capture');
-    const cheapCapture = vi.spyOn(cheap, 'capture');
+  it('terminalizes a request on a run stamped with the retired capture-backend chain as SKIPPED', async () => {
+    db.prepare(`UPDATE workflow_runs SET verify_chain = ? WHERE id = 'run-1'`).run(
+      JSON.stringify(['capturePage', 'playwright', 'peekaboo']),
+    );
     const sched = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: cheap, peekaboo: dear },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-
-    sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'x' },
-      chain: ['capturePage', 'peekaboo'],
-    });
-    await flushDrain();
-
-    expect(cheapCapture).toHaveBeenCalledOnce();
-    expect(dearCapture).not.toHaveBeenCalled();
-  });
-
-  it('SERIALIZES screen-lease captures but PARALLELIZES null-lease captures', async () => {
-    // The shared mutex backs both leases; a private instance keeps the test isolated.
-    const mutex = new Mutex();
-    const pool = new ResourceLeasePool(mutex);
-
-    // ---- screen lease: two concurrent requests must NOT overlap ----
-    let screenActive = 0;
-    let screenMaxConcurrent = 0;
-    const screenBackend = fakeBackend({
-      id: 'peekaboo',
-      rung: 2,
-      lease: VERIFY_SCREEN_LEASE,
-      capture: async () => {
-        screenActive += 1;
-        screenMaxConcurrent = Math.max(screenMaxConcurrent, screenActive);
-        await new Promise((r) => setTimeout(r, 15));
-        screenActive -= 1;
-        return { ok: true, fileNames: ['s.png'] };
-      },
-    });
-
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { peekaboo: screenBackend },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: pool,
-    });
-
-    const a = sched.enqueue({ runId: 'run-1', projectId: 1, type: 'native-desktop', input: { intent: 'a' }, chain: ['peekaboo'] });
-    const b = sched.enqueue({ runId: 'run-1', projectId: 1, type: 'native-desktop', input: { intent: 'b' }, chain: ['peekaboo'] });
-
-    // The screen lease lets exactly ONE of {A,B} run per drain; the other stays
-    // queued and is picked up on a later nudge. Which goes first is a FIFO tie-break
-    // on the random row id (both share an enqueued_at second), so the test must NOT
-    // assume an A-then-B order — it pumps drains until both settle, then asserts the
-    // physics invariant: both passed AND the captures never overlapped.
-    for (let i = 0; i < 4 && (status(db, a) !== 'passed' || status(db, b) !== 'passed'); i++) {
-      sched.nudge();
-      await flushDrain();
-      await new Promise((r) => setTimeout(r, 40));
-      await flushDrain();
-    }
-    expect(status(db, a)).toBe('passed');
-    expect(status(db, b)).toBe('passed');
-    expect(screenMaxConcurrent).toBe(1); // never overlapped — physics serialized
-
-    // ---- null lease: two concurrent requests MAY overlap ----
-    let nullActive = 0;
-    let nullMaxConcurrent = 0;
-    const nullBackend = fakeBackend({
-      id: 'capturePage',
-      rung: 0,
-      lease: null,
-      capture: async () => {
-        nullActive += 1;
-        nullMaxConcurrent = Math.max(nullMaxConcurrent, nullActive);
-        await new Promise((r) => setTimeout(r, 15));
-        nullActive -= 1;
-        return { ok: true, fileNames: ['n.png'] };
-      },
-    });
-    VerificationScheduler._resetForTesting();
-    const sched2 = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: nullBackend },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: pool,
-    });
-    const c = sched2.enqueue({ runId: 'run-1', projectId: 1, type: 'static-render-snapshot', input: { intent: 'c' }, chain: ['capturePage'] });
-    const d = sched2.enqueue({ runId: 'run-1', projectId: 1, type: 'static-render-snapshot', input: { intent: 'd' }, chain: ['capturePage'] });
-    await flushDrain();
-    await new Promise((r) => setTimeout(r, 40));
-    await flushDrain();
-    expect(status(db, c)).toBe('passed');
-    expect(status(db, d)).toBe('passed');
-    expect(nullMaxConcurrent).toBe(2); // both ran concurrently — no lease held
-  });
-
-  it('marks a request SKIPPED when the chain is empty', async () => {
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'native-desktop',
-      input: { intent: 'x' },
-      chain: [],
-    });
-    await flushDrain();
-    expect(status(db, id)).toBe('skipped');
-  });
-
-  it('marks SKIPPED when no listed backend is present in the registry', async () => {
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: {}, // empty registry (MVP boot state)
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
       leasePool: new ResourceLeasePool(new Mutex()),
     });
@@ -367,78 +139,11 @@ describe('VerificationScheduler', () => {
       runId: 'run-1',
       projectId: 1,
       type: 'static-render-snapshot',
-      input: { intent: 'x' },
-      chain: ['capturePage', 'peekaboo'],
-    });
-    await flushDrain();
-    expect(status(db, id)).toBe('skipped');
-  });
-
-  it('marks FAILED when capture produces no images', async () => {
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: {
-        capturePage: fakeBackend({
-          id: 'capturePage',
-          rung: 0,
-          lease: null,
-          capture: async () => ({ ok: false, fileNames: [], error: 'blank render' }),
-        }),
-      },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'x' },
+      input: { intent: 'pre-agent-engine run' },
       chain: ['capturePage'],
     });
     await flushDrain();
-    expect(status(db, id)).toBe('failed');
-    const row = db.prepare('SELECT error_message FROM verification_requests WHERE id = ?').get(id) as {
-      error_message: string;
-    };
-    expect(row.error_message).toBe('blank render');
-  });
-
-  it('demotes a low-confidence judge verdict to low_confidence', async () => {
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-      judge: fakeJudge({ ...PASS_VERDICT, status: 'pass', confidence: 0.3 }),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      config: {
-        enabled: true,
-        defaultType: 'static-render-snapshot',
-        vlmConfidenceThreshold: 0.7,
-        maxPerRunJudgeCalls: 4,
-        devServerPorts: [],
-        simulatorDevices: [],
-        queuedAgeCeilingMs: 15 * 60 * 1000,
-        agentSlots: 2,
-        mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
-        mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
-        mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
-        mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
-        autoBootstrapRunbook: false,
-        requireProvenRunbook: VISUAL_VERIFY_DEFAULTS.requireProvenRunbook,
-        exploreDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.exploreDeadlineFloorMs,
-        mobileDriveEngine: VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
-      },
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'x' },
-      chain: ['capturePage'],
-    });
-    await flushDrain();
-    expect(status(db, id)).toBe('low_confidence');
+    expect(status(db, id)).toBe('skipped');
   });
 
   it('cancelForRun terminates a run\'s outstanding queued requests', async () => {
@@ -446,8 +151,6 @@ describe('VerificationScheduler', () => {
     // cancel it BEFORE draining and assert it goes to timeout.
     const sched = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
       leasePool: new ResourceLeasePool(new Mutex()),
     });
@@ -470,112 +173,10 @@ describe('VerificationScheduler', () => {
     expect(status(db, 'vr_done')).toBe('passed');
   });
 
-  it('times out a slow capture: aborts the signal, marks timeout, releases the lease', async () => {
-    const mutex = new Mutex();
-    const pool = new ResourceLeasePool(mutex);
-    let sawAbort = false;
-    // A backend that hangs until aborted, then resolves (abort-aware via signal).
-    const slow = fakeBackend({
-      id: 'peekaboo',
-      rung: 2,
-      lease: VERIFY_SCREEN_LEASE,
-      capture: (_ctx, signal) =>
-        new Promise<CaptureResult>((resolve) => {
-          signal.addEventListener('abort', () => {
-            sawAbort = true;
-            resolve({ ok: true, fileNames: ['late.png'] });
-          });
-        }),
-    });
-    const judge = fakeJudge();
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { peekaboo: slow },
-      judge,
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: pool,
-      requestTimeoutMs: 20, // tiny deadline
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'native-desktop',
-      input: { intent: 'x' },
-      chain: ['peekaboo'],
-    });
-
-    await flushDrain();
-    // Wait past the 20ms deadline so the timer fires + the abort unwinds.
-    await new Promise((r) => setTimeout(r, 60));
-    await flushDrain();
-
-    expect(sawAbort).toBe(true);
-    expect(status(db, id)).toBe('timeout');
-    // The judge must never have run (capture was aborted before producing usable PNGs).
-    expect(judge.judge).not.toHaveBeenCalled();
-    const row = db
-      .prepare('SELECT error_message, ended_at FROM verification_requests WHERE id = ?')
-      .get(id) as { error_message: string; ended_at: string };
-    expect(row.error_message).toBe('request timed out');
-    expect(row.ended_at).not.toBeNull();
-    // The screen lease was released in finally → reacquirable.
-    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(false);
-  });
-
-  it('cancelForRun aborts an in-flight capture and marks it timeout (lease released)', async () => {
-    const mutex = new Mutex();
-    const pool = new ResourceLeasePool(mutex);
-    let sawAbort = false;
-    // A backend that hangs forever unless aborted (no timeout in this test — cancel drives it).
-    const hanging = fakeBackend({
-      id: 'peekaboo',
-      rung: 2,
-      lease: VERIFY_SCREEN_LEASE,
-      capture: (_ctx, signal) =>
-        new Promise<CaptureResult>((resolve) => {
-          signal.addEventListener('abort', () => {
-            sawAbort = true;
-            resolve({ ok: false, fileNames: [], error: 'aborted' });
-          });
-        }),
-    });
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { peekaboo: hanging },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      leasePool: pool,
-      requestTimeoutMs: 60_000, // long — cancel, not the deadline, ends it
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'native-desktop',
-      input: { intent: 'x' },
-      chain: ['peekaboo'],
-    });
-
-    // Let the drain lease + start the capture (now 'running', in-flight registered).
-    await flushDrain();
-    expect(status(db, id)).toBe('running');
-    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(true); // lease held by the in-flight capture
-
-    const canceled = sched.cancelForRun('run-1');
-    expect(canceled).toBe(1); // the running row was swept
-    // Let the aborted capture unwind + release the lease.
-    await flushDrain();
-
-    expect(sawAbort).toBe(true);
-    expect(status(db, id)).toBe('timeout');
-    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(false);
-  });
-
   it('cancelForRun cancels a mix of queued + running non-terminal rows, leaving terminal ones', async () => {
     // Insert rows directly so we control statuses precisely (no drain).
     const sched = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
       leasePool: new ResourceLeasePool(new Mutex()),
     });
@@ -628,8 +229,6 @@ describe('VerificationScheduler', () => {
 
     const sched = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
       leasePool: new ResourceLeasePool(new Mutex()),
     });
@@ -673,8 +272,6 @@ describe('VerificationScheduler', () => {
 
     const sched = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
       leasePool: new ResourceLeasePool(new Mutex()),
       onVerdict,
@@ -693,43 +290,12 @@ describe('VerificationScheduler', () => {
     expect(events[0].taskRef).toBe('TASK-042');
   });
 
-  it('fires the onVerdict hook with the terminal outcome', async () => {
-    const onVerdict = vi.fn<OnVerdict>(async () => {});
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
-      judge: fakeJudge(),
-      artifactsDirResolver: (runId) => `/tmp/${runId}`,
-      onVerdict,
-      leasePool: new ResourceLeasePool(new Mutex()),
-    });
-    const id = sched.enqueue({
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'x' },
-      chain: ['capturePage'],
-    });
-    await flushDrain();
-    expect(onVerdict).toHaveBeenCalledOnce();
-    expect(onVerdict.mock.calls[0][0]).toMatchObject({
-      requestId: id,
-      runId: 'run-1',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      status: 'passed',
-      fileNames: ['shot.png'],
-    });
-  });
-
   it('getInstance throws before initialize; _resetForTesting clears it', () => {
     VerificationScheduler._resetForTesting();
     expect(() => VerificationScheduler.getInstance()).toThrow(/not been initialized/);
     expect(VerificationScheduler.tryGetInstance()).toBeNull();
     VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge(),
       artifactsDirResolver: (runId) => `/tmp/${runId}`,
     });
     expect(VerificationScheduler.getInstance()).toBeInstanceOf(VerificationScheduler);

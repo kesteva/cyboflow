@@ -203,9 +203,7 @@ test('tolerance: "no such column" in migration is tolerated, exit 0 when no real
         status TEXT NOT NULL DEFAULT 'pending',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_output TEXT,
         exit_code INTEGER,
-        pid INTEGER,
         claude_session_id TEXT
       );
     `,

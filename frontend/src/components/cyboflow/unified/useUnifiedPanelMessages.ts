@@ -6,19 +6,17 @@
  * conversation as `UnifiedMessage[]` from the panel's stored outputs by merging
  * `API.panels.getConversationMessages` (the real user prompts) with
  * `API.panels.getJsonMessages` (the projected assistant/tool turns — already the
- * shared `UnifiedMessage` shape) and running them through the
- * `ClaudeMessageTransformer` (an identity pass-through that fills any gaps).
+ * shared `UnifiedMessage` shape, projected main-side).
  * Live-refetches (debounced) on the window `session-output-available` event for
- * this panel — the exact strategy the old RichOutputView used (an SDK quick
+ * this panel — the strategy the old quick-session chat view used (an SDK quick
  * session never populates `cyboflowStore.streamEvents`, so the run hook's
  * streamEvents trigger does not apply here).
  *
  * `enabled === false` (e.g. an interactive/PTY quick session, whose live xterm
  * owns the transcript) skips ALL fetching and returns an empty, settled state.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { API } from '../../../utils/api';
-import { ClaudeMessageTransformer } from '../../panels/ai/transformers/ClaudeMessageTransformer';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { UnifiedMessagesState } from './useUnifiedRunMessages';
 
@@ -77,8 +75,6 @@ export function useUnifiedPanelMessages(
   panelId: string | null,
   enabled = true,
 ): UnifiedMessagesState {
-  // One transformer per hook instance (matches RichOutputView's lifetime).
-  const transformer = useMemo(() => new ClaudeMessageTransformer(), []);
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -107,8 +103,8 @@ export function useUnifiedPanelMessages(
       ]);
 
       // Conversation messages carry the actual user prompts; convert them to the
-      // UnifiedMessage shape so the identity transformer doesn't emit objects
-      // missing `segments`. Skip local-command echoes (slash-command stdout).
+      // UnifiedMessage shape (with `segments`) so they merge with the projected
+      // turns. Skip local-command echoes (slash-command stdout).
       const userPrompts: UnifiedMessage[] = [];
       if (conversationResponse.success && Array.isArray(conversationResponse.data)) {
         (conversationResponse.data as ConversationMessage[]).forEach((msg) => {
@@ -127,7 +123,8 @@ export function useUnifiedPanelMessages(
 
       let projectedMessages: UnifiedMessage[] = [];
       if (outputResponse.success && Array.isArray(outputResponse.data)) {
-        projectedMessages = transformer.transform(outputResponse.data);
+        // Already projected main-side into the shared UnifiedMessage shape.
+        projectedMessages = outputResponse.data as UnifiedMessage[];
       }
       setMessages(mergePanelMessageSources(userPrompts, projectedMessages));
     } catch (err: unknown) {
@@ -145,7 +142,7 @@ export function useUnifiedPanelMessages(
         void loadRef.current?.();
       }
     }
-  }, [enabled, panelId, transformer]);
+  }, [enabled, panelId]);
 
   useEffect(() => {
     loadRef.current = loadMessages;

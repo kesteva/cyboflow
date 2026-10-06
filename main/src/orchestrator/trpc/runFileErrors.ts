@@ -1,10 +1,7 @@
 /**
- * Shared RunFileError -> TRPCError mapping for the File Explorer tRPC routes.
- *
- * Both the canonical session-keyed router (trpc/routers/files.ts) and the
- * preserved legacy run-keyed routes (trpc/routers/runs.ts) re-throw a
- * RunFileError as a TRPCError with a stable code. This module is the SINGLE
- * source of truth for that mapping so the two routers cannot drift.
+ * RunFileError -> TRPCError mapping for the File Explorer tRPC routes
+ * (trpc/routers/files.ts), which re-throw a RunFileError as a TRPCError with a
+ * stable code.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*. TRPCError from '@trpc/server' is allowed in the
@@ -22,10 +19,8 @@ import type { RunFileErrorReason } from '../runFileExplorer';
  */
 export function runFileErrorCode(reason: RunFileErrorReason): TRPCError['code'] {
   // Exhaustive by construction — every RunFileErrorReason must map to a code, so
-  // adding a new reason without a mapping is a compile error here. This is the
-  // single source of truth for the mapping now (moved out of runs.ts).
+  // adding a new reason without a mapping is a compile error here.
   const codeByReason: Record<RunFileErrorReason, TRPCError['code']> = {
-    'run-not-found': 'NOT_FOUND',
     'session-not-found': 'NOT_FOUND',
     'not-found': 'NOT_FOUND',
     'no-worktree': 'PRECONDITION_FAILED',

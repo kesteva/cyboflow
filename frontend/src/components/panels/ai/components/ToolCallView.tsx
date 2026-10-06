@@ -1,6 +1,6 @@
 import React from 'react';
 import { Wrench, CheckCircle, XCircle, Clock, ChevronDown, ChevronRight } from 'lucide-react';
-import { ToolCall } from '../transformers/MessageTransformer';
+import { ToolCall } from '../../../../../../shared/types/unifiedMessage';
 import { MarkdownPreview } from '../../../MarkdownPreview';
 import { pathBasename } from '../../../../utils/pathBasename';
 import { isAgentDispatchToolName } from '../../../../../../shared/types/agentIdentity';

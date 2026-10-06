@@ -44,27 +44,18 @@ import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdenti
 import type { RichOutputSettings } from '../../panels/ai/AbstractAIPanel';
 
 // ---------------------------------------------------------------------------
-// Settings — read once from localStorage, identical to the prior hosts.
+// Settings — fixed display settings. The chat has no settings UI, so nothing
+// writes the legacy `richOutputSettings` localStorage key any more and it is
+// no longer read (a stale saved value could never be changed back).
 // ---------------------------------------------------------------------------
 
-const RICH_OUTPUT_SETTINGS_KEY = 'richOutputSettings';
-
-const defaultSettings: RichOutputSettings = {
+const CHAT_SETTINGS: RichOutputSettings = {
   showToolCalls: true,
   compactMode: false,
   collapseTools: true,
   showThinking: true,
   showSessionInit: false,
 };
-
-function readSettings(): RichOutputSettings {
-  try {
-    const saved = localStorage.getItem(RICH_OUTPUT_SETTINGS_KEY);
-    return saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
-  } catch {
-    return defaultSettings;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -176,8 +167,7 @@ export function UnifiedChatView({
 }: UnifiedChatViewProps): ReactElement {
   const isInteractive = transport === 'interactive';
 
-  // Settings are read once (shared key); the chat has no in-view settings UI.
-  const settings = useMemo<RichOutputSettings>(() => readSettings(), []);
+  const settings = CHAT_SETTINGS;
 
   // -- ChatTranscript presentational state (owned here for both hosts) -----
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
@@ -198,7 +188,7 @@ export function UnifiedChatView({
   // PanelContainer slot is un-keyed), so without this the auto-scroll refs +
   // collapse/expand sets carry over from the previous conversation — leaving the
   // new one parked mid-history instead of pinned to its latest message (the old
-  // RichOutputView force-scrolled to the bottom on every panel change). Declared
+  // quick-session chat view force-scrolled to the bottom on every panel change). Declared
   // BEFORE the auto-scroll effect so a combined railId+messages render resets the
   // refs first. Mirrors the empty-intermediate-render reset the run host already
   // gets from `useUnifiedRunMessages`' setMessages([]) on runId change.
@@ -224,8 +214,8 @@ export function UnifiedChatView({
   // Auto-expand sub-agent (Task) tools so nested transcripts show. Additive: it
   // only ADDS newly-seen Task ids to the expanded set (never removes), so it
   // never triggers a render loop. Note a manually-collapsed Task can re-expand on
-  // the next message delta — this matches the prior RunChatView/RichOutputView
-  // behavior (both auto-expanded Task tools on every load).
+  // the next message delta — this matches the prior run and quick-session chat
+  // views (both auto-expanded Task tools on every load).
   useEffect(() => {
     const subAgentIds = new Set<string>();
     for (const msg of messages) {

@@ -1,8 +1,8 @@
 /**
  * runAgentPreflight — the agent-path pre-deploy gate
  * (docs/proposals/verification-setup-flow.md §3.5). The agent engine
- * (`VerificationAgentRunner`) bypasses the legacy `selectCandidates` health
- * gate entirely, so today a missing chromium (or an occupied leased port)
+ * (`VerificationAgentRunner`) has no per-backend health gate, so without this
+ * a missing chromium (or an occupied leased port)
  * only surfaces *after* budget increment + snapshot provisioning + a full SDK
  * deploy (`driverCore.ts:330-336`) — an expensive, slow way to learn the host
  * cannot run the check at all. This module is the cheap check that runs
@@ -111,8 +111,8 @@ export interface AgentPreflightDeps {
   /**
    * `true` when this host can actually capture the screen for the
    * `native-screen` modality — binary present AND both macOS TCC grants
-   * (Screen Recording + Accessibility), i.e. the retired
-   * `peekabooBackend.healthCheck()` reused as the live grant probe (§4,
+   * (Screen Recording + Accessibility), i.e.
+   * `PeekabooGrantProbe.healthCheck()`, the live grant probe (§4,
    * "Driver additions for native-screen").
    *
    * OPTIONAL, and absence is NOT a failure: an unwired probe means the

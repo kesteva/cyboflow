@@ -543,7 +543,6 @@ describe('AgentEditorModal — a non-Claude pin names its OWN provider', () => {
   function enableOmp(): void {
     useConfigStore.setState({
       config: {
-        gitRepoPath: '/repo',
         agentProviderAccess: { claude: true, codex: true, omp: true },
       } as AppConfig,
     });

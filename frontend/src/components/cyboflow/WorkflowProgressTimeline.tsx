@@ -5,14 +5,9 @@
  * Consumes:
  *   phaseState prop (UseWorkflowPhaseStateResult) — caller owns tRPC lifecycle
  *
- * Log-line projection (getStepTimeWindow / projectLogLines below) is a TASK-765
- * forward-looking placeholder — it always no-ops in v1, so no live event stream
- * is read here (see @cyboflow-hidden marker above those helpers).
- *
  * Renders protoflow §4a: vertical feed with phase sections (colored swatch + label +
  * step count), timeline step items with state-keyed 2px left borders + 8px bullet +
- * name + agent + uppercase status, log lines below non-pending steps with mono prefix
- * glyph + 42px tabular timestamp + message.
+ * name + agent + uppercase status.
  *
  * 1.4s opacity+scale pulse on running step bullet only.
  * Uses existing cyboflow Tailwind tokens — NOT protoflow paper-cream palette.
@@ -26,125 +21,7 @@ import { useArtifactsList } from '../../hooks/useArtifactsList';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { WorkflowStepState, WorkflowStep } from '../../../../shared/types/workflows';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
-import type { StreamEvent } from '../../utils/cyboflowApi';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
-
-// ---------------------------------------------------------------------------
-// LogLine — projected from streamEvents
-// ---------------------------------------------------------------------------
-
-type LogKind = 'edit' | 'tool' | 'note' | 'done' | 'running';
-
-interface LogLine {
-  kind: LogKind;
-  t: number; // Unix ms
-  text: string;
-}
-
-// ---------------------------------------------------------------------------
-// Glyph map for log line prefix
-// ---------------------------------------------------------------------------
-
-const GLYPH: Record<LogKind, string> = {
-  tool:    '▸',
-  edit:    '✎',
-  note:    '·',
-  done:    '✓',
-  running: '●',
-};
-
-// Edit tool names — assistant tool_use blocks with these names are classified 'edit'.
-const EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'MultiEdit']);
-
-// ---------------------------------------------------------------------------
-// Time-window helpers
-//
-// WorkflowStepState (TASK-763) has no timestamps. Degrade gracefully:
-// walk streamEvents for `workflow_step_transition` events when available,
-// else return null (empty log block with TODO comment).
-// ---------------------------------------------------------------------------
-
-interface TimeWindow {
-  start: number; // Unix ms
-  end: number | null; // null = open (still running)
-}
-
-// @cyboflow-hidden: TASK-765 forward-looking placeholder in cyboflow v1 — the render
-// call site below feeds an empty events array, so this always returns null and
-// projectLogLines below always returns []. Re-enable by threading a live
-// `workflow_step_transition` event stream through the call site once step-transition
-// timestamps land on WorkflowStepState.
-/**
- * Attempt to derive time-window for a step from streamEvents.
- * Currently no `workflow_step_transition` event type is in the StreamEvent union,
- * so this always returns null in v1.
- *
- * TODO(TASK-765): when step-transition timestamps land on WorkflowStepState,
- * read them here directly instead of walking streamEvents.
- */
-function getStepTimeWindow(
-  _stepId: string,
-  _stepStates: WorkflowStepState[],
-  _events: StreamEvent[],
-): TimeWindow | null {
-  // v1 degraded mode — no timestamp data available on WorkflowStepState
-  // and no `workflow_step_transition` event type in the stream union.
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Log-line projection
-// ---------------------------------------------------------------------------
-
-/**
- * Project log lines from stream events filtered to a step's time window.
- * Returns an empty array when window is null (degraded mode).
- */
-function projectLogLines(
-  events: StreamEvent[],
-  window: TimeWindow | null,
-): LogLine[] {
-  if (window === null) return [];
-
-  return events
-    .filter((e) => {
-      const ts = new Date(e.timestamp).getTime();
-      if (ts < window.start) return false;
-      if (window.end !== null && ts > window.end) return false;
-      return true;
-    })
-    .map((e): LogLine | null => {
-      const ts = new Date(e.timestamp).getTime();
-      if (e.type === 'assistant') {
-        const content = e.payload.message?.content ?? [];
-        for (const block of content) {
-          if (block.type === 'tool_use') {
-            const kind: LogKind = EDIT_TOOL_NAMES.has(block.name) ? 'edit' : 'tool';
-            return { kind, t: ts, text: block.name };
-          }
-          if (block.type === 'text' && block.text.trim()) {
-            return { kind: 'note', t: ts, text: block.text.slice(0, 80) };
-          }
-        }
-      }
-      if (e.type === 'result') {
-        return { kind: 'done', t: ts, text: `result: ${e.payload.subtype}` };
-      }
-      return null;
-    })
-    .filter((l): l is LogLine => l !== null);
-}
-
-// ---------------------------------------------------------------------------
-// Elapsed time formatter (mm:ss tabular alignment)
-// ---------------------------------------------------------------------------
-
-function formatElapsed(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
 
 // ---------------------------------------------------------------------------
 // Border class lookup (status-running not in Tailwind config → fallback to error)
@@ -395,19 +272,6 @@ export function WorkflowProgressTimeline({
                 const status = stepStatusMap.get(step.id) ?? 'pending';
                 const borderClass = borderClassForStatus(status);
                 const isRunning = status === 'running';
-                const isPending = status === 'pending';
-
-                // Log-line projection — no live event stream is subscribed to (see
-                // @cyboflow-hidden marker on the helpers below), so this always
-                // resolves to the v1 degraded no-op: window null, logLines empty.
-                const window = getStepTimeWindow(step.id, stepStates, []);
-                const logLines = isPending
-                  ? []
-                  : projectLogLines([], window);
-
-                // Start timestamp for elapsed time calculation
-                // unreachable in v1 — kept for TASK-765 (window is always null until step timestamps land)
-                const windowStart = window?.start ?? Date.now();
 
                 return (
                   <div
@@ -444,38 +308,6 @@ export function WorkflowProgressTimeline({
                     <div className="mt-0.5 pl-4 text-text-tertiary">
                       {resolveStepAgentKey(step.id, step.agent) ?? step.agent}
                     </div>
-
-                    {/* Log lines — only for non-pending steps */}
-                    {!isPending && logLines.length > 0 && (
-                      <div className="mt-1 flex flex-col gap-0.5 pl-4">
-                        {logLines.map((line, idx) => (
-                          <div
-                            key={idx}
-                            data-testid={`log-line-${step.id}-${idx}`}
-                            className="flex items-baseline gap-1 font-mono"
-                          >
-                            {/* Prefix glyph */}
-                            <span className="shrink-0 text-text-secondary">
-                              {GLYPH[line.kind]}
-                            </span>
-                            {/* 42px tabular-numerics timestamp column */}
-                            <span
-                              className="shrink-0 text-text-muted"
-                              style={{
-                                width: '42px',
-                                fontVariantNumeric: 'tabular-nums',
-                              }}
-                            >
-                              {formatElapsed(line.t - windowStart)}
-                            </span>
-                            {/* Message body */}
-                            <span className="truncate text-text-secondary">
-                              {line.text}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
 
                     {/* "creates ⟨artifact⟩" footer chip — steps that produce an artifact */}
                     {step.outputArtifact && (

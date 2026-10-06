@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { formatDistanceToNow } from '../../../utils/formatters';
-import { formatDuration, getTimeDifference, isValidTimestamp, parseTimestamp } from '../../../utils/timestampUtils';
+import { formatDistanceToNow, formatDuration, getTimeDifference, isValidTimestamp, parseTimestamp } from '../../../utils/timestampUtils';
 import { API } from '../../../utils/api';
 import { PromptDetailModal } from '../../PromptDetailModal';
 // import type { Session } from '../../../types/session';
@@ -250,7 +249,7 @@ export function PromptNavigation({ panelId, prompts: controlledPrompts, onNaviga
                       {marker.prompt_text}
                     </div>
                     <div className="flex items-center space-x-2 text-xs text-text-tertiary mt-1">
-                      <span>{formatDistanceToNow(parseTimestamp(marker.timestamp))} ago</span>
+                      <span>{formatDistanceToNow(parseTimestamp(marker.timestamp))}</span>
                       {calculateDuration(marker, index) && (
                         <>
                           <span className="text-text-tertiary">•</span>

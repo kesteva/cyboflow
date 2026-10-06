@@ -24,7 +24,7 @@
  * so extracting the probe changed no string anywhere.
  */
 import { detectClaudeCredentials } from '../utils/claudeCredentials';
-import { detectClaudeBinary } from '../utils/claudeCodeTest';
+import { detectClaudeBinary } from '../utils/claudeBinaryDetection';
 import { computeState as computeClaudeDetectionState } from '../ipc/claudeDetection';
 
 export type ClaudeSdkPreflightFailure =

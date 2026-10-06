@@ -73,7 +73,6 @@ vi.mock('../../../stores/codexModelCatalogStore', () => ({
 
 /** Frozen classification — do NOT re-derive from section order. */
 const FEATURE_CONTROLS = [
-  'Cyboflow Attribution',
   'CLI Runtime',
   'Computed Run Cost',
   'Artifact Commit Location',
@@ -95,7 +94,6 @@ const SESSION_SETTINGS = [
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     ...over,
   };
 }
@@ -165,7 +163,6 @@ describe('Settings — AI tab groups', () => {
       success: true,
       data: baseConfig({
         systemPromptAppend: 'be terse',
-        enableCyboflowFooter: false,
         defaultAgentPermissionMode: 'acceptEdits',
         interactivePtyOnly: true,
         defaultExecutionModel: 'orchestrated',
@@ -188,7 +185,6 @@ describe('Settings — AI tab groups', () => {
     expect(configUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         // Feature controls
-        enableCyboflowFooter: false,
         interactivePtyOnly: true,
         computeCostFromRates: true,
         artifactCommitDir: 'docs/artifacts',

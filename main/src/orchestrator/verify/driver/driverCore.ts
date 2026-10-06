@@ -97,8 +97,8 @@
  * operations with no real browser. `playwright` itself is imported ONLY as a
  * type (erased at compile time) plus lazily via `await import('playwright')`
  * inside `createDefaultDriverDeps()`'s helpers — the same pattern
- * `playwrightBackend.ts` / `playwrightInstaller.ts` use so a build that
- * pruned the devDependency soft-fails instead of MODULE_NOT_FOUND-crashing.
+ * `playwrightInstaller.ts` uses so a build that pruned the devDependency
+ * soft-fails instead of MODULE_NOT_FOUND-crashing.
  * `createDefaultDriverDeps()` is the only export that touches a real browser,
  * real filesystem, or a real child process; `driverCli.ts` is its only
  * caller.
@@ -158,7 +158,7 @@ export const ATTEST_HTTP_TIMEOUT_MS = 10_000;
 /** How long ONE peekaboo invocation (window listing / screen capture) may run. */
 export const PEEKABOO_TIMEOUT_MS = 30_000;
 
-/** The peekaboo binary used when `VERIFY_PEEKABOO_BIN` is unset (matches peekabooBackend's bare-`peekaboo`-on-PATH assumption). */
+/** The peekaboo binary used when `VERIFY_PEEKABOO_BIN` is unset (matches PeekabooGrantProbe's bare-`peekaboo`-on-PATH default). */
 export const DEFAULT_PEEKABOO_BIN = 'peekaboo';
 
 /**
@@ -1617,7 +1617,7 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * `playwright` is loaded LAZILY here (never at module scope) — same
- * contract as `playwrightBackend.ts` / `playwrightInstaller.ts`: a packaged
+ * contract as `playwrightInstaller.ts`: a packaged
  * build that pruned the devDependency soft-fails at call time instead of
  * MODULE_NOT_FOUND-crashing this CLI's boot.
  */

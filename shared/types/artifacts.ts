@@ -1001,8 +1001,8 @@ export function verifyTranscriptFileName(requestId: string): string {
  * The parsed `payload_json` shape of a `screenshots` artifact. The producer
  * (visual-verify agent / safety-net scan) writes `{ fileNames }`; the verdict
  * delivery chokepoint (P8) ENRICHES the SAME artifact (idempotent UPSERT by
- * (runId, atype)) with an optional `verdict` block once the VlmJudge has judged
- * those PNGs. Both halves of the contract live here so the renderer's screenshots
+ * (runId, atype)) with an optional `verdict` block once the verification has
+ * judged those PNGs. Both halves of the contract live here so the renderer's screenshots
  * tab and the main-side enrich path read ONE shape (type-parity across the
  * payload_json string boundary). Extra keys are tolerated (payload is per-atype).
  */

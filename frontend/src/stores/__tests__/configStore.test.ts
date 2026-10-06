@@ -26,7 +26,7 @@ vi.mock('../../utils/api', () => ({
 }));
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
-  return { gitRepoPath: '/repo', ...over };
+  return { ...over };
 }
 
 beforeEach(() => {

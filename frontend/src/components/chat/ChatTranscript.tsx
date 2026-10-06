@@ -173,10 +173,6 @@ export interface ChatTranscriptProps {
   copiedMessageId: string | null;
   onCopyMessage: (message: UnifiedMessage) => void;
 
-  /** Settings panel controls (panel-only; presentational here). */
-  showSettings?: boolean;
-  onSettingsChange?: (settings: RichOutputSettings) => void;
-
   /** Imperative scroll plumbing owned by the caller. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
@@ -190,7 +186,7 @@ export interface ChatTranscriptProps {
    * workflow-run chat to render the inline `AskUserQuestionCard` where the
    * `AskUserQuestion` tool_use appears. Returns `null`/`undefined` for tool
    * calls that need no extra UI. When omitted, ChatTranscript renders no
-   * extras (default behavior for RichOutputView).
+   * extras.
    */
   renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
 }
@@ -1464,7 +1460,7 @@ function buildRowDescriptors(
  * Holds NO data fetching, NO IPC, NO window-event listeners, and NO
  * localStorage access. All state (collapse/expand/copy/scroll) is owned by the
  * caller and passed in as props so this component can be reused across the
- * quick-session chat (RichOutputView) and future consumers.
+ * run and quick-session chats (UnifiedChatView) and future consumers.
  *
  * Rendering is split into a memoized grouping prepass (`buildRowDescriptors`,
  * keyed on the message array + settings) and memoized per-row components that
@@ -1487,8 +1483,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   onToggleToolExpand,
   copiedMessageId,
   onCopyMessage,
-  showSettings,
-  onSettingsChange,
   scrollContainerRef,
   messagesEndRef,
   userMessageRefs,
@@ -1556,41 +1550,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
   return (
     <div className="h-full flex flex-col bg-bg-primary relative">
-      {/* Settings Panel */}
-      {showSettings && onSettingsChange && (
-        <div className="px-4 py-3 border-b border-border-primary bg-surface-secondary">
-          <div className="flex flex-wrap gap-4 text-xs">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.showToolCalls}
-                onChange={(e) => onSettingsChange({ ...settings, showToolCalls: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Show Tool Calls</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.compactMode}
-                onChange={(e) => onSettingsChange({ ...settings, compactMode: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Compact Mode</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.showThinking}
-                onChange={(e) => onSettingsChange({ ...settings, showThinking: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Show Thinking</span>
-            </label>
-          </div>
-        </div>
-      )}
-
       {/* Messages */}
       <div
         className="flex-1 overflow-y-auto relative scrollbar-thin scrollbar-thumb-border-secondary scrollbar-track-transparent hover:scrollbar-thumb-border-primary"

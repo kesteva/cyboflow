@@ -15,7 +15,7 @@ const detectClaudeBinary = vi.fn(async (_configuredPath?: string) => ({ found: t
 vi.mock('../../utils/claudeCredentials', () => ({
   detectClaudeCredentials: () => detectClaudeCredentials(),
 }));
-vi.mock('../../utils/claudeCodeTest', () => ({
+vi.mock('../../utils/claudeBinaryDetection', () => ({
   detectClaudeBinary: (configuredPath?: string) => detectClaudeBinary(configuredPath),
 }));
 

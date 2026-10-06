@@ -21,7 +21,7 @@ import type { RunTypeDefaults } from '../../../../../shared/types/sessionDefault
 import { ALL_AGENT_RUNTIMES } from '../../../../../shared/types/agentRuntime';
 import { ALL_EFFORT_LEVELS } from '../../../../../shared/types/reasoningEffort';
 import { PERMISSION_MODES } from '../../../../../shared/types/workflows';
-import type { ConfigOpsResult, SessionCreationPreferences } from '../contracts/configOps';
+import type { ConfigOpsResult } from '../contracts/configOps';
 
 const runTypeDefaultsFields = {
   // trim().min(1): a whitespace-only or empty model string still passes a
@@ -99,31 +99,5 @@ export const configRouter = router({
         });
       }
       return ctx.configOps.applyRunTypeDefault(input.key, input.op);
-    }),
-
-  getSessionPreferences: protectedProcedure.query(
-    async ({ ctx }): Promise<ConfigOpsResult<SessionCreationPreferences>> => {
-      if (!ctx.configOps) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: 'configOps not wired into tRPC context',
-        });
-      }
-      return ctx.configOps.getSessionPreferences();
-    },
-  ),
-
-  updateSessionPreferences: protectedProcedure
-    // Same treatment as `update`: shape-only assertion here, member handling
-    // in the ops impl.
-    .input(z.custom<SessionCreationPreferences>((v) => typeof v === 'object' && v !== null && !Array.isArray(v)))
-    .mutation(async ({ ctx, input }): Promise<ConfigOpsResult> => {
-      if (!ctx.configOps) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: 'configOps not wired into tRPC context',
-        });
-      }
-      return ctx.configOps.updateSessionPreferences(input);
     }),
 });

@@ -2,7 +2,7 @@
  * Regression guard: convertDbSessionToSession must copy the DbSession.run_id column
  * onto the returned Session.runId field, coalescing undefined to null.
  *
- * FIND-SPRINT-037-1 documents the silent inversion: SessionListItem.tsx:431 reads
+ * FIND-SPRINT-037-1 documents the silent inversion: the sidebar's Quick badge read
  * session.runId (== null → Quick badge), but the mapper never copied run_id, so
  * runId was always undefined and the badge fired for every session including
  * flow-owned ones.
@@ -32,15 +32,6 @@ vi.mock('../panelManager', () => ({
 vi.mock('../../ipc/logs', () => ({
   addSessionLog: vi.fn(),
   cleanupSessionLogs: vi.fn(),
-}));
-
-vi.mock('../scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    markClosing: vi.fn(),
-    isRunning: vi.fn().mockReturnValue(false),
-  },
 }));
 
 // ------------------------------------------------------------------

@@ -3,17 +3,15 @@
  * hooks and the main-process `before-input-event` matcher both read.
  *
  * Why the module exists, and what these tests protect:
- *   - `ShortcutAction` holds eight remappable actions, but FIVE real app-level
+ *   - `ShortcutAction` holds eight remappable actions, but FOUR real app-level
  *     chords are hand-rolled in their own hooks and absent from it. Resolving
- *     only the eight would leave those five silently dead whenever a native
+ *     only the eight would leave those four silently dead whenever a native
  *     web-viewer view had focus, which is the failure this table prevents. So the
  *     table's MEMBERSHIP is pinned.
- *   - the five keep `eitherMod` semantics (Cmd OR Ctrl on any platform) because
+ *   - the four keep `eitherMod` semantics (Cmd OR Ctrl on any platform) because
  *     that is what they already do; the eight keep the strict platform rule.
  *     Both are pinned, in both directions.
  *   - Escape is reported but NOT suppressed, because a page owns its own Escape.
- *   - `tokenTest` is development-only, so a packaged build must not swallow
- *     Cmd-Shift-T from a page.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -34,7 +32,7 @@ function ev(over: Partial<ReservedChordMatchEvent> = {}): ReservedChordMatchEven
 
 describe('resolveReservedChords — membership', () => {
   it('covers every remappable action AND every fixed chord', () => {
-    const chords = resolveReservedChords(undefined, { devMode: true });
+    const chords = resolveReservedChords(undefined);
     const actions = chords.map((c) => c.action);
     for (const action of SHORTCUT_ACTIONS) expect(actions).toContain(action);
     for (const action of FIXED_CHORD_ACTIONS) expect(actions).toContain(action);
@@ -57,16 +55,9 @@ describe('resolveReservedChords — membership', () => {
     const hit = matchReservedChord(ev({ key: 'e', metaKey: true }), chords, 'mac');
     expect(hit?.action).toBe('newSession');
   });
-
-  it('omits the dev-only tokenTest chord outside development', () => {
-    const packaged = resolveReservedChords(undefined);
-    expect(packaged.map((c) => c.action)).not.toContain('tokenTest');
-    // …so a packaged build does not silently swallow Cmd-Shift-T from a page.
-    expect(matchReservedChord(ev({ key: 'T', shiftKey: true, metaKey: true }), packaged, 'mac')).toBeNull();
-  });
 });
 
-describe('chordMatches — the fixed five accept EITHER mod key', () => {
+describe('chordMatches — the fixed four accept EITHER mod key', () => {
   it('fires on Cmd and on Ctrl, on both platforms', () => {
     const chord = FIXED_CHORD_BINDINGS.addClaudePanel;
     for (const platform of ['mac', 'other'] as const) {
@@ -130,13 +121,13 @@ describe('isDismissChord / matchReservedChord suppression', () => {
   it('SUPPRESSES every mod-chord', () => {
     // preventDefault() on the main side suppresses both the page and the menu
     // accelerator; without it the page receives the keystroke and acts twice.
-    const chords = resolveReservedChords(undefined, { devMode: true });
+    const chords = resolveReservedChords(undefined);
     const hit = matchReservedChord(ev({ key: 'S', shiftKey: true, metaKey: true }), chords, 'mac');
     expect(hit).toEqual({ action: 'addQuickSession', suppress: true });
   });
 
   it('returns null for an ordinary keystroke, so the page keeps it', () => {
-    const chords = resolveReservedChords(undefined, { devMode: true });
+    const chords = resolveReservedChords(undefined);
     expect(matchReservedChord(ev({ key: 'a' }), chords, 'mac')).toBeNull();
     expect(matchReservedChord(ev({ key: 'a', shiftKey: true }), chords, 'mac')).toBeNull();
   });

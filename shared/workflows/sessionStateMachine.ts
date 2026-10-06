@@ -32,9 +32,9 @@ export type SessionStatus = 'pending' | 'running' | 'stopped' | 'completed' | 'f
  * make it complete:
  *
  *   1. WAKE — every resting status re-enters `running` on a follow-up turn.
- *      `sessions:input`, `claude-panels:continue`, the PTY dispatch rest seam and
- *      the boot resume all write `{ status: 'running' }` without consulting the
- *      status they are leaving (ipc/session.ts, ipc/ptyPanelDispatch.ts,
+ *      `sessions:input`, the PTY dispatch rest seam and the boot resume all
+ *      write `{ status: 'running' }` without consulting the status they are
+ *      leaving (ipc/session.ts, ipc/ptyPanelDispatch.ts,
  *      index.ts). So {pending, stopped, completed, failed} -> running are all live.
  *
  *   2. RE-INIT — `sessions:continue-conversation` writes `'initializing'`, which

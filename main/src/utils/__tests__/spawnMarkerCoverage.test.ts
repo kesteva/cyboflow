@@ -26,13 +26,10 @@ const SRC = path.resolve(__dirname, '..', '..');
 const STAMPED_MODULES = [
   'services/panels/cli/AbstractCliManager.ts',
   'services/sessionManager.ts',
-  'services/terminalSessionManager.ts',
   'services/terminalPanelManager.ts',
   'services/runShellManager.ts',
-  'services/runCommandManager.ts',
   'services/panels/codex/appServer/runConfig.ts',
   'services/panels/logPanel/logsManager.ts',
-  'services/visualVerify/devServerManager.ts',
   'orchestrator/verify/verificationAgentRunner.ts',
   'orchestrator/verify/verificationAgentQuery.ts',
   'orchestrator/mcpServer/mcpServerLifecycle.ts',
@@ -80,20 +77,14 @@ type SpawnSite =
 
 const SPAWN_SITES: Record<string, SpawnSite[]> = {
   'services/panels/cli/AbstractCliManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 2 }],
-  'services/sessionManager.ts': [
-    { kind: 'call', callee: 'spawn', count: 1 },
-    { kind: 'call', callee: 'execAsync', count: 1 },
-  ],
-  'services/terminalSessionManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
+  'services/sessionManager.ts': [{ kind: 'call', callee: 'execAsync', count: 1 }],
   'services/terminalPanelManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
   'services/runShellManager.ts': [{ kind: 'call', callee: 'this.spawn', count: 1 }],
-  'services/runCommandManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
   'services/panels/codex/appServer/runConfig.ts': [
     { kind: 'property', name: 'cyboflow', count: 1 },
     { kind: 'return-stamp', count: 1 },
   ],
   'services/panels/logPanel/logsManager.ts': [{ kind: 'call', callee: 'spawn', count: 1 }],
-  'services/visualVerify/devServerManager.ts': [{ kind: 'call', callee: 'spawn', count: 2 }],
   'orchestrator/verify/verificationAgentRunner.ts': [{ kind: 'call', callee: 'queryFn', count: 1 }],
   'orchestrator/verify/verificationAgentQuery.ts': [{ kind: 'call', callee: 'query', count: 1 }],
   'orchestrator/mcpServer/mcpServerLifecycle.ts': [{ kind: 'call', callee: 'spawn', count: 1 }],
@@ -246,8 +237,10 @@ export function handWritesMarker(src: string): boolean {
 }
 
 describe('spawn marker chokepoint coverage', () => {
-  it('enumerates all 15 epic modules', () => {
-    expect(STAMPED_MODULES.length + INHERITING_MODULES.length).toBe(15);
+  // 15 epic modules, minus the three spawn owners the Crystal cleanup deleted
+  // (terminalSessionManager, runCommandManager, visualVerify/devServerManager).
+  it('enumerates all 12 live spawn-owning modules', () => {
+    expect(STAMPED_MODULES.length + INHERITING_MODULES.length).toBe(12);
   });
 
   it.each(STAMPED_MODULES)('%s calls stampSpawnMarker', (rel) => {
@@ -368,8 +361,8 @@ describe('spawn marker chokepoint coverage', () => {
     it('a spawn with no env property at all is unstamped', () => {
       expect(spawnSiteStamps(`${HEAD}spawn(cmd, { cwd });`, spawnSite(1))).toEqual([{ count: 1, unstamped: 1 }]);
     });
-    it('catches losing the stamp at ONE real devServerManager site (in-memory mutation)', () => {
-      const rel = 'services/visualVerify/devServerManager.ts';
+    it('catches losing the stamp at a real terminalPanelManager site (in-memory mutation)', () => {
+      const rel = 'services/terminalPanelManager.ts';
       const real = read(rel);
       expect(spawnSiteStamps(real, SPAWN_SITES[rel])[0].unstamped).toBe(0);
       const idx = real.lastIndexOf('env: stampSpawnMarker(');

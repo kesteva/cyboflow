@@ -7,7 +7,7 @@
  * docs/proposals/session-summary-plan.md §4).
  *
  * Uses a REAL DatabaseService against a temp-file DB and a full initialize()
- * (folderCrud.test.ts / sessionUpdatedAtSemantics.test.ts pattern) so the
+ * (sessionUpdatedAtSemantics.test.ts pattern) so the
  * session_summaries / session_summary_entries tables and the sessions FK
  * (ON DELETE CASCADE) are exactly as they ship.
  */

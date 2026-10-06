@@ -14,15 +14,13 @@ export interface Project {
   updated_at: string;
   default_permission_mode?: 'approve' | 'ignore';
   open_ide_command?: string | null;
-  /** Detected default branch, persisted at create time (runtime re-detects live). */
-  main_branch?: string | null;
   display_order?: number;
   worktree_folder?: string | null;
-  lastUsedModel?: string;
   /**
    * Per-project trust for repo-supplied permission ALLOW rules (migration 127).
-   * NULL = undecided (the trust prompt in projects:activate / projects:create
-   * has not been answered yet); 'trusted' | 'untrusted' are terminal — see
+   * NULL = undecided (the trust prompt — shown at projects:create or the first
+   * session/run launch in the project, main/src/services/permissionTrustPrompt.ts
+   * — has not been answered yet); 'trusted' | 'untrusted' are terminal — see
    * main/src/orchestrator/permissionRules.ts's trust-model doc comment.
    */
   permission_trust?: 'trusted' | 'untrusted' | null;
@@ -36,25 +34,6 @@ export interface Project {
    * shared/types/thoroughness.ts.
    */
   solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
-}
-
-export interface ProjectRunCommand {
-  id: number;
-  project_id: number;
-  command: string;
-  display_name?: string;
-  order_index: number;
-  created_at: string;
-}
-
-export interface Folder {
-  id: string;
-  name: string;
-  project_id: number;
-  parent_folder_id?: string | null;
-  display_order: number;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface Session {
@@ -77,9 +56,7 @@ export interface Session {
    * `updated_at`, which is the pre-migration behavior.
    */
   idle_since?: string | null;
-  last_output?: string;
   exit_code?: number;
-  pid?: number;
   archived?: boolean;
   last_viewed_at?: string;
   project_id?: number;
@@ -220,9 +197,7 @@ export interface UpdateSessionData {
   name?: string;
   status?: Session['status'];
   status_message?: string;
-  last_output?: string;
   exit_code?: number;
-  pid?: number;
   folder_id?: string | null;
   // null clears the column — used to invalidate a now-stale interactive resume id
   // when a fork-resume spawn's transcript never bound (avoids a silent rewind).
@@ -269,20 +244,6 @@ export interface ExecutionDiff {
 
 export interface CreateExecutionDiffData {
   session_id: string;
-  prompt_marker_id?: number;
-  execution_sequence: number;
-  git_diff?: string;
-  files_changed?: string[];
-  stats_additions?: number;
-  stats_deletions?: number;
-  stats_files_changed?: number;
-  before_commit_hash?: string;
-  after_commit_hash?: string;
-  commit_message?: string;
-}
-
-export interface CreatePanelExecutionDiffData {
-  panel_id: string;
   prompt_marker_id?: number;
   execution_sequence: number;
   git_diff?: string;

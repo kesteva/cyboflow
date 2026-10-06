@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { composeStepPrompt, definitionMergesDecomposition } from '../stepPrompt';
 import { SpawnStepRunner } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
 import type { WorkflowDefinition, WorkflowStep } from '../../../../../shared/types/workflows';
 

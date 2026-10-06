@@ -13,7 +13,7 @@
  * the view stopped swallowing it.
  *
  * It also de-duplicates the focus-guard logic that was copy-pasted across the
- * five hand-rolled shortcut hooks, and reads its bindings from the one shared
+ * hand-rolled shortcut hooks, and reads its bindings from the one shared
  * registry (shared/types/reservedChords.ts) that the main-process matcher reads —
  * so the two sides cannot drift.
  *
@@ -86,7 +86,7 @@ export interface UseReservedChordOptions {
  * or inside a focused native view.
  *
  * The callback is pinned in a ref so the window listener registers once and never
- * goes stale, which is the behaviour the five hooks this replaces relied on.
+ * goes stale, which is the behaviour the hooks this replaces relied on.
  */
 export function useReservedChord(
   action: FixedChordAction | ReservedChordAction,

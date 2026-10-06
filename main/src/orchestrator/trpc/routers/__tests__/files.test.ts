@@ -2,12 +2,15 @@
  * Integration tests for the orchestrator tRPC cyboflow.files procedures
  * (session-keyed File Explorer).
  *
- * A thin router test mirroring the listFiles/readFile cases in runs.test.ts:
+ * A thin router test (handler-level behavior — path safety, binary detection,
+ * sorting, symlink containment — is covered by
+ * main/src/orchestrator/__tests__/runFileExplorer.test.ts):
  *   (a) Happy path: a seeded session with a real temp worktree returns the
  *       expected listing / file content.
  *   (b) Missing ctx.db → TRPCError PRECONDITION_FAILED (the db guard).
  *   (c) Unknown sessionId → RunFileError('session-not-found') maps to a
  *       TRPCError NOT_FOUND via withRunFileErrorMapping.
+ *   (d) The remaining RunFileError -> TRPCError code mappings.
  *
  * GATE_SCHEMA omits the `sessions` table, so each test layers a minimal one on
  * top (id + worktree_path — the only columns the session resolver reads).
@@ -107,6 +110,39 @@ describe('cyboflow.files.list / read', () => {
       caller.cyboflow.files.read({ sessionId: 'no-such-session', path: 'note.md' }),
     ).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) RunFileError reason → TRPCError code
+  // -------------------------------------------------------------------------
+  it('(d) list: traversal path → BAD_REQUEST (invalid-path mapping)', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.files.list({ sessionId: SESSION_ID, path: '../..' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+    );
+  });
+
+  it('(d) read: directory target → BAD_REQUEST (not-a-file mapping)', async () => {
+    fs.mkdirSync(path.join(worktree, 'sub'));
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.files.read({ sessionId: SESSION_ID, path: 'sub' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+    );
+  });
+
+  it('(d) read: missing file → NOT_FOUND (not-found mapping)', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.files.read({ sessionId: SESSION_ID, path: 'gone.txt' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+
+  it('(d) list: worktree gone from disk → PRECONDITION_FAILED (worktree-missing mapping)', async () => {
+    fs.rmSync(worktree, { recursive: true, force: true });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.files.list({ sessionId: SESSION_ID })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
   });
 });

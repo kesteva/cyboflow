@@ -127,9 +127,10 @@ const KNOWN_ORPHANS = new Set<string>([]);
 describe('C6 — every preload-invoked IPC channel has a handler (drift guard)', () => {
   it('the extraction found the expected order-of-magnitude of channels', () => {
     // Vacuous-pass guard: if either regex silently matched nothing, the parity
-    // assertion below would be meaningless.
-    expect(collectHandledChannels().size).toBeGreaterThan(100);
-    expect(collectInvokedChannels().size).toBeGreaterThan(100);
+    // assertion below would be meaningless. The floor sits well under the real
+    // count because the legacy surface only shrinks (noNewIpcHandlers.test.ts).
+    expect(collectHandledChannels().size).toBeGreaterThan(50);
+    expect(collectInvokedChannels().size).toBeGreaterThan(50);
   });
 
   it('no preload channel is unhandled except the documented known orphans', () => {

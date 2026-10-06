@@ -25,9 +25,8 @@ export interface UseAddClaudePanelOptions {
  * optional onAfterActivate side-effect.
  *
  * Accepts an optional per-panel `substrate` override, applied AT CREATION
- * (CreatePanelRequest.substrate — the same column `claude-panels:set-substrate`
- * writes post-hoc) so the picker offered alongside "Add chat" launches the new
- * panel directly in the chosen substrate instead of requiring a later change.
+ * (CreatePanelRequest.substrate) so the picker offered alongside "Add chat"
+ * launches the new panel directly in the chosen substrate.
  * Omitted/undefined inherits the session's substrate, unchanged.
  */
 export function useAddClaudePanel(

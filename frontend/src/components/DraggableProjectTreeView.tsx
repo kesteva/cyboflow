@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon, FlaskConical, Pencil } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder as FolderIcon, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon, FlaskConical, Pencil } from 'lucide-react';
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
@@ -17,9 +17,7 @@ import { trpc } from '../trpc/client';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
 import type { Project } from '../types/project';
-import type { Folder } from '../types/folder';
 import type { Session } from '../types/session';
-import { useContextMenu } from '../contexts/ContextMenuContext';
 import { CreateProjectDialog } from './CreateProjectDialog';
 import { formatDistanceToNow } from '../utils/timestampUtils';
 import { useRailExperiments } from '../hooks/useRailExperiments';
@@ -38,21 +36,9 @@ import { useOcclusion } from '../hooks/useOcclusion';
 // Types
 // ---------------------------------------------------------------------------
 
-interface ProjectWithRuns extends Project {
-  /** Always-empty placeholder; kept so existing folder/drag logic compiles.
-   *  Session rows are derived from the session store at render time (reactive),
-   *  not stored here. */
-  sessions: never[];
-  folders: Folder[];
-}
-
 interface DragState {
-  type: 'project' | 'folder' | null;
   projectId: number | null;
-  folderId: string | null;
-  overType: 'project' | 'folder' | null;
   overProjectId: number | null;
-  overFolderId: string | null;
 }
 
 interface SessionDragState {
@@ -116,7 +102,7 @@ const EXPERIMENT_PILL_CLASS: Record<RailExperimentPillTone, string> = {
  * collapse still persists via the saved-layout path; this only governs the
  * no-saved-layout default + the post-hydration auto-expand.)
  */
-function allProjectIds(projects: ProjectWithRuns[]): Set<number> {
+function allProjectIds(projects: Project[]): Set<number> {
   return new Set(projects.map((p) => p.id));
 }
 
@@ -134,10 +120,9 @@ function allProjectIds(projects: ProjectWithRuns[]): Set<number> {
 function noopSessionRowDragHandler(): void {}
 
 // ---------------------------------------------------------------------------
-// SessionRow — extracted + memoized so a git-status update to ONE session
-// (allSessions gets a new array reference, but unrelated Session objects keep
-// their identity — see sessionStore.updateSessionGitStatusBatch) doesn't force
-// every row in the rail to re-render. See sessionRowPropsEqual below for the
+// SessionRow — extracted + memoized so an update to ONE session (allSessions
+// gets a new array reference, but unrelated Session objects keep their
+// identity) doesn't force every row in the rail to re-render. See sessionRowPropsEqual below for the
 // comparator: `childRuns` in particular is rebuilt via .filter() on every
 // parent render (new array reference even with unchanged content), so it's
 // compared by content, not identity.
@@ -228,9 +213,8 @@ export const SessionRow = memo(function SessionRow({
   isDraggable = true,
 }: SessionRowProps) {
   // Inline rename — SessionRow-local only (no new props, so sessionRowPropsEqual
-  // above needs no changes). Mirrors SessionListItem's handleSaveEdit/
-  // handleCancelEdit/handleKeyDown: trim; empty or unchanged closes without an
-  // API call; failure alerts + reverts. No optimistic local name cache after a
+  // above needs no changes). Save/cancel/keydown semantics: trim; empty or
+  // unchanged closes without an API call; failure alerts + reverts. No optimistic local name cache after a
   // successful save — the store's 'session-updated' replaces `session` and this
   // memoized row re-renders from that, same as every other prop.
   const [isEditingName, setIsEditingName] = useState(false);
@@ -495,35 +479,21 @@ export const SessionRow = memo(function SessionRow({
 // ---------------------------------------------------------------------------
 
 function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
-  const [projectsWithRuns, setProjectsWithRuns] = useState<ProjectWithRuns[]>([]);
+  const [projectsWithRuns, setProjectsWithRuns] = useState<Project[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<number>>(new Set());
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [selectedProjectForSettings, setSelectedProjectForSettings] = useState<Project | null>(null);
   const [showAddProjectDialog, setShowAddProjectDialog] = useState(false);
-  const [showCreateFolderDialog, setShowCreateFolderDialog] = useState(false);
-  useOcclusion(showCreateFolderDialog, 'create-folder-dialog');
   const [refreshingProjects, setRefreshingProjects] = useState<Set<number>>(new Set());
   const [runningProjectId, setRunningProjectId] = useState<number | null>(null);
   const [closingProjectId, setClosingProjectId] = useState<number | null>(null);
-  const [selectedProjectForFolder, setSelectedProjectForFolder] = useState<Project | null>(null);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [parentFolderForCreate, setParentFolderForCreate] = useState<Folder | null>(null);
 
-  // Folder rename state
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
-  const [editingFolderName, setEditingFolderName] = useState('');
-
-  // Project/folder drag state stays independent from session reorder state so
-  // those established interactions cannot affect one another.
+  // Project drag state stays independent from session reorder state so those
+  // established interactions cannot affect one another.
   const [dragState, setDragState] = useState<DragState>({
-    type: null,
     projectId: null,
-    folderId: null,
-    overType: null,
     overProjectId: null,
-    overFolderId: null,
   });
   const [sessionDragState, setSessionDragState] = useState<SessionDragState>({
     sessionId: null,
@@ -558,23 +528,19 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   // The "Not sure yet" branch reaches step 9 with no project: its first callout
   // points at the empty state's Add Project button instead.
   const addProjectMarked = projectHomeMark && guidedProjectId === null;
-  const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // A/B experiment group rows: per-project experiments + summaries for the rail.
   const projectIds = projectsWithRuns.map((p) => p.id);
   const { byProject: experimentsByProject, refetch: refetchExperiments } = useRailExperiments(projectIds);
   // Experiment group expand/collapse is SESSION-LOCAL (in-memory): the persisted
-  // uiState seam only stores expandedProjects/expandedFolders, and generalizing it
+  // uiState seam only stores expandedProjects, and generalizing it
   // to arbitrary keys would need a main-process handler change (out of this slice's
   // fence). An explicit per-experiment override wins over the status default
   // (expanded while running|grading, collapsed once decided).
   const [experimentExpandOverride, setExperimentExpandOverride] = useState<Record<string, boolean>>({});
-  // Local context menu for a group parent row — the shared ContextMenuContext only
-  // types 'session' | 'folder', so the experiment menu lives here — plus the
-  // cancel-experiment confirm target.
+  // Local context menu for a group parent row, plus the cancel-experiment
+  // confirm target.
   const [experimentMenu, setExperimentMenu] = useState<{ group: RailExperimentGroup; name: string; x: number; y: number } | null>(null);
-  // Local-state menu (the shared ContextMenuContext, which holds its own lease,
-  // only types 'session' | 'folder').
   useOcclusion(experimentMenu !== null, 'experiment-context-menu');
   const [cancelExperiment, setCancelExperiment] = useState<{ id: string; name: string } | null>(null);
 
@@ -594,9 +560,9 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
 
   // Debounced UI state save
   const saveUIState = useCallback(
-    debounce(async (projectIds: number[], folderIds: string[]) => {
+    debounce(async (projectIds: number[]) => {
       try {
-        await window.electronAPI?.uiState?.saveExpanded(projectIds, folderIds);
+        await window.electronAPI?.uiState?.saveExpanded(projectIds);
       } catch (error) {
         console.error('[DraggableProjectTreeView] Failed to save UI state:', error);
       }
@@ -605,28 +571,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   );
 
   useEffect(() => {
-    const projectIds = Array.from(expandedProjects);
-    const folderIds = Array.from(expandedFolders);
-    saveUIState(projectIds, folderIds);
-  }, [expandedProjects, expandedFolders, saveUIState]);
-
-  const handleFolderCreated = (folder: Folder) => {
-    setProjectsWithRuns(prevProjects => {
-      return prevProjects.map(project => {
-        if (project.id === folder.projectId) {
-          return {
-            ...project,
-            folders: [...(project.folders || []), folder],
-          };
-        }
-        return project;
-      });
-    });
-    setExpandedFolders(prev => new Set([...prev, folder.id]));
-    if (folder.projectId) {
-      setExpandedProjects(prev => new Set([...prev, folder.projectId]));
-    }
-  };
+    saveUIState(Array.from(expandedProjects));
+  }, [expandedProjects, saveUIState]);
 
   // ---------------------------------------------------------------------------
   // Data loading
@@ -642,13 +588,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
 
       const projects = response.data as Project[];
 
-      const projectsWithRunsData: ProjectWithRuns[] = projects.map((p) => ({
-        ...p,
-        sessions: [] as never[],
-        folders: [] as Folder[],
-      }));
-
-      setProjectsWithRuns(projectsWithRunsData);
+      setProjectsWithRuns(projects);
 
       // Restore saved UI state or auto-expand
       let savedState = null;
@@ -661,29 +601,23 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
         console.error('[DraggableProjectTreeView] Failed to load saved UI state:', _e);
       }
 
-      // An EMPTY saved expansion (`{ expandedProjects: [], expandedFolders: [] }`)
-      // is not a meaningful layout — it is what a prior boot persists when it
-      // auto-expanded before the session store had hydrated (found no sessions →
-      // saved []). Empty arrays are truthy, so the old guard
-      // (`savedState?.expandedProjects && savedState?.expandedFolders`) restored
-      // that empty set and collapsed every project on every subsequent boot,
-      // hiding all sessions. Treat empty-or-absent as "unset" and fall through to
-      // auto-expand instead.
-      const hasSavedExpansion =
-        (savedState?.expandedProjects?.length ?? 0) > 0 ||
-        (savedState?.expandedFolders?.length ?? 0) > 0;
+      // An EMPTY saved expansion (`{ expandedProjects: [] }`) is not a meaningful
+      // layout — it is what a prior boot persists when it auto-expanded before
+      // the session store had hydrated (found no sessions → saved []). Empty
+      // arrays are truthy, so restoring that empty set would collapse every
+      // project on every subsequent boot, hiding all sessions. Treat
+      // empty-or-absent as "unset" and fall through to auto-expand instead.
+      const hasSavedExpansion = (savedState?.expandedProjects?.length ?? 0) > 0;
       if (hasSavedExpansion) {
         restoredSavedExpansionRef.current = true;
         setExpandedProjects(new Set(savedState?.expandedProjects ?? []));
-        setExpandedFolders(new Set(savedState?.expandedFolders ?? []));
       } else {
         // No meaningful saved layout — expand ALL projects so a running agent is
         // never hidden behind a collapsed project (keeps the rail consistent with
         // the review-home "Active agents" list). This does not depend on session
         // hydration, so there's no first-pass race to close.
         restoredSavedExpansionRef.current = false;
-        setExpandedProjects(allProjectIds(projectsWithRunsData));
-        setExpandedFolders(new Set());
+        setExpandedProjects(allProjectIds(projects));
       }
 
       // Auto-select the first project when none is active. SELECTION ONLY —
@@ -695,34 +629,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
       // project existed). The overview is a user gesture — a sidebar project
       // click — never a boot side effect.
       const { activeProjectId: currentActive } = useNavigationStore.getState();
-      if (currentActive === null && projectsWithRunsData.length > 0) {
-        useNavigationStore.getState().setActiveProjectId(projectsWithRunsData[0].id);
+      if (currentActive === null && projects.length > 0) {
+        useNavigationStore.getState().setActiveProjectId(projects[0].id);
       }
     } catch (error) {
       console.error('Failed to load projects with runs:', error);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  // Load folders separately and merge
-  const loadFoldersForProjects = async (projects: ProjectWithRuns[]) => {
-    try {
-      const foldersPerProject = await Promise.all(
-        projects.map(p =>
-          window.electronAPI?.folders?.getByProject(p.id)
-            .then(r => (r.success && r.data ? r.data : []))
-            .catch(() => [] as Folder[]),
-        ),
-      );
-      setProjectsWithRuns(prev =>
-        prev.map((p, i) => ({
-          ...p,
-          folders: foldersPerProject[i] ?? [],
-        })),
-      );
-    } catch (error) {
-      console.error('[DraggableProjectTreeView] Failed to load folders:', error);
     }
   };
 
@@ -756,58 +669,12 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     };
     initialize();
 
-    // Folder event listeners (session listeners removed)
-    const handleFolderUpdated = (updatedFolder: Folder) => {
-      setProjectsWithRuns(prevProjects =>
-        prevProjects.map(project => {
-          if (project.id === updatedFolder.projectId) {
-            return {
-              ...project,
-              folders: project.folders.map(folder =>
-                folder.id === updatedFolder.id ? updatedFolder : folder,
-              ),
-            };
-          }
-          return project;
-        }),
-      );
-    };
-
-    const handleFolderDeleted = (folderId: string) => {
-      setProjectsWithRuns(prevProjects =>
-        prevProjects.map(project => {
-          const folderExists = project.folders?.some(f => f.id === folderId);
-          if (folderExists) {
-            return {
-              ...project,
-              folders: project.folders.filter(f => f.id !== folderId),
-            };
-          }
-          return project;
-        }),
-      );
-      setExpandedFolders(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(folderId);
-        return newSet;
-      });
-    };
-
     if (window.electronAPI?.events) {
-      const unsubscribeFolderCreated = window.electronAPI.events.onFolderCreated(handleFolderCreated);
-      const unsubscribeFolderUpdated = window.electronAPI.events.onFolderUpdated(handleFolderUpdated);
-      const unsubscribeFolderDeleted = window.electronAPI.events.onFolderDeleted(handleFolderDeleted);
-
       const unsubscribeProjectUpdated = window.electronAPI.events.onProjectUpdated((updatedProject: Project) => {
         setProjectsWithRuns(prevProjects =>
           prevProjects.map(project => {
             if (project.id === updatedProject.id) {
-              return {
-                ...project,
-                ...updatedProject,
-                sessions: [] as never[],
-                folders: project.folders,
-              };
+              return { ...project, ...updatedProject };
             }
             return project;
           }),
@@ -815,14 +682,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
         window.dispatchEvent(new CustomEvent('project-updated', { detail: updatedProject }));
       });
 
-      return () => {
-        unsubscribeFolderCreated();
-        unsubscribeFolderUpdated();
-        unsubscribeFolderDeleted();
-        unsubscribeProjectUpdated();
-      };
+      return unsubscribeProjectUpdated;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Append projects created via the shared CreateProjectDialog from any call
@@ -835,19 +696,12 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
       setProjectsWithRuns(prev =>
         prev.some(p => p.id === project.id)
           ? prev
-          : [...prev, { ...project, sessions: [] as never[], folders: [] }],
+          : [...prev, project],
       );
     };
     window.addEventListener('project-created', handleProjectCreatedEvent as EventListener);
     return () => window.removeEventListener('project-created', handleProjectCreatedEvent as EventListener);
   }, []);
-
-  // Load folders after projects are loaded
-  useEffect(() => {
-    if (projectsWithRuns.length > 0) {
-      loadFoldersForProjects(projectsWithRuns);
-    }
-  }, [projectsWithRuns.length]);
 
   // Subscribe to global run-lifecycle events once so the active-run rows stay
   // reactive (a run becoming stuck / awaiting review / completing refreshes the
@@ -889,30 +743,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
       const { projectId } = event.detail;
       setClosingProjectId(projectId);
     };
-    const handlePanelEvent = (event: CustomEvent) => {
-      const panelEvent = event.detail;
-      if (panelEvent.type === 'process:ended' && panelEvent.source?.panelType === 'logs') {
-        const sessionId = panelEvent.source.sessionId;
-        if (sessionId && runningProjectId !== null) {
-          const project = projectsWithRuns.find(p =>
-            p.sessions.some((s: never) => (s as { id: string; isMainRepo?: boolean }).id === sessionId && (s as { id: string; isMainRepo?: boolean }).isMainRepo),
-          );
-          if (project && project.id === runningProjectId) {
-            setRunningProjectId(null);
-            setClosingProjectId(null);
-          }
-        }
-      }
-    };
     window.addEventListener('project-script-changed', handleProjectScriptChanged as EventListener);
     window.addEventListener('project-script-closing', handleProjectScriptClosing as EventListener);
-    window.addEventListener('panel:event', handlePanelEvent as EventListener);
     return () => {
       window.removeEventListener('project-script-changed', handleProjectScriptChanged as EventListener);
       window.removeEventListener('project-script-closing', handleProjectScriptClosing as EventListener);
-      window.removeEventListener('panel:event', handlePanelEvent as EventListener);
     };
-  }, [runningProjectId, projectsWithRuns]);
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Toggle helpers
@@ -936,150 +773,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
       return newSet;
     });
   }, []);
-
-  const toggleFolder = useCallback((folderId: string, event?: React.MouseEvent) => {
-    if (event) {
-      event.stopPropagation();
-      event.preventDefault();
-    }
-    setExpandedFolders(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(folderId)) {
-        newSet.delete(folderId);
-      } else {
-        newSet.add(folderId);
-      }
-      return newSet;
-    });
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Folder helpers
-  // ---------------------------------------------------------------------------
-
-  const handleStartFolderEdit = (folder: Folder) => {
-    setEditingFolderId(folder.id);
-    setEditingFolderName(folder.name);
-  };
-
-  const handleFolderContextMenu = (e: React.MouseEvent, folder: Folder, projectId: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    openMenu('folder', { ...folder, projectId }, { x: e.clientX, y: e.clientY });
-  };
-
-  const handleSaveFolderEdit = async () => {
-    if (!editingFolderId || !editingFolderName.trim()) {
-      setEditingFolderId(null);
-      return;
-    }
-    try {
-      const response = await API.folders.update(editingFolderId, { name: editingFolderName.trim() });
-      if (response.success) {
-        setProjectsWithRuns(prev => prev.map(project => ({
-          ...project,
-          folders: project.folders.map(folder =>
-            folder.id === editingFolderId
-              ? { ...folder, name: editingFolderName.trim() }
-              : folder,
-          ),
-        })));
-      } else {
-        showError({ title: 'Failed to rename folder', error: response.error || 'Unknown error occurred' });
-      }
-    } catch (error: unknown) {
-      showError({ title: 'Failed to rename folder', error: error instanceof Error ? error.message : 'Unknown error occurred' });
-    } finally {
-      setEditingFolderId(null);
-      setEditingFolderName('');
-    }
-  };
-
-  const handleCancelFolderEdit = () => {
-    setEditingFolderId(null);
-    setEditingFolderName('');
-  };
-
-  const buildFolderTree = useCallback((folders: Folder[]): Folder[] => {
-    const folderMap = new Map<string, Folder>();
-    const rootFolders: Folder[] = [];
-    folders.forEach(folder => {
-      folderMap.set(folder.id, { ...folder, children: [] });
-    });
-    folders.forEach(folder => {
-      const currentFolder = folderMap.get(folder.id)!;
-      if (folder.parentFolderId && folderMap.has(folder.parentFolderId)) {
-        const parentFolder = folderMap.get(folder.parentFolderId)!;
-        if (!parentFolder.children) parentFolder.children = [];
-        parentFolder.children.push(currentFolder);
-      } else {
-        rootFolders.push(currentFolder);
-      }
-    });
-    const sortFolders = (items: Folder[]) => {
-      items.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
-      items.forEach(f => { if (f.children?.length) sortFolders(f.children); });
-    };
-    sortFolders(rootFolders);
-    return rootFolders;
-  }, []);
-
-  const handleDeleteFolder = async (folder: Folder, projectId: number) => {
-    const message = `Delete empty folder "${folder.name}"?`;
-    const confirmed = window.confirm(message);
-    if (!confirmed) return;
-    try {
-      const response = await API.folders.delete(folder.id);
-      if (response.success) {
-        setProjectsWithRuns(prev => prev.map(p => {
-          if (p.id === projectId) {
-            return { ...p, folders: p.folders?.filter(f => f.id !== folder.id) || [] };
-          }
-          return p;
-        }));
-        setExpandedFolders(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(folder.id);
-          return newSet;
-        });
-      } else {
-        showError({ title: 'Failed to delete folder', error: response.error || 'Unknown error occurred' });
-      }
-    } catch (error: unknown) {
-      showError({ title: 'Failed to delete folder', error: error instanceof Error ? error.message : 'Unknown error occurred' });
-    }
-  };
-
-  const handleCreateFolder = async () => {
-    if (!newFolderName || !selectedProjectForFolder) return;
-    try {
-      const response = await API.folders.create(
-        newFolderName,
-        selectedProjectForFolder.id,
-        parentFolderForCreate?.id || null,
-      );
-      if (response.success && response.data) {
-        const newFolder = response.data;
-        setProjectsWithRuns(prev => prev.map(project => {
-          if (project.id === selectedProjectForFolder.id) {
-            return { ...project, folders: [...(project.folders || []), newFolder] };
-          }
-          return project;
-        }));
-        if (parentFolderForCreate) {
-          setExpandedFolders(prev => new Set([...prev, parentFolderForCreate.id]));
-        }
-        setShowCreateFolderDialog(false);
-        setNewFolderName('');
-        setSelectedProjectForFolder(null);
-        setParentFolderForCreate(null);
-      } else {
-        showError({ title: 'Failed to Create Folder', error: response.error || 'Unknown error occurred' });
-      }
-    } catch (error: unknown) {
-      showError({ title: 'Failed to Create Folder', error: error instanceof Error ? error.message : 'Unknown error occurred' });
-    }
-  };
 
   // ---------------------------------------------------------------------------
   // Project action handlers
@@ -1164,71 +857,33 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   };
 
   // ---------------------------------------------------------------------------
-  // Drag and drop — projects, folders, and sessions; run rows are NOT draggable
+  // Drag and drop — projects and sessions; run rows are NOT draggable
   // ---------------------------------------------------------------------------
 
   const handleProjectDragStart = (e: React.DragEvent, project: Project) => {
     e.stopPropagation();
-    setDragState({
-      type: 'project',
-      projectId: project.id,
-      folderId: null,
-      overType: null,
-      overProjectId: null,
-      overFolderId: null,
-    });
+    setDragState({ projectId: project.id, overProjectId: null });
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'project', id: project.id }));
   };
 
-  const handleFolderDragStart = (e: React.DragEvent, folder: Folder, projectId: number) => {
-    e.stopPropagation();
-    setDragState({
-      type: 'folder',
-      projectId,
-      folderId: folder.id,
-      overType: null,
-      overProjectId: null,
-      overFolderId: null,
-    });
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'folder', id: folder.id, projectId }));
-  };
-
   const handleDragEnd = () => {
-    setDragState({
-      type: null,
-      projectId: null,
-      folderId: null,
-      overType: null,
-      overProjectId: null,
-      overFolderId: null,
-    });
+    setDragState({ projectId: null, overProjectId: null });
     dragCounter.current = 0;
   };
 
   const handleProjectDragOver = (e: React.DragEvent, project: Project) => {
     e.preventDefault();
     e.stopPropagation();
-    if (dragState.type === 'project' && dragState.projectId !== project.id) {
-      setDragState(prev => ({ ...prev, overType: 'project', overProjectId: project.id, overFolderId: null }));
-    } else if (dragState.type === 'folder' && dragState.projectId === project.id) {
-      setDragState(prev => ({ ...prev, overType: 'project', overProjectId: project.id, overFolderId: null }));
-    }
-  };
-
-  const handleFolderDragOver = (e: React.DragEvent, folder: Folder, projectId: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (dragState.type === 'folder' && dragState.folderId !== folder.id) {
-      setDragState(prev => ({ ...prev, overType: 'folder', overProjectId: projectId, overFolderId: folder.id, }));
+    if (dragState.projectId !== null && dragState.projectId !== project.id) {
+      setDragState(prev => ({ ...prev, overProjectId: project.id }));
     }
   };
 
   const handleProjectDrop = async (e: React.DragEvent, targetProject: Project) => {
     e.preventDefault();
     e.stopPropagation();
-    if (dragState.type === 'project' && dragState.projectId && dragState.projectId !== targetProject.id) {
+    if (dragState.projectId && dragState.projectId !== targetProject.id) {
       const sourceIndex = projectsWithRuns.findIndex(p => p.id === dragState.projectId);
       const targetIndex = projectsWithRuns.findIndex(p => p.id === targetProject.id);
       if (sourceIndex !== -1 && targetIndex !== -1) {
@@ -1247,46 +902,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
           showError({ title: 'Failed to reorder projects', error: error instanceof Error ? error.message : 'Unknown error occurred' });
         }
       }
-    } else if (dragState.type === 'folder' && dragState.folderId) {
-      try {
-        const response = await API.folders.move(dragState.folderId, null);
-        if (response.success) {
-          setProjectsWithRuns(prev => prev.map(project => {
-            if (project.id === targetProject.id) {
-              return { ...project, folders: project.folders.map(f => f.id === dragState.folderId ? { ...f, parentFolderId: null } : f) };
-            }
-            return project;
-          }));
-        } else {
-          showError({ title: 'Failed to move folder', error: response.error || 'Unknown error occurred' });
-        }
-      } catch (error: unknown) {
-        showError({ title: 'Failed to move folder', error: error instanceof Error ? error.message : 'Unknown error occurred' });
-      }
-    }
-    handleDragEnd();
-  };
-
-  const handleFolderDrop = async (e: React.DragEvent, folder: Folder, projectId: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (dragState.type === 'folder' && dragState.folderId && dragState.folderId !== folder.id) {
-      try {
-        const response = await API.folders.move(dragState.folderId, folder.id);
-        if (response.success) {
-          setProjectsWithRuns(prev => prev.map(project => {
-            if (project.id === projectId) {
-              return { ...project, folders: project.folders.map(f => f.id === dragState.folderId ? { ...f, parentFolderId: folder.id } : f) };
-            }
-            return project;
-          }));
-          setExpandedFolders(prev => new Set([...prev, folder.id]));
-        } else {
-          showError({ title: 'Failed to move folder', error: response.error || 'Unknown error occurred' });
-        }
-      } catch (error: unknown) {
-        showError({ title: 'Failed to move folder', error: error instanceof Error ? error.message : 'Unknown error occurred' });
-      }
     }
     handleDragEnd();
   };
@@ -1295,7 +910,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     e.preventDefault();
     dragCounter.current--;
     if (dragCounter.current === 0) {
-      setDragState(prev => ({ ...prev, overType: null, overProjectId: null, overFolderId: null }));
+      setDragState(prev => ({ ...prev, overProjectId: null }));
     }
   };
 
@@ -1562,132 +1177,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     );
   }
 
-  // Recursive folder renderer (no sessions inside folders; folders are kept for structure)
-  const renderFolder = (folder: Folder, project: ProjectWithRuns, level: number = 0, isLastInLevel: boolean = false, parentPath: boolean[] = []) => {
-    const isExpanded = expandedFolders.has(folder.id);
-    const isDraggingOverFolder = dragState.overType === 'folder' && dragState.overFolderId === folder.id;
-    const hasChildren = (folder.children && folder.children.length > 0);
-
-    return (
-      <div key={folder.id} className="relative" style={{ marginLeft: `${level * 16}px` }}>
-        <div className="absolute inset-0 pointer-events-none">
-          {parentPath.map((hasMoreSiblings, parentLevel) => (
-            hasMoreSiblings && (
-              <div
-                key={parentLevel}
-                className="absolute top-0 bottom-0 w-px bg-border-secondary"
-                style={{ left: `${parentLevel * 16 + 8}px` }}
-              />
-            )
-          ))}
-          {level > 0 && !isLastInLevel && (
-            <div
-              className="absolute top-0 bottom-0 w-px bg-border-secondary"
-              style={{ left: `${(level - 1) * 16 + 8}px` }}
-            />
-          )}
-          {isExpanded && hasChildren && (
-            <div
-              className="absolute w-px bg-border-secondary"
-              style={{ left: `${level * 16 + 8}px`, top: '24px', bottom: '0px' }}
-            />
-          )}
-          {level > 0 && (
-            <div
-              className="absolute h-px bg-border-secondary"
-              style={{ left: `${(level - 1) * 16 + 8}px`, right: `calc(100% - ${level * 16}px)`, top: '12px' }}
-            />
-          )}
-        </div>
-        <div
-          className={`relative group/folder flex items-center space-x-1 py-1 rounded cursor-pointer transition-colors hover:bg-surface-hover ${isDraggingOverFolder ? 'bg-interactive/20' : ''}`}
-          style={{ marginLeft: '0px', paddingLeft: '8px', paddingRight: '8px' }}
-          draggable
-          onDragStart={(e) => handleFolderDragStart(e, folder, project.id)}
-          onDragOver={(e) => handleFolderDragOver(e, folder, project.id)}
-          onDrop={(e) => handleFolderDrop(e, folder, project.id)}
-          onDragEnter={handleDragEnter}
-          onDragLeave={handleDragLeave}
-          onContextMenu={(e) => handleFolderContextMenu(e, folder, project.id)}
-        >
-          <div className="opacity-0 group-hover/folder:opacity-100 transition-opacity cursor-move">
-            <GripVertical className="w-3 h-3 text-text-tertiary" />
-          </div>
-          <button
-            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleFolder(folder.id, e); }}
-            onMouseDown={(e) => e.stopPropagation()}
-            className="p-0.5 hover:bg-surface-hover rounded transition-colors z-10"
-            disabled={!hasChildren}
-          >
-            {hasChildren ? (
-              isExpanded ? <ChevronDown className="w-3 h-3 text-text-tertiary" /> : <ChevronRight className="w-3 h-3 text-text-tertiary" />
-            ) : (
-              <div className="w-3 h-3" />
-            )}
-          </button>
-          <div
-            className="flex items-center space-x-2 flex-1 min-w-0"
-            onDoubleClick={(e) => { e.stopPropagation(); handleStartFolderEdit(folder); }}
-          >
-            {isExpanded ? (
-              <FolderOpen className="w-4 h-4 text-interactive flex-shrink-0" />
-            ) : (
-              <FolderIcon className="w-4 h-4 text-interactive flex-shrink-0" />
-            )}
-            {editingFolderId === folder.id ? (
-              <input
-                type="text"
-                value={editingFolderName}
-                onChange={(e) => setEditingFolderName(e.target.value)}
-                onBlur={handleSaveFolderEdit}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); handleSaveFolderEdit(); }
-                  else if (e.key === 'Escape') { e.preventDefault(); handleCancelFolderEdit(); }
-                }}
-                onClick={(e) => e.stopPropagation()}
-                autoFocus
-                className="flex-1 px-1 py-0 text-sm bg-surface-primary border border-interactive rounded focus:outline-none focus:ring-1 focus:ring-interactive"
-              />
-            ) : (
-              <span className="text-sm text-text-primary truncate" title={folder.name}>
-                {folder.name}
-              </span>
-            )}
-          </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelectedProjectForFolder(project);
-              setParentFolderForCreate(folder);
-              setShowCreateFolderDialog(true);
-              setNewFolderName('');
-            }}
-            className="opacity-0 group-hover/folder:opacity-100 transition-opacity p-1 hover:bg-surface-hover rounded"
-            title="Add subfolder"
-          >
-            <Plus className="w-3 h-3 text-text-tertiary" />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder, project.id); }}
-            className="opacity-0 group-hover/folder:opacity-100 transition-opacity p-1 rounded hover:bg-status-error/10"
-            title="Delete folder"
-          >
-            <span className="text-status-error hover:text-status-error">🗑️</span>
-          </button>
-        </div>
-        {isExpanded && hasChildren && (
-          <div className="mt-1 space-y-1" style={{ marginLeft: '16px' }}>
-            {(folder.children ?? []).map((childFolder, index, array) => {
-              const isLastItem = index === array.length - 1;
-              const childParentPath = [...parentPath, !isLastItem];
-              return renderFolder(childFolder, project, level + 1, isLastItem, childParentPath);
-            })}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   return (
     <>
       <div className="space-y-1 px-2 pb-2">
@@ -1792,7 +1281,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 const lastActivityAt = s.lastActivity ?? s.createdAt;
                 return lastActivityAt ? formatDistanceToNow(lastActivityAt) : '';
               };
-              const folderCount = project.folders?.length ?? 0;
               // railGroups counts too: a running/grading experiment whose two arm
               // sessions were both merged/dismissed leaves a group with `arms: []`
               // but the decide CTAs (comparison/cancel) still live inside it. Without
@@ -1800,8 +1288,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
               // fails hasChildren, hides the chevron AND the `isExpanded && hasChildren`
               // block, and strands the experiment undecided.
               const hasChildren =
-                sessionCount > 0 || runCount > 0 || folderCount > 0 || railGroups.length > 0;
-              const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
+                sessionCount > 0 || runCount > 0 || railGroups.length > 0;
+              const isDraggingOver = dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
               const isProjectHomeMarked = projectHomeMark && project.id === guidedProjectId;
 
@@ -1955,12 +1443,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                   {isExpanded && hasChildren && (
                     <div className="relative mt-1 space-y-1">
                       <div className="absolute top-0 bottom-0 w-px bg-border-secondary" style={{ left: '8px' }} />
-
-                      {/* Folder tree */}
-                      {buildFolderTree(project.folders ?? []).map((folder, index, arr) => {
-                        const isLastItem = index === arr.length - 1 && sessionCount === 0 && parentlessRunCount === 0;
-                        return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
-                      })}
 
                       {/* A/B experiment group rows — an experiment's two arm
                           sessions collapsed under one boxed parent row. Rendered
@@ -2194,8 +1676,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         // creation timestamp. lastActivity is
                         // COALESCE(sessions.idle_since, sessions.updated_at) — the real
                         // rest boundary once the session is at rest (migration 119), so
-                        // a rename or a folder move no longer makes a long-quiet session
-                        // read as active moments ago. Fall back to createdAt when
+                        // a rename no longer makes a long-quiet session read as active
+                        // moments ago. Fall back to createdAt when
                         // lastActivity is absent (older/unsynced rows).
                         const lastActivityAt = session.lastActivity ?? session.createdAt;
                         const relativeTime = lastActivityAt ? formatDistanceToNow(lastActivityAt) : '';
@@ -2292,22 +1774,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                           </div>
                         );
                       })}
-
-                      {/* Add-folder button */}
-                      <div className="ml-6 mt-2 border-t border-border-primary pt-2 space-y-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedProjectForFolder(project);
-                            setShowCreateFolderDialog(true);
-                            setNewFolderName('');
-                          }}
-                          className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1"
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>Add Folder</span>
-                        </button>
-                      </div>
                     </div>
                   )}
                 </div>
@@ -2353,106 +1819,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
         onCreated={handleProjectCreated}
       />
 
-      {/* Create Folder Dialog */}
-      {showCreateFolderDialog && selectedProjectForFolder && (
-        <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50">
-          <div className="bg-surface-primary rounded-lg p-6 w-96 shadow-xl border border-border-primary">
-            <h3 className="text-lg font-semibold text-text-primary mb-4">
-              {parentFolderForCreate
-                ? `Create Subfolder in "${parentFolderForCreate.name}"`
-                : `Create Folder in ${selectedProjectForFolder.name}`
-              }
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-text-secondary mb-1">Folder Name</label>
-                <input
-                  type="text"
-                  value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-secondary border border-border-primary rounded-md text-text-primary focus:outline-none focus:border-interactive focus:ring-1 focus:ring-interactive placeholder-text-tertiary"
-                  placeholder="My Folder"
-                  autoFocus
-                  onKeyDown={(e) => { if (e.key === 'Enter' && newFolderName.trim()) handleCreateFolder(); }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-secondary mb-2">Suggested Folder Types</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {['Features', 'Bugs', 'Exploration', 'Refactoring', 'Tests', 'Documentation'].map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      onClick={() => setNewFolderName(suggestion)}
-                      className="px-3 py-1.5 text-sm text-text-secondary bg-surface-tertiary hover:bg-surface-hover rounded-md transition-colors"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="mt-6 flex justify-end space-x-3">
-              <button
-                onClick={() => {
-                  setShowCreateFolderDialog(false);
-                  setNewFolderName('');
-                  setSelectedProjectForFolder(null);
-                  setParentFolderForCreate(null);
-                }}
-                className="px-4 py-2 text-text-secondary hover:text-text-primary transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreateFolder}
-                disabled={!newFolderName.trim()}
-                className="px-4 py-2 bg-interactive hover:bg-interactive-hover text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Create Folder
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Folder Context Menu */}
-      {isMenuOpen('folder') && menuState.payload && menuState.position && (
-        <div
-          className="context-menu fixed bg-surface-primary border border-border-primary rounded-md shadow-lg py-1 z-50 min-w-[150px]"
-          style={{ top: menuState.position.y, left: menuState.position.x }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => {
-              closeMenu();
-              if (menuState.payload) {
-                handleStartFolderEdit(menuState.payload as Folder);
-              }
-            }}
-            className="w-full text-left px-4 py-2 text-sm text-text-primary hover:bg-surface-hover hover:text-text-primary"
-          >
-            Rename
-          </button>
-          <div className="border-t border-border-primary my-1" />
-          <button
-            onClick={() => {
-              closeMenu();
-              const projectId = (menuState.payload as Folder)?.projectId ||
-                projectsWithRuns.find(p => p.folders?.some(f => f.id === menuState.payload?.id))?.id;
-              if (projectId) {
-                handleDeleteFolder(menuState.payload as Folder, projectId);
-              }
-            }}
-            className="w-full text-left px-4 py-2 text-sm text-status-error hover:bg-surface-hover hover:text-status-error"
-          >
-            Delete
-          </button>
-        </div>
-      )}
-
-      {/* Experiment group-row context menu (local state — the shared
-          ContextMenuContext only types 'session' | 'folder'). A transparent
+      {/* Experiment group-row context menu (local state). A transparent
           backdrop catches outside clicks. */}
       {experimentMenu && (
         <>

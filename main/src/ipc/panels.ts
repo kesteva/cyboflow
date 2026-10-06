@@ -2,7 +2,7 @@ import { IpcMain, BrowserWindow } from 'electron';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService } from '../services/database';
-import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
+import { CreatePanelRequest, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
 import type { AppServices } from './types';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { nonClaudeLaneOwner, resolvePanelLane, type PanelLane } from '../services/panelLane';
@@ -181,10 +181,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
     }
   });
   
-  ipcMain.handle('panels:getActive', async (_, sessionId: string) => {
-    return databaseService.getActivePanel(sessionId);
-  });
-  
   // Panel initialization (lazy loading)
   ipcMain.handle('panels:initialize', async (_, panelId: string, options?: { cwd?: string; sessionId?: string }) => {
     
@@ -243,19 +239,9 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       return customState?.isInitialized || false;
     }
     
-    // Editor panels don't need initialization
-    if (panel.type === 'editor') {
-      return true;
-    }
-    
     return false;
   });
   
-  // Event handlers
-  ipcMain.handle('panels:emitEvent', async (_, panelId: string, eventType: PanelEventType, data: unknown) => {
-    return panelManager.emitPanelEvent(panelId, eventType, data);
-  });
-
   // Clear unviewed content flag for AI panels
   ipcMain.handle('panels:clearUnviewedContent', async (event, panelId: string) => {
     try {
@@ -306,27 +292,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
     }
   });
   
-  // Panel-specific terminal handlers (called via panels: namespace from frontend)
-  ipcMain.handle('panels:resize-terminal', async (_, panelId: string, cols: number, rows: number) => {
-    try {
-      await terminalPanelManager.resizeTerminal(panelId, cols, rows);
-      return { success: true };
-    } catch (error) {
-      console.error('[IPC] Failed to resize terminal:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
-  
-  ipcMain.handle('panels:send-terminal-input', async (_, panelId: string, data: string) => {
-    try {
-      await terminalPanelManager.writeToTerminal(panelId, data);
-      return { success: true };
-    } catch (error) {
-      console.error('[IPC] Failed to send terminal input:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  });
-  
   // Note: Panel output handlers (get-output, get-conversation-messages, get-json-messages, get-prompts, continue)
   // are implemented in session.ts as they need access to sessionManager methods
   
@@ -341,9 +306,5 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
   
   ipcMain.handle('terminal:getState', async (_, panelId: string) => {
     return terminalPanelManager.getTerminalState(panelId);
-  });
-  
-  ipcMain.handle('terminal:saveState', async (_, panelId: string) => {
-    return terminalPanelManager.saveTerminalState(panelId);
   });
 }

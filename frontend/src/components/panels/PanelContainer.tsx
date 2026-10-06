@@ -1,17 +1,13 @@
 import React, { Suspense, lazy, useMemo } from 'react';
 import { PanelContainerProps } from '../../types/panelComponents';
 import { ErrorBoundary } from 'react-error-boundary';
-import { CliPanelFactory } from './cli/CliPanelFactory';
 import { PanelLoadingFallback } from './PanelLoadingFallback';
 import { renderLog } from '../../utils/console';
 
 // Lazy load panel components for better performance
+const ClaudePanel = lazy(() => import('./claude/ClaudePanel'));
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
-const DiffPanel = lazy(() => import('./diff/DiffPanel'));
-const EditorPanel = lazy(() => import('./editor/EditorPanel'));
 const LogsPanel = lazy(() => import('./logPanel/LogsPanel'));
-const DashboardPanel = lazy(() => import('./DashboardPanel'));
-const SetupTasksPanel = lazy(() => import('./SetupTasksPanel'));
 
 const PanelErrorFallback: React.FC<{ error: Error; resetErrorBoundary: () => void }> = ({ 
   error, 
@@ -31,8 +27,7 @@ const PanelErrorFallback: React.FC<{ error: Error; resetErrorBoundary: () => voi
 
 export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
   panel,
-  isActive,
-  isMainRepo = false
+  isActive
 }) => {
   renderLog('[PanelContainer] Rendering panel:', panel.id, 'Type:', panel.type, 'Active:', isActive);
   
@@ -43,26 +38,13 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
   const panelComponent = useMemo(() => {
     renderLog('[PanelContainer] Creating component for panel type:', panel.type);
 
-    // CLI panel types (including Claude) use the CLI panel factory
-    const cliPanelTypes = ['claude', 'aider', 'continue', 'cursor', 'generic-cli'];
-    if (cliPanelTypes.includes(panel.type)) {
-      return <CliPanelFactory panel={panel} isActive={isActive} />;
-    }
-
-    // Non-CLI panel types use direct components
     switch (panel.type) {
+      case 'claude':
+        return <ClaudePanel panel={panel} isActive={isActive} />;
       case 'terminal':
         return <TerminalPanel panel={panel} isActive={isActive} />;
-      case 'diff':
-        return <DiffPanel panel={panel} isActive={isActive} sessionId={panel.sessionId} isMainRepo={isMainRepo} />;
-      case 'editor':
-        return <EditorPanel panel={panel} isActive={isActive} />;
       case 'logs':
         return <LogsPanel panel={panel} isActive={isActive} />;
-      case 'dashboard':
-        return <DashboardPanel panelId={panel.id} sessionId={panel.sessionId} isActive={isActive} />;
-      case 'setup-tasks':
-        return <SetupTasksPanel panelId={panel.id} sessionId={panel.sessionId} isActive={isActive} />;
       default:
         return (
           <div className="h-full w-full flex items-center justify-center p-8">
@@ -80,7 +62,7 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
           </div>
         );
     }
-  }, [panel, isActive, isMainRepo]); // Include panel to catch state changes
+  }, [panel, isActive]); // Include panel to catch state changes
 
   return (
     <ErrorBoundary

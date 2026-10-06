@@ -153,7 +153,7 @@ function mockDetectStates(states: Partial<Record<string, string>>): void {
 
 function enableProviders(providers: Record<string, boolean> = { claude: true, codex: true, omp: true }): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: providers } as AppConfig,
+    config: { agentProviderAccess: providers } as AppConfig,
   });
 }
 

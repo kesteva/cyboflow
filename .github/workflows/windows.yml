@@ -50,7 +50,6 @@ on:
       - 'main/src/services/processTable.ts'
       - 'main/src/services/winProcessTable.ts'
       - 'main/src/**/*.win32.test.ts'
-      - 'main/src/services/__tests__/runCommandManager.winProcessOps.test.ts'
       - 'main/src/services/panels/cli/__tests__/abstractCliManager.pty.test.ts'
 
 jobs:

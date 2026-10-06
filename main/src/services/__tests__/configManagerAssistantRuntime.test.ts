@@ -44,14 +44,14 @@ afterEach(async () => {
 
 async function managerWith(config: Record<string, unknown>): Promise<ConfigManager> {
   await fs.writeFile(path.join(tempDir, 'config.json'), JSON.stringify(config, null, 2));
-  const mgr = new ConfigManager('/tmp/test-git-path');
+  const mgr = new ConfigManager();
   await mgr.initialize();
   return mgr;
 }
 
 describe('ConfigManager.getAssistantRuntime', () => {
   it('floors to claude-sdk on a fresh instance (field not seeded)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().assistantRuntime).toBeUndefined();
     expect(mgr.getAssistantRuntime()).toBe('claude-sdk');
   });
@@ -103,12 +103,12 @@ describe('ConfigManager.getAssistantRuntime', () => {
   });
 
   it('persists a pick through the generic updateConfig merge and round-trips it', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ assistantRuntime: 'codex-sdk' } satisfies UpdateConfigRequest);
     expect(mgr.getAssistantRuntime()).toBe('codex-sdk');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getAssistantRuntime()).toBe('codex-sdk');
   });

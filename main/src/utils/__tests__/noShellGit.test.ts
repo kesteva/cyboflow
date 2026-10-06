@@ -3,7 +3,7 @@
  * command to a SHELL-string runner.
  *
  * Repo-controlled data — branch names, remote names, refs — reaches these call
- * sites on an ordinary dashboard refresh, so `exec(\`git checkout ${branch}\`)`
+ * sites on an ordinary git status refresh, so `exec(\`git checkout ${branch}\`)`
  * makes a branch literally named `$(touch /tmp/pwned)` executable. The safe
  * primitive is main/src/utils/runGit.ts (execFile + argv array), and this test
  * is what keeps the invariant enforced rather than merely documented: a new

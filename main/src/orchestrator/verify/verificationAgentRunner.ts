@@ -7,7 +7,7 @@
  * DRIVES, and JUDGES a composed `VerificationTaskV1` itself, returning a
  * structured `VerificationReportV1`.
  *
- * Electron-free by construction (mirrors the backends / vlmJudge): every
+ * Electron-free by construction: every
  * side-effecting collaborator is INJECTED — the SDK boundary (`query`), the
  * effective-agent + model resolvers, snapshot provisioning, git checks, fs
  * probes, and the driver-teardown seams all have real defaults but are faked in
@@ -687,8 +687,8 @@ export interface VerificationAgentRunnerDeps {
   portFreeProbe?: (port: number) => Promise<boolean>;
   /**
    * §3.5 preflight probe for the `native-screen` modality only: `true` when
-   * this host can actually capture the screen (the retired
-   * `peekabooBackend.healthCheck()` — binary present AND both TCC grants —
+   * this host can actually capture the screen
+   * (`PeekabooGrantProbe.healthCheck()` — binary present AND both TCC grants —
    * is the intended wiring, §4 "Driver additions"). ABSENT means the check
    * does not run at all rather than fails: the scheduler-side gate already
    * refuses a `native-screen` request on a host with no capability probe, so
@@ -700,9 +700,9 @@ export interface VerificationAgentRunnerDeps {
    * `native-screen` request (the driver's `attest window` /
    * `native-screenshot` commands shell it).
    *
-   * MUST be the same binary the capability gate probed. `index.ts` resolves it
-   * once (`verifyPeekabooPath`) and hands it to both this runner and the
-   * `PeekabooBackend` behind `nativeCaptureProbe` — because a gate measuring
+   * MUST be the same binary the capability gate probed. `verifyComposition.ts`
+   * resolves it once (`verifyPeekabooPath`) and hands it to both this runner and
+   * the `PeekabooGrantProbe` behind `nativeCaptureProbe` — because a gate measuring
    * one binary while the driver runs another affirms a capability that then
    * fails deep inside a deployed run, after the count-1 screen lease and the
    * budget have already been spent.

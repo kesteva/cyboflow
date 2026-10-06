@@ -34,14 +34,12 @@
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/glob": "^9.0.0",
     "@types/node": "^22.10.2",
     "@typescript-eslint/eslint-plugin": "^8.19.0",
     "@typescript-eslint/parser": "^8.19.0",
     "@vitest/coverage-v8": "^2.1.8",
     "electron": "^44.1.0",
     "eslint": "^9.17.0",
-    "mkdirp": "^3.0.1",
     "rimraf": "^6.0.1",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -310,10 +310,10 @@ export interface WorkflowRunRow {
    */
   verify_type?: VerificationType | null;
   /**
-   * JSON-encoded VisualBackendId[] — the live easy→hard fall-forward chain
-   * (FALLBACK_CHAINS[type] ∩ host-available backends) resolved at launch, or
-   * NULL when verify_enabled=0 (migration 055). The scheduler reads + walks it;
-   * it is never rewritten on the row.
+   * JSON-encoded engine chain (VerifyChainEntry[]) — `["agent"]` for a
+   * verify-enabled run, or NULL when verify_enabled=0 (migration 055). Runs
+   * stamped before the agent engine carry a capture-backend list, which the
+   * scheduler now skips. The scheduler reads it; it is never rewritten on the row.
    */
   verify_chain?: string | null;
   /**

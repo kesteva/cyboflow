@@ -8,7 +8,7 @@ import '@testing-library/jest-dom';
 import { render, fireEvent } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useMemo, useState } from 'react';
-import type { MessageSegment as MessageSegmentType } from '../../transformers/MessageTransformer';
+import type { MessageSegment as MessageSegmentType } from '../../../../../../../shared/types/unifiedMessage';
 
 const parseCounter = vi.hoisted(() => ({ count: 0 }));
 

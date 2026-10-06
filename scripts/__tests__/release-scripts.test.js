@@ -18,8 +18,8 @@
  *   - bundle-mcp-server: a broken bundle only surfaces at runtime in a PACKAGED
  *     build (MODULE_NOT_FOUND for @modelcontextprotocol/sdk inside app.asar).
  *     Prove the bundle is self-contained + a resolvable entrypoint.
- *   - inject-build-info → restore-version: the build must never mutate the
- *     committed package.json. Pin the round-trip as byte-identical.
+ *   - inject-build-info: the build must never mutate the committed
+ *     package.json. Pin it as byte-identical.
  */
 'use strict';
 
@@ -262,10 +262,10 @@ test('MCP server bundles self-contained and boots to a resolvable entrypoint', a
 });
 
 // ---------------------------------------------------------------------------
-// inject-build-info.js → restore-version.js round-trip
+// inject-build-info.js
 // ---------------------------------------------------------------------------
 
-test('inject-build-info → restore-version leaves package.json byte-identical and writes buildInfo.json', () => {
+test('inject-build-info leaves package.json byte-identical and writes buildInfo.json', () => {
   const pkgPath = path.join(REPO_ROOT, 'package.json');
   const pkgBefore = fs.readFileSync(pkgPath); // Buffer — byte comparison
   const biPath = path.join(REPO_ROOT, 'main', 'dist', 'buildInfo.json');
@@ -286,13 +286,6 @@ test('inject-build-info → restore-version leaves package.json byte-identical a
     for (const key of ['buildDate', 'gitCommit', 'buildTimestamp', 'variant', 'environment']) {
       assert.ok(key in buildInfo, `buildInfo.json missing key: ${key}`);
     }
-
-    // restore-version no-ops in CI (env forced) — assert the round-trip completes
-    // and package.json is still byte-identical.
-    const restore = run('scripts/restore-version.js', [], { GITHUB_ACTIONS: 'true' });
-    assert.equal(restore.status, 0, `restore-version failed: ${restore.stderr}`);
-    assert.match(restore.stdout, /Skipping package\.json restoration/);
-    assert.ok(pkgBefore.equals(fs.readFileSync(pkgPath)), 'round-trip changed package.json bytes');
   } finally {
     // Restore buildInfo.json to its prior state so the test leaves no trace.
     if (biBackup) fs.writeFileSync(biPath, biBackup);
@@ -315,8 +308,8 @@ test('inject-build-info stamps environment from CYBOFLOW_BUILD_ENV, else the var
     // [CYBOFLOW_BUILD_ENV, BUILD_VARIANT, expected environment, expected variant]
     ['', '', 'stable', 'stable'], // build:mac — the fixed case
     ['', 'dev', 'dev', 'dev'], // build:mac:dev
-    ['stable', '', 'stable', 'stable'], // release:mac
-    ['dev', 'dev', 'dev', 'dev'], // release:mac:dev
+    ['stable', '', 'stable', 'stable'], // explicit stable stamp
+    ['dev', 'dev', 'dev', 'dev'], // explicit dev stamp (Windows dev workflow)
     ['local', '', 'local', 'stable'], // explicit throwaway-build opt-out
   ];
 

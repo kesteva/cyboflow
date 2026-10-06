@@ -5,7 +5,7 @@
  * arguments are passed as positional parameters to the binary and are NEVER
  * parsed by a shell. This eliminates the shell-injection class of bugs that the
  * legacy `execSync(\`git ... ${value}\`)` pattern exposes: repo-controlled data
- * (branch names, remote names, refs) reaches these calls on ordinary dashboard
+ * (branch names, remote names, refs) reaches these calls on ordinary git status
  * refreshes.
  *
  * Shell-freedom alone does NOT close git's own option-injection surface: a

@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import type { IpcRendererEvent } from 'electron';
 import { Loader2, Archive, CheckCircle, AlertCircle } from 'lucide-react';
 import { API } from '../utils/api';
 
@@ -57,19 +56,8 @@ export function ArchiveProgress() {
     // Initial load
     void loadProgress();
 
-    // Listen for progress updates
-    const handleProgress = (_event: IpcRendererEvent, data: ArchiveProgressData) => {
-      setProgress((prev) => (archiveProgressEqual(prev, data) ? prev : data));
-      // Auto-expand when there are active tasks
-      if (data.activeCount > 0 && !isExpanded) {
-        setIsExpanded(true);
-      }
-    };
-
-    window.electron?.on('archive:progress', handleProgress);
-
-    // Poll for initial state in case we missed events — paused while the
-    // document is hidden. ArchiveProgress lives in the persistently-mounted
+    // Poll for progress (the only update path) — paused while the document is
+    // hidden. ArchiveProgress lives in the persistently-mounted
     // Sidebar, so an offscreen 2s poll (almost always resolving to the same
     // null/empty progress) is pure idle churn; resume fires an immediate
     // catch-up load so the panel isn't stale by however long the tab was
@@ -100,11 +88,10 @@ export function ArchiveProgress() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      window.electron?.off('archive:progress', handleProgress);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopPolling();
     };
-  }, [isExpanded]);
+  }, []);
 
   const loadProgress = async () => {
     try {

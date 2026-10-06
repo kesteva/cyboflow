@@ -20,7 +20,8 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
     id,
     ...props 
   }, ref) => {
-    const inputId = id || `input-${Math.random().toString(36).substr(2, 9)}`;
+    const generatedId = React.useId();
+    const inputId = id || generatedId;
     
     const baseStyles = 'px-input-x py-input-y bg-bg-primary text-text-primary placeholder:text-text-muted border rounded-input transition-all duration-normal focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-bg-primary disabled:cursor-not-allowed disabled:opacity-50';
     
@@ -81,7 +82,7 @@ Input.displayName = 'Input';
 // Textarea component with similar API
 export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
   label?: string;
-  error?: string;
+  error?: string | null;
   helperText?: string;
   fullWidth?: boolean;
 }
@@ -96,7 +97,8 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
     id,
     ...props 
   }, ref) => {
-    const textareaId = id || `textarea-${Math.random().toString(36).substr(2, 9)}`;
+    const generatedId = React.useId();
+    const textareaId = id || generatedId;
     
     const baseStyles = 'px-input-x py-input-y bg-bg-primary text-text-primary placeholder:text-text-muted border rounded-input transition-all duration-normal focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-bg-primary disabled:cursor-not-allowed disabled:opacity-50 resize-none';
     
@@ -158,7 +160,8 @@ export const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
     id,
     ...props 
   }, ref) => {
-    const checkboxId = id || `checkbox-${Math.random().toString(36).substr(2, 9)}`;
+    const generatedId = React.useId();
+    const checkboxId = id || generatedId;
     
     return (
       <label htmlFor={checkboxId} className="flex items-center space-x-2 cursor-pointer">

@@ -71,7 +71,6 @@ const OMP_DETECTED: ProviderDetectionResult<'omp'> = {
 
 function baseAppConfig(access?: AgentProviderAccess): AppConfig {
   return {
-    gitRepoPath: '/repo',
     telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: true },
     ...(access ? { agentProviderAccess: access } : {}),
   };

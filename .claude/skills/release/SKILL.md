@@ -16,8 +16,9 @@ fallback for when CI cannot run.
 
 ## Guardrails
 
-- **Never run `build:mac:universal`** — it fails on the bundled `claude`/`codex`
-  binaries. The release is **per-arch** DMGs.
+- **Never build a universal macOS binary** (`electron-builder --universal`) — it
+  fails on the bundled `claude`/`codex` binaries. The release is **per-arch**
+  DMGs; `build:mac` / `build:mac:dev` just run the arm64 then x64 recipes.
 - **R2 is the real release channel, not GitHub.** The app auto-updates from
   `updates.cyboflow.com/<variant>/latest-mac.yml` (R2) and never reads the GitHub
   release. Publishing GitHub without the R2 step (Phase 5) leaves every user on the

@@ -173,75 +173,6 @@ export class TransitionRejectedError extends Error {
   }
 }
 
-export interface TransitionToAwaitingReviewParams {
-  runId: string;
-  approvalId: string;
-  toolName: string;
-  toolInputJson: string;
-  toolUseId: string;
-  rationale: string | null;
-}
-
-/**
- * Atomically: (1) UPDATE workflow_runs SET status='awaiting_review' WHERE
- * id = ? AND status = 'running'; (2) INSERT INTO approvals (..., status='pending').
- * Runs inside BEGIN IMMEDIATE so the RESERVED lock is acquired up front
- * (closes the SELECT-then-INSERT race with concurrent cancellations).
- * Throws TransitionRejectedError if the UPDATE affects 0 rows; the INSERT
- * is rolled back automatically.
- */
-export function transitionToAwaitingReview(
-  db: Database.Database,
-  params: TransitionToAwaitingReviewParams,
-): void {
-  const updateRun = db.prepare(
-    `UPDATE workflow_runs
-        SET status = 'awaiting_review', updated_at = CURRENT_TIMESTAMP
-      WHERE id = @runId AND status = 'running'`,
-  );
-  // created_at is written EXPLICITLY as an ISO-8601 string rather than left to
-  // the column's `DEFAULT CURRENT_TIMESTAMP`. The two disagree on format —
-  // CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS' (space separator, no
-  // fractional seconds, no zone) while every other approval writer, and every
-  // consumer that compares against one, uses new Date().toISOString()
-  // ('YYYY-MM-DDTHH:MM:SS.sssZ'). Because ' ' (0x20) sorts below 'T' (0x54),
-  // a row in the space form compares as OLDER than any same-date ISO cutoff,
-  // whatever the actual clock times are. StuckDetector's stale scan is a
-  // string comparison against exactly such a cutoff, so a row written here was
-  // classified stale the instant it was created and its run stamped 'stuck' —
-  // the 45-minute threshold never applied to this writer at all. Keep this
-  // column in one format; StuckDetector normalizes with unixepoch() as a belt
-  // for rows that predate this fix.
-  const insertApproval = db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, rationale, status, created_at)
-     VALUES
-       (@approvalId, @runId, @toolName, @toolInputJson, @toolUseId, @rationale, 'pending', @createdAt)`,
-  );
-
-  const tx = db.transaction((p: TransitionToAwaitingReviewParams) => {
-    assertTransitionAllowed('running', 'awaiting_review', p.runId);
-    const result = updateRun.run({ runId: p.runId });
-    if (result.changes === 0) {
-      throw new TransitionRejectedError(
-        `Cannot transition run ${p.runId} to awaiting_review: not in 'running' state`,
-        { runId: p.runId, expectedStatus: 'running', entity: 'workflow_run' },
-      );
-    }
-    insertApproval.run({
-      approvalId: p.approvalId,
-      runId: p.runId,
-      toolName: p.toolName,
-      toolInputJson: p.toolInputJson,
-      toolUseId: p.toolUseId,
-      rationale: p.rationale,
-      createdAt: new Date().toISOString(),
-    });
-  });
-
-  tx.immediate(params);
-}
-
 // ---------------------------------------------------------------------------
 // transitionToRunning
 // ---------------------------------------------------------------------------
@@ -296,7 +227,7 @@ export interface ReviveQuickRunResult {
  * sentinel run LEAVES `'running'` and is never restored when:
  *   - the app restarts → runRecovery force-fails the orphan to `'failed'`, or
  *   - the session is closed out → Merge/Create-PR `'completed'`, Dismiss `'canceled'`.
- * No quick-turn entry path (sessions:input / claude-panels:continue / startPanel)
+ * No quick-turn entry path (sessions:input / panels:continue / startPanel)
  * put it back, so every approval-gated tool on a LATER turn was silently DENIED
  * (`requestApproval` threw RunNotRunningError → the PreToolUse hook returned
  * `permissionDecision: 'deny'`) and NO permission prompt ever surfaced — the agent
@@ -445,9 +376,9 @@ export interface TransitionRunningToAwaitingReviewParams {
  * error: workflow_runs status = 'awaiting_review' WHERE id = ? AND status = 'running'.
  *
  * Semantics: "the agent finished its turn; the run now awaits the user's
- * Merge / Create-PR / Dismiss decision." Unlike transitionToAwaitingReview, this
- * does NOT INSERT a pending `approvals` row — it is the plain rest state, not a
- * tool-approval gate. The two awaiting_review entry points are distinguished by
+ * Merge / Create-PR / Dismiss decision." Unlike the tool-approval gate
+ * (ApprovalRouter), this does NOT INSERT a pending `approvals` row — it is the
+ * plain rest state. The two awaiting_review entry points are distinguished by
  * the presence (approval gate) or absence (agent finished) of a PENDING approvals
  * row for the run.
  *

@@ -11,7 +11,6 @@ export interface Project {
   open_ide_command?: string | null;
   displayOrder?: number;
   worktree_folder?: string | null;
-  lastUsedModel?: string;
   /**
    * Per-project trust for repo-supplied permission ALLOW rules (migration 127).
    * NULL/undefined = undecided (the trust prompt has not been answered yet);
@@ -34,15 +33,6 @@ export interface Project {
   solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
 }
 
-export interface ProjectRunCommand {
-  id: number;
-  project_id: number;
-  command: string;
-  display_name?: string;
-  order_index: number;
-  created_at: string;
-}
-
 export interface CreateProjectRequest {
   name: string;
   path: string;
@@ -61,6 +51,5 @@ export interface UpdateProjectRequest {
   active?: boolean;
   open_ide_command?: string | null;
   worktree_folder?: string | null;
-  lastUsedModel?: string;
   permission_trust?: 'trusted' | 'untrusted' | null;
 }

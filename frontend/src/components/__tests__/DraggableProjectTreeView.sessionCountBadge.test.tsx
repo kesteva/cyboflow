@@ -52,15 +52,6 @@ vi.mock('../../utils/api', () => ({
       detectBranch: vi.fn(async () => ({ success: false })),
       reorder: vi.fn(async () => ({ success: true })),
     },
-    folders: {
-      getByProject: vi.fn(async () => ({ success: true, data: [] })),
-      update: vi.fn(),
-      delete: vi.fn(),
-      create: vi.fn(),
-      reorder: vi.fn(),
-      move: vi.fn(),
-      moveSession: vi.fn(),
-    },
     dialog: {
       openDirectory: vi.fn(),
     },
@@ -108,7 +99,6 @@ vi.mock('../../stores/navigationStore', () => ({
   ),
 }));
 
-vi.mock('../SessionListItem', () => ({ SessionListItem: () => null }));
 vi.mock('../ProjectSettings', () => ({ default: () => null }));
 vi.mock('../EmptyState', () => ({
   EmptyState: ({ title, description }: { title: string; description: string }) => (
@@ -146,14 +136,6 @@ vi.mock('../ui/Card', () => ({
 }));
 vi.mock('../../stores/errorStore', () => ({
   useErrorStore: () => ({ showError: vi.fn() }),
-}));
-vi.mock('../../contexts/ContextMenuContext', () => ({
-  useContextMenu: () => ({
-    menuState: { type: null, payload: null, position: null },
-    openMenu: vi.fn(),
-    closeMenu: vi.fn(),
-    isMenuOpen: () => false,
-  }),
 }));
 vi.mock('../../utils/debounce', () => ({
   debounce: (fn: (...args: unknown[]) => unknown) => fn,
@@ -197,10 +179,7 @@ function makeElectronAPI(expandedProjects: number[] = []) {
         expandedProjects.length > 0
           ? {
               success: true,
-              data: {
-                expandedProjects,
-                expandedFolders: [],
-              },
+              data: { expandedProjects },
             }
           : { success: false },
       ),
@@ -213,9 +192,6 @@ function makeElectronAPI(expandedProjects: number[] = []) {
     },
     git: {
       cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
-    },
-    folders: {
-      getByProject: vi.fn().mockResolvedValue({ success: true, data: [] }),
     },
     events: null,
     invoke: vi.fn().mockResolvedValue({ success: false }),

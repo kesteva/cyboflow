@@ -2,7 +2,7 @@
  * getExecutionDiffStats (main/src/database/database.ts) is a narrow
  * projection of execution_diffs for stats-only pollers (sessions:get-statistics)
  * — it must return the stats_ and files_changed columns the handler reads
- * WITHOUT the git_diff blob getExecutionDiffs also carries.
+ * WITHOUT the multi-MB git_diff blob column.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';

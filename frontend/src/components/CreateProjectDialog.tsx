@@ -19,9 +19,8 @@ export interface CreateProjectDialogProps {
 const EMPTY_PROJECT: CreateProjectRequest = { name: '', path: '', buildScript: '', runScript: '' };
 
 /**
- * Single shared "Add New Project" form. Extracted from the duplicated inline
- * dialogs in ProjectSelector + DraggableProjectTreeView so both call sites use
- * the same form, validation, and error-store integration. On a successful
+ * Shared "Add New Project" form, so every call site uses the same form,
+ * validation, and error-store integration. On a successful
  * create it calls onCreated(project) then onClose(); the caller owns what
  * happens next (select / open wizard).
  */

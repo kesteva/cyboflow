@@ -14,7 +14,7 @@ import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrat
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { stampSpawnMarker } from '../../../utils/spawnMarker';
 import { describeMissingInterpreter } from './cliVersionProbe';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 import {
   collectDescendantPidsAsync,
@@ -431,13 +431,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
-   * Get all active process panel IDs
-   */
-  getAllProcesses(): string[] {
-    return Array.from(this.processes.keys());
-  }
-
-  /**
    * Read-only snapshot of every live panel process (pid + owning panel/session/
    * worktree), for the process snapshot service to union with its ONE shared `ps`
    * scan. Performs no I/O. Entries whose pty already exited (or that never got a
@@ -528,24 +521,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   // These provide default implementations that map to panel-based methods
 
   /**
-   * @deprecated Use startPanel with real panel IDs instead
-   */
-  async startSession(sessionId: string, worktreePath: string, prompt: string, ...args: unknown[]): Promise<void> {
-    console.warn(`[${this.getCliToolName()}Manager] DEPRECATED: startSession called with virtual panel ID for session ${sessionId}. Use real panel IDs instead.`);
-    const virtualPanelId = `session-${sessionId}`;
-    return this.startPanel(virtualPanelId, sessionId, worktreePath, prompt, ...args);
-  }
-
-  /**
-   * @deprecated Use continuePanel with real panel IDs instead
-   */
-  async continueSession(sessionId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], ...args: unknown[]): Promise<void> {
-    console.warn(`[${this.getCliToolName()}Manager] DEPRECATED: continueSession called with virtual panel ID for session ${sessionId}. Use real panel IDs instead.`);
-    const virtualPanelId = `session-${sessionId}`;
-    return this.continuePanel(virtualPanelId, sessionId, worktreePath, prompt, conversationHistory, ...args);
-  }
-
-  /**
    * @deprecated Use stopPanel with real panel IDs instead
    */
   async stopSession(sessionId: string): Promise<void> {
@@ -564,73 +539,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   // Protected utility methods
-
-  /**
-   * Find and store tool-specific session ID for resume functionality
-   * This is used by CLI tools that have their own session management systems
-   * @param panelId The panel ID
-   * @param sessionIdPath Path to search for session files
-   * @param extractSessionId Function to extract session ID from a session file
-   */
-  protected async findAndStoreToolSessionId(
-    panelId: string,
-    sessionIdPath: string,
-    extractSessionId: (filePath: string, worktreePath: string) => Promise<string | null>
-  ): Promise<void> {
-    try {
-      const fs = await import('fs').then(m => m.promises);
-      const path = await import('path');
-      
-      // Check if session directory exists
-      try {
-        await fs.access(sessionIdPath);
-      } catch {
-        this.logger?.verbose(`[${this.getCliToolName()}] Session directory not found: ${sessionIdPath}`);
-        return;
-      }
-
-      // Get the worktree path for this panel
-      const process = this.processes.get(panelId);
-      if (!process) {
-        this.logger?.warn(`[${this.getCliToolName()}] No process found for panel ${panelId}`);
-        return;
-      }
-
-      // Extract session ID
-      const sessionId = await extractSessionId(sessionIdPath, process.worktreePath);
-      
-      if (sessionId) {
-        this.logger?.info(`[${this.getCliToolName()}] Found session ID for panel ${panelId}: ${sessionId}`);
-        
-        // Store the session ID in the panel's custom state
-        if (this.sessionManager) {
-          // Use panelManager instead of direct database access
-          const { panelManager } = await import('../../panelManager');
-          const panel = await panelManager.getPanel(panelId);
-          if (panel) {
-            const currentState = panel.state || {};
-            const customState = (currentState.customState as Record<string, unknown>) || {};
-            
-            // Only update if we don't already have a session ID
-            const toolSessionKey = `${this.getCliToolName().toLowerCase()}SessionId`;
-            if (!customState[toolSessionKey]) {
-              const updatedState = {
-                ...currentState,
-                customState: { ...customState, [toolSessionKey]: sessionId }
-              };
-              
-              await panelManager.updatePanel(panelId, { state: updatedState });
-              this.logger?.verbose(`[${this.getCliToolName()}] Stored session ID in panel ${panelId}: ${sessionId}`);
-            }
-          }
-        }
-      } else {
-        this.logger?.verbose(`[${this.getCliToolName()}] No session ID found for panel ${panelId}`);
-      }
-    } catch (error) {
-      this.logger?.error(`[${this.getCliToolName()}] Error finding session ID: ${error}`);
-    }
-  }
 
   /**
    * Process-global key recording that this CLI's executable is a script whose

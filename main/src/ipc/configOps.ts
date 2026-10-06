@@ -1,5 +1,5 @@
 import type { AppServices } from './types';
-import type { ConfigOpsLike, SessionCreationPreferences } from '../orchestrator/trpc/contracts/configOps';
+import type { ConfigOpsLike } from '../orchestrator/trpc/contracts/configOps';
 import type { UpdateConfigRequest } from '../types/config';
 import {
   isAgentProviderAccess,
@@ -222,26 +222,6 @@ export function createConfigOps(
       } catch (error) {
         console.error('Failed to apply run type default:', error);
         return { success: false, error: 'Failed to apply run type default' };
-      }
-    },
-
-    async getSessionPreferences() {
-      try {
-        const preferences = configManager.getSessionCreationPreferences();
-        return { success: true, data: preferences as SessionCreationPreferences };
-      } catch (error) {
-        console.error('Failed to get session creation preferences:', error);
-        return { success: false, error: 'Failed to get session creation preferences' };
-      }
-    },
-
-    async updateSessionPreferences(preferences) {
-      try {
-        await configManager.updateConfig({ sessionCreationPreferences: preferences });
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to update session creation preferences:', error);
-        return { success: false, error: 'Failed to update session creation preferences' };
       }
     },
   };

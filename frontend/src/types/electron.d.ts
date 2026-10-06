@@ -1,8 +1,7 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus } from './session';
+import type { Session, SessionOutput } from './session';
 import type { Project } from './project';
-import type { Folder } from './folder';
-import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
+import type { ToolPanel, CreatePanelRequest, FastModeStateNotice } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../../shared/types/ideaSession';
@@ -90,10 +89,6 @@ interface ElectronAPI {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
 
-  // Basic app info
-  getAppVersion: () => Promise<string>;
-  isPackaged: () => Promise<boolean>;
-
   // Version info — use IPCDataResponse so callers can access .data fields directly
   // after `if (result.success)` without narrowing for undefined.
   getVersionInfo: () => Promise<IPCDataResponse<{
@@ -145,7 +140,6 @@ interface ElectronAPI {
     openIdeaSession: (request: OpenIdeaSessionRequest) => Promise<IPCResponse<OpenIdeaSessionResponse>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
-    continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
     getInteractiveResumeState: (sessionId: string, panelId?: string) => Promise<IPCResponse<InteractiveResumeState>>;
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean) => Promise<IPCResponse<void>>;
     /**
@@ -155,32 +149,12 @@ interface ElectronAPI {
      * conversation in the same worktree. Handler: `sessions:restart-interactive`.
      */
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
-    // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
-    getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
-    getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
-
-    // Script operations
-    // IPCDataResponse so callers can use response.data directly after success check
-    hasRunScript: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
-    getRunningSession: () => Promise<IPCResponse<string | null>>;
-    runScript: (sessionId: string) => Promise<IPCResponse<void>>;
-    stopScript: (sessionId?: string) => Promise<IPCResponse<void>>;
-    runTerminalCommand: (sessionId: string, command: string) => Promise<IPCResponse<void>>;
-    sendTerminalInput: (sessionId: string, data: string) => Promise<IPCResponse<void>>;
-    preCreateTerminal: (sessionId: string) => Promise<IPCResponse<void>>;
-    resizeTerminal: (sessionId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
-
-    // Git merge operations
-    mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
-    mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;
 
-    // IDE operations
+    // IDE operations — runs the project's open_ide_command in the session worktree
     openIDE: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Image operations
@@ -189,7 +163,6 @@ interface ElectronAPI {
     // Log operations
     getLogs: (sessionId: string) => Promise<IPCResponse<LogEntry[]>>;
     clearLogs: (sessionId: string) => Promise<IPCResponse<void>>;
-    addLog: (sessionId: string, entry: LogEntry) => Promise<IPCResponse<void>>;
 
     // Large text operations
     saveLargeText: (sessionId: string, text: string) => Promise<string>;
@@ -260,34 +233,15 @@ interface ElectronAPI {
   projects: {
     // IPCDataResponse so callers can do response.data.find(...) directly after success check
     getAll: () => Promise<IPCDataResponse<Project[]>>;
-    getActive: () => Promise<IPCResponse<Project | null>>;
     create: (projectData: Omit<Project, 'id' | 'created_at' | 'updated_at'>) => Promise<IPCResponse<Project>>;
-    activate: (projectId: string) => Promise<IPCResponse<void>>;
     update: (projectId: string, updates: Partial<Project>) => Promise<IPCResponse<void>>;
     delete: (projectId: string) => Promise<IPCResponse<void>>;
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
     reorder: (projectOrders: Array<{ id: number; displayOrder: number }>) => Promise<IPCResponse<void>>;
     listBranches: (projectId: string) => Promise<IPCResponse<{ name: string; isCurrent: boolean; hasWorktree: boolean }[]>>;
-    refreshGitStatus: (projectId: number) => Promise<IPCResponse<void>>;
     runScript: (projectId: number) => Promise<IPCResponse<{ sessionId: string }>>;
     getRunningScript: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     stopScript: (projectId?: number) => Promise<IPCResponse<void>>;
-  };
-
-  // Git operations
-  git: {
-    detectBranch: (path: string) => Promise<IPCResponse<string>>;
-  };
-
-  // Folders
-  folders: {
-    getByProject: (projectId: number) => Promise<IPCResponse<Folder[]>>;
-    create: (name: string, projectId: number, parentFolderId?: string | null) => Promise<IPCResponse<Folder>>;
-    update: (folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }) => Promise<IPCResponse<void>>;
-    delete: (folderId: string) => Promise<IPCResponse<void>>;
-    reorder: (projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>) => Promise<IPCResponse<void>>;
-    moveSession: (sessionId: string, folderId: string | null) => Promise<IPCResponse<void>>;
-    move: (folderId: string, parentFolderId: string | null) => Promise<IPCResponse<void>>;
   };
 
   // Configuration — IPCDataResponse so callers can access .data fields directly after success check
@@ -318,20 +272,10 @@ interface ElectronAPI {
     openDirectory: (options?: Electron.OpenDialogOptions) => Promise<IPCResponse<string | null>>;
   };
 
-  // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access
-  dashboard: {
-    getProjectStatus: (projectId: number) => Promise<IPCDataResponse<unknown>>;
-    getProjectStatusProgressive: (projectId: number) => Promise<IPCDataResponse<unknown>>; // Caller does not consume .data directly
-    onUpdate: (callback: (data: Record<string, unknown>) => void) => () => void;
-    onSessionUpdate: (callback: (data: { type: string; projectId?: number; sessionId?: string; data: unknown }) => void) => () => void;
-  };
-
   // UI State management
   uiState: {
-    getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[]; expandedFolders: string[] }>>;
-    saveExpanded: (projectIds: number[], folderIds: string[]) => Promise<IPCResponse<void>>;
-    saveExpandedProjects: (projectIds: number[]) => Promise<IPCResponse<void>>;
-    saveExpandedFolders: (folderIds: string[]) => Promise<IPCResponse<void>>;
+    getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[] }>>;
+    saveExpanded: (projectIds: number[]) => Promise<IPCResponse<void>>;
   };
 
   // Event listeners for real-time updates
@@ -344,18 +288,9 @@ interface ElectronAPI {
     onSessionLog: (callback: (data: { sessionId: string; entry: LogEntry }) => void) => () => void;
     onSessionLogsCleared: (callback: (data: { sessionId: string }) => void) => () => void;
     onSessionOutputAvailable: (callback: (info: { sessionId: string; panelId?: string; hasNewOutput?: boolean }) => void) => () => void;
-    onGitStatusUpdated: (callback: (data: { sessionId: string; gitStatus: GitStatus }) => void) => () => void;
-    onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => () => void;
-    onGitStatusLoadingBatch?: (callback: (sessionIds: string[]) => void) => () => void;
-    onGitStatusUpdatedBatch?: (callback: (updates: Array<{ sessionId: string; status: GitStatus }>) => void) => () => void;
 
     // Project events
     onProjectUpdated: (callback: (project: Project) => void) => () => void;
-
-    // Folder events
-    onFolderCreated: (callback: (folder: Folder) => void) => () => void;
-    onFolderUpdated: (callback: (folder: Folder) => void) => () => void;
-    onFolderDeleted: (callback: (folderId: string) => void) => () => void;
 
     // Panel events
     onPanelCreated: (callback: (panel: ToolPanel) => void) => () => void;
@@ -365,11 +300,6 @@ interface ElectronAPI {
 
     onTerminalOutput: (callback: (output: { sessionId: string; data: string; type: 'stdout' | 'stderr' }) => void) => () => void;
     onMainLog: (callback: (level: string, message: string) => void) => () => void;
-
-    // Process management events
-    onZombieProcessesDetected: (callback: (data: { sessionId?: string | null; pids?: number[]; message: string }) => void) => () => void;
-
-    removeAllListeners: (channel: string) => void;
   };
 
   // Panel operations
@@ -380,11 +310,8 @@ interface ElectronAPI {
      *  main/src/preload.ts's structural request type. */
     createPanel: (request: CreatePanelRequest) => Promise<IPCResponse<ToolPanel>>;
     deletePanel: (panelId: string) => Promise<IPCResponse<void>>;
-    renamePanel: (panelId: string, name: string) => Promise<IPCResponse<void>>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse<void>>;
     sendInput: (panelId: string, input: string, images?: Array<{ name: string; dataUrl: string; type: string }>) => Promise<IPCResponse<void>>;
-    // getOutput returns SessionOutput[] — IPCDataResponse so callers can pass directly to setSessionOutputs
-    getOutput: (panelId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getConversationMessages: (panelId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getJsonMessages: (panelId: string) => Promise<IPCResponse<UnifiedMessage[]>>;
     // PromptMarker is locally typed; IPCDataResponse for direct .data access
@@ -392,19 +319,14 @@ interface ElectronAPI {
     continue: (panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string) => Promise<IPCResponse<{ queued?: boolean } | void>>;
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string) => Promise<IPCResponse<{ queued: boolean }>>;
-    listQueuedInput: (panelId: string) => Promise<IPCResponse<QueuedPanelInput[]>>;
     dequeueInput: (panelId: string, id: string) => Promise<IPCResponse<{ dequeued: boolean }>>;
     stop: (panelId: string) => Promise<IPCResponse<void>>;
-    resizeTerminal: (panelId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
-    sendTerminalInput: (panelId: string, data: string) => Promise<IPCResponse<void>>;
   };
 
   // Claude Panels - specific API for Claude panels
   claudePanels: {
     getModel: (panelId: string) => Promise<IPCResponse<string>>;
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
-    getSubstrate: (panelId: string) => Promise<IPCResponse<'sdk' | 'interactive' | null>>;
-    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null) => Promise<IPCResponse<void>>;
     setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
     getFastMode: (panelId: string) => Promise<IPCResponse<boolean>>;
     /** Latest CLI-reported fast-mode state (null until a turn has reported). */
@@ -428,32 +350,20 @@ interface ElectronAPI {
 
   // Logs panel operations
   logs: {
-    runScript: (sessionId: string, command: string, cwd: string) => Promise<IPCResponse<void>>;
     stopScript: (panelId: string) => Promise<IPCResponse<void>>;
-    isRunning: (sessionId: string) => Promise<IPCResponse<boolean>>;
-  };
-
-
-  // Nimbalyst integration
-  nimbalyst: {
-    checkInstalled: () => Promise<IPCResponse<boolean>>;
-    openWorktree: (worktreePath: string) => Promise<IPCResponse<void>>;
   };
 }
 
 // Additional electron interface for IPC event listeners
 interface ElectronInterface {
-  openExternal: (url: string) => Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
-  // Returns a disposer that removes the exact registered wrapper. Prefer it over
-  // `off`: function identity is not preserved across the contextBridge, so
-  // `off(channel, callback)` cannot match the wrapper and silently leaks.
-  // `undefined` is returned for channels the preload does not bridge.
+  // Returns a disposer that removes the exact registered wrapper — the only way
+  // to unsubscribe, since function identity is not preserved across the
+  // contextBridge. `undefined` is returned for channels the preload does not
+  // bridge (only the cyboflow:stream:/pty:/shell: prefixes are).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
   on: (channel: string, callback: (...args: any[]) => void) => (() => void) | undefined;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
-  off: (channel: string, callback: (...args: any[]) => void) => void;
 }
 
 declare global {

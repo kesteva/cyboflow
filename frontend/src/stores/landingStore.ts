@@ -344,6 +344,16 @@ export const useLandingStore = create<LandingState>((set) => {
       // broadcasts this window event on every successful create.
       window.addEventListener('project-created', onLifecycle);
 
+      // A settings edit (ProjectSettings → projects:update) fires
+      // `project:updated` with the full row but no lifecycle signal; patch it
+      // in place so readers of a project field (e.g. the Diff tab's Open in
+      // IDE button, gated on open_ide_command) see the edit without a resync.
+      const unsubscribeProjectUpdated = window.electronAPI?.events?.onProjectUpdated?.((updated: Project) => {
+        set((state) => ({
+          projects: state.projects.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)),
+        }));
+      });
+
       lifecycleSubs.push(
         trpc.cyboflow.events.onRunStatusChanged.subscribe(undefined, {
           onData: onLifecycle,
@@ -368,6 +378,7 @@ export const useLandingStore = create<LandingState>((set) => {
           resyncTimer = null;
         }
         window.removeEventListener('project-created', onLifecycle);
+        unsubscribeProjectUpdated?.();
         for (const sub of reviewItemSubs.values()) sub.unsubscribe();
         reviewItemSubs.clear();
         for (const sub of lifecycleSubs) sub.unsubscribe();

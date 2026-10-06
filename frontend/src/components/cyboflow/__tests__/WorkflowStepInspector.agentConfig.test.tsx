@@ -78,7 +78,6 @@ import type { AppConfig } from '../../../types/config';
 function enableProviders(): void {
   useConfigStore.setState({
     config: {
-      gitRepoPath: '/repo',
       agentProviderAccess: { claude: true, codex: true, omp: true },
     } as AppConfig,
   });

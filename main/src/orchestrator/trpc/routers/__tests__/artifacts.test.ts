@@ -443,7 +443,7 @@ describe('cyboflow.artifacts read union (committed snapshots)', () => {
       const adapter = dbAdapter(db);
       // Wire commit-dir + run-artifacts-dir resolvers so commit snapshots to disk
       // AND deletes the DB row (the full IDEA-039 lifecycle).
-      ArtifactRouter.initialize(adapter, undefined, () => storeDir, undefined, () => runArtifactsDir);
+      ArtifactRouter.initialize(adapter, undefined, () => storeDir, () => runArtifactsDir);
       const caller = appRouter.createCaller(createContext({ db: adapter }));
       seedRunInProject(db, 'run-1', 1);
 

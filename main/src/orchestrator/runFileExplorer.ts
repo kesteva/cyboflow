@@ -2,19 +2,13 @@
  * Orchestrator-subtree handler for the File Explorer.
  *
  * Performs read-only filesystem access scoped strictly inside a git worktree.
- * Serves BOTH callers:
- *   - SESSION-keyed (canonical): resolves a session to its worktree
- *     (sessions.worktree_path) so the File Explorer tab binds to the selected
- *     session's tree whether or not a run is active.
- *       - listSessionFiles(db, sessionId, relPath?) — one directory level.
- *       - readSessionFile(db, sessionId, relPath)   — a single file's content.
- *   - RUN-keyed (legacy, preserved): resolves a run to its worktree
- *     (workflow_runs.worktree_path) for the preserved legacy parentless-run
- *     fallback route.
- *       - listRunFiles(db, runId, relPath?) — one directory level, dirs-first.
- *       - readRunFile(db, runId, relPath)   — a single file's text content.
+ * Resolves a session to its worktree (sessions.worktree_path) so the File
+ * Explorer tab binds to the selected session's tree whether or not a run is
+ * active:
+ *   - listSessionFiles(db, sessionId, relPath?) — one directory level.
+ *   - readSessionFile(db, sessionId, relPath)   — a single file's content.
  *
- * Both pairs delegate to the worktree-relative core helpers
+ * Both delegate to the worktree-relative core helpers
  * (listFilesInWorktree / readFileInWorktree) once the worktree path is resolved.
  *
  * Path safety: every caller-supplied relative path is normalized, rejected if it
@@ -42,9 +36,8 @@ const BINARY_SNIFF_BYTES = 8000;
  * an appropriate TRPCError code; the message is preserved for the UI.
  */
 export type RunFileErrorReason =
-  | 'run-not-found' // no workflow_runs row for the id
   | 'session-not-found' // no sessions row for the id
-  | 'no-worktree' // run/session exists but has no worktree_path yet
+  | 'no-worktree' // session exists but has no worktree_path
   | 'worktree-missing' // worktree_path points nowhere on disk (e.g. torn down)
   | 'invalid-path' // caller path is absolute or escapes the worktree
   | 'not-found' // target file/dir does not exist
@@ -66,28 +59,11 @@ interface WorktreeRow {
 }
 
 /**
- * Look up a run's worktree path. Throws RunFileError when the run is unknown or
- * has not yet been assigned a worktree.
- */
-function resolveWorktreePath(db: DatabaseLike, runId: string): string {
-  const row = db
-    .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
-    .get(runId) as WorktreeRow | undefined;
-  if (!row) {
-    throw new RunFileError('run-not-found', `Run ${runId} not found`);
-  }
-  if (!row.worktree_path) {
-    throw new RunFileError('no-worktree', `Run ${runId} has no worktree yet`);
-  }
-  return row.worktree_path;
-}
-
-/**
  * Look up a SESSION's worktree path (sessions.worktree_path) — the canonical
  * source for the File Explorer tab, which binds to the SELECTED session's tree
  * whether or not a run is active. Throws RunFileError('session-not-found') when
  * the session is unknown. `worktree_path` is NOT NULL in the schema, so the
- * falsy check is purely defensive (mirrors the run-keyed resolver's shape).
+ * falsy check is purely defensive.
  */
 export function resolveSessionWorktreePath(db: DatabaseLike, sessionId: string): string {
   const row = db
@@ -182,8 +158,8 @@ function toPosix(p: string): string {
  * Directories sort first, then files, each alphabetically (case-insensitive).
  * The `.git` directory is excluded.
  *
- * This is the worktree-relative CORE shared by both the session-keyed and
- * run-keyed wrappers — all path-safety behavior lives here.
+ * This is the worktree-relative CORE behind the session-keyed wrappers — all
+ * path-safety behavior lives here.
  */
 export async function listFilesInWorktree(
   worktreePath: string,
@@ -260,8 +236,8 @@ export async function listFilesInWorktree(
  * first sniff window) return `content: null` with an `unviewableReason` rather
  * than throwing.
  *
- * This is the worktree-relative CORE shared by both the session-keyed and
- * run-keyed wrappers — all path-safety + special-file behavior lives here.
+ * This is the worktree-relative CORE behind the session-keyed wrappers — all
+ * path-safety + special-file behavior lives here.
  */
 export async function readFileInWorktree(
   worktreePath: string,
@@ -328,37 +304,6 @@ export async function readSessionFile(
   relPath: string,
 ): Promise<RunFileContent> {
   const worktreePath = resolveSessionWorktreePath(db, sessionId);
-  return readFileInWorktree(worktreePath, relPath);
-}
-
-// ---------------------------------------------------------------------------
-// Run-keyed wrappers (legacy, preserved) — thin delegators over the core,
-// kept for the preserved run-keyed routes (Phase-5 parentless-run fallback).
-// ---------------------------------------------------------------------------
-
-/**
- * List one directory level of a RUN's git worktree (workflow_runs.worktree_path).
- * Resolves the run's worktree, then delegates to the worktree-relative core.
- */
-export async function listRunFiles(
-  db: DatabaseLike,
-  runId: string,
-  relPath?: string,
-): Promise<RunFileEntry[]> {
-  const worktreePath = resolveWorktreePath(db, runId);
-  return listFilesInWorktree(worktreePath, relPath);
-}
-
-/**
- * Read a single file from a RUN's git worktree (workflow_runs.worktree_path).
- * Resolves the run's worktree, then delegates to the worktree-relative core.
- */
-export async function readRunFile(
-  db: DatabaseLike,
-  runId: string,
-  relPath: string,
-): Promise<RunFileContent> {
-  const worktreePath = resolveWorktreePath(db, runId);
   return readFileInWorktree(worktreePath, relPath);
 }
 

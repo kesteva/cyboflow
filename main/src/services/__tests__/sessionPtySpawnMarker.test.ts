@@ -1,7 +1,7 @@
 /**
- * The three session/terminal spawn sites that build their own env inline —
- * SessionManager (run script + build exec), TerminalSessionManager and
- * TerminalPanelManager — must each hand the child the spawn marker
+ * The session/terminal spawn sites that build their own env inline —
+ * SessionManager (build exec) and TerminalPanelManager — must each hand the
+ * child the spawn marker
  * (CYBOFLOW_INSTANCE + CYBOFLOW_WORKTREE = the real worktree path).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -47,7 +47,6 @@ vi.mock('../scriptExecutionTracker', () => ({
 vi.mock('../../index', () => ({ mainWindow: null }));
 
 import { SessionManager } from '../sessionManager';
-import { TerminalSessionManager } from '../terminalSessionManager';
 import { TerminalPanelManager } from '../terminalPanelManager';
 import { getInstanceId, _resetInstanceIdForTesting } from '../../utils/spawnMarker';
 import type { DatabaseService } from '../../database/database';
@@ -74,18 +73,6 @@ describe('session/terminal PTY spawns carry the spawn marker', () => {
     delete process.env.CYBOFLOW_INSTANCE;
   });
 
-  it('TerminalSessionManager.createTerminalSession stamps the session worktree', async () => {
-    ptySpawn.mockReturnValue(fakePty());
-    await new TerminalSessionManager().createTerminalSession('sess-1', WORKTREE);
-
-    const opts = ptySpawn.mock.calls[0][2] as SpawnOpts;
-    expect(opts.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
-    expect(opts.env.CYBOFLOW_WORKTREE).toBe(WORKTREE);
-    expect(opts.cwd).toBe(WORKTREE);
-    // Pre-existing vars survive the stamp.
-    expect(opts.env.CYBOFLOW_SESSION_ID).toBe('sess-1');
-  });
-
   it('TerminalPanelManager.initializeTerminal stamps the panel cwd', async () => {
     ptySpawn.mockReturnValue(fakePty());
     const panel = {
@@ -99,28 +86,6 @@ describe('session/terminal PTY spawns carry the spawn marker', () => {
     expect(opts.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
     expect(opts.env.CYBOFLOW_WORKTREE).toBe(WORKTREE);
     expect(opts.env.CYBOFLOW_PANEL_ID).toBe('panel-1');
-  });
-
-  it('SessionManager.runScript stamps the script working directory', async () => {
-    const proc = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-      pid: 4343,
-    });
-    childSpawn.mockReturnValue(proc);
-    const sm = new SessionManager({
-      getSession: vi.fn(),
-      updateSession: vi.fn(),
-    } as unknown as DatabaseService);
-    // setSessionRunning is DB/emit bookkeeping irrelevant to the env under test.
-    (sm as unknown as { setSessionRunning: () => void }).setSessionRunning = vi.fn();
-
-    await sm.runScript('sess-3', ['echo hi'], WORKTREE);
-
-    const opts = childSpawn.mock.calls[0][2] as SpawnOpts;
-    expect(opts.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
-    expect(opts.env.CYBOFLOW_WORKTREE).toBe(WORKTREE);
-    expect(opts.cwd).toBe(WORKTREE);
   });
 
   it.skipIf(process.platform === 'win32')(

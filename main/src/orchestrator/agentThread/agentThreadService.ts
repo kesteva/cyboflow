@@ -58,7 +58,7 @@ import {
   agentThreadImageByteLength,
   DEFAULT_ASSISTANT_CONTEXT_RETENTION,
 } from '../../../../shared/types/agentThread';
-import type { CliSpawnOutcome } from '../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../shared/types/cliSpawn';
 import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
 import type { LoggerLike } from '../types';
 import type { AgentThreadDbStore } from './agentThreadDbStore';

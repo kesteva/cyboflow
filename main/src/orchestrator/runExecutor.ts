@@ -26,7 +26,7 @@ import {
 } from '../../../shared/types/agentRuntime';
 import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../shared/types/cliPanels';
+import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../shared/types/cliSpawn';
 import type { AgentThreadImageAttachment } from '../../../shared/types/agentThread';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
