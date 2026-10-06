@@ -1,6 +1,6 @@
 /**
- * Standalone TCP connect-probe for the fixed ports the System view's
- * "Ports & sockets" section reports on (:4521 dev renderer, :9223 CDP).
+ * Standalone TCP connect-probe for the watched ports the System view's
+ * "Ports & sockets" section reports on (AppConfig.systemWatchedPorts).
  *
  * Imports only Node's `net` — no `electron`, `better-sqlite3`, or
  * `main/src/services/*` — so the system router can import it under the
@@ -18,29 +18,30 @@ export interface PortProbeResult {
 export interface ProbePortOptions {
   /** Give up (and report `inUse: false`) after this many ms. Default 500. */
   timeoutMs?: number;
-  /** Socket factory; defaults to dialing `127.0.0.1:<port>`. */
-  connect?: (port: number) => net.Socket;
+  /** Socket factory; defaults to dialing `<host>:<port>`. */
+  connect?: (port: number, host: string) => net.Socket;
 }
 
 const DEFAULT_PROBE_TIMEOUT_MS = 500;
 
-function defaultConnect(port: number): net.Socket {
-  return net.connect({ host: '127.0.0.1', port });
+/**
+ * Both loopbacks: a server bound to only one family is common (Vite binds
+ * `localhost`, which resolves to `::1` alone on recent macOS/Node), and a probe of
+ * just 127.0.0.1 would report it free.
+ */
+export const LOOPBACK_HOSTS = ['127.0.0.1', '::1'] as const;
+
+function defaultConnect(port: number, host: string): net.Socket {
+  return net.connect({ host, port });
 }
 
-/**
- * Resolves `inUse: true` when something accepts a TCP connection on the port,
- * `inUse: false` on a connect error or timeout. Never rejects.
- */
-export function probePort(
+function probeHost(
   port: number,
-  label: string,
-  opts: ProbePortOptions = {},
-): Promise<PortProbeResult> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
-  const connect = opts.connect ?? defaultConnect;
-
-  return new Promise<PortProbeResult>((resolve) => {
+  host: string,
+  timeoutMs: number,
+  connect: (port: number, host: string) => net.Socket,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     let settled = false;
     let socket: net.Socket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -54,11 +55,11 @@ export function probePort(
       } catch {
         // best-effort teardown of a probe socket
       }
-      resolve({ port, label, inUse });
+      resolve(inUse);
     };
 
     try {
-      socket = connect(port);
+      socket = connect(port, host);
     } catch {
       finish(false);
       return;
@@ -68,4 +69,19 @@ export function probePort(
     socket.once('error', () => finish(false));
     timer = setTimeout(() => finish(false), timeoutMs);
   });
+}
+
+/**
+ * Resolves `inUse: true` when something accepts a TCP connection on the port on
+ * either loopback address, `inUse: false` when both refuse or time out. Never rejects.
+ */
+export async function probePort(
+  port: number,
+  label: string,
+  opts: ProbePortOptions = {},
+): Promise<PortProbeResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const connect = opts.connect ?? defaultConnect;
+  const results = await Promise.all(LOOPBACK_HOSTS.map((host) => probeHost(port, host, timeoutMs, connect)));
+  return { port, label, inUse: results.some(Boolean) };
 }

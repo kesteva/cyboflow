@@ -49,8 +49,7 @@ function snap(worktrees: SystemWorktree[], processes: SystemProcess[]): SystemSn
     processes,
     worktrees,
     ports: {
-      devRenderer: { port: 4521, label: 'dev renderer', inUse: false },
-      cdp: { port: 9223, label: 'CDP', inUse: false },
+      tcp: [{ port: 3000, label: 'watched', inUse: false }],
       orchSocket: { connectionCount: 0, runBindings: {} },
     },
   };

@@ -2230,6 +2230,8 @@ async function initializeServices(): Promise<boolean> {
     orchSocketServer,
     ptyCliManagers: laneManagers.filter(({ lane }) => isPtyLane(lane)).map(({ manager }) => manager),
     getRunShellManager: () => runShellManager,
+    configManager,
+    isDevelopment,
   });
 
   const resolvePanelOwner = (panelId: string): AbstractCliManager | undefined => {

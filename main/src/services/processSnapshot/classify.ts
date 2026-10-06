@@ -269,20 +269,23 @@ export function classify(
   return rows.map((p): ClassifiedProcess => {
     const marker = p.marker ?? null;
     if (marker) {
+      // The marker's worktree attributes a row no manager handle matched (a
+      // detached child): that is what files it under its worktree card.
+      const m = p.worktreePath === null && marker.worktree !== null ? { ...p, worktreePath: marker.worktree } : p;
       const id = marker.instanceId;
       if (id === liveInstances.selfInstanceId) {
         // The marker names this live instance; ownership also needs the manager's handle.
-        if (p.owner !== null) {
-          return { ...base(p), bucket: 'owned', process: p, owner: p.owner, instanceId: id };
+        if (m.owner !== null) {
+          return { ...base(m), bucket: 'owned', process: m, owner: m.owner, instanceId: id };
         }
-        return { ...base(p), bucket: 'suspected', process: p };
+        return { ...base(m), bucket: 'suspected', process: m };
       }
-      if (liveInstances.liveInstanceIds.has(id)) return foreign(p, id);
+      if (liveInstances.liveInstanceIds.has(id)) return foreign(m, id);
       if (liveInstances.deadInstanceIds.has(id)) {
-        return { ...base(p), bucket: 'orphan', sweepEligible: true, process: p, instanceId: id };
+        return { ...base(m), bucket: 'orphan', sweepEligible: true, process: m, instanceId: id };
       }
       // Unknown instance: absence of a record is not proof the owner is dead.
-      return { ...base(p), bucket: 'suspected', process: p };
+      return { ...base(m), bucket: 'suspected', process: m };
     }
     if (p.owner !== null) {
       return {

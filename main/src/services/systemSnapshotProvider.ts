@@ -37,6 +37,8 @@ export interface SystemSnapshotProviderDeps {
   processSnapshot: { snapshot(): Promise<SnapshottedProcess[]> };
   worktrees: Pick<WorktreeMonitorProvider, 'loadRegistry' | 'getDiskUsage'>;
   orchSocket: SystemOrchSocketSource;
+  /** The TCP ports each snapshot probes; read per call. Absent ⇒ none. */
+  watchedPorts?: SystemSnapshotProvider['watchedPorts'];
   /** Port probe seam; defaults to the real `probePort`. */
   probePort?: SystemSnapshotProvider['probePort'];
   /** Platform seam; defaults to the host platform. */
@@ -50,10 +52,9 @@ export interface SystemSnapshotProviderDeps {
   /**
    * Reads the spawn marker off scanned rows' environments. Defaults to the real
    * reader ({@link createSpawnMarkerReader}): linux reads `/proc/<pid>/environ`
-   * and starts no process. darwin/win32: no environment reader. `ps -E` cannot
-   * tell arguments from environment entries, and it would need a second scan.
-   * Rows there carry no marker, so they classify no higher than `suspected` and
-   * are never sweep-eligible.
+   * and starts no process; darwin reads launchd children (ppid 1) with a cached,
+   * targeted `ps -E`. win32: no environment reader — rows there carry no marker,
+   * so they classify no higher than `suspected` and are never sweep-eligible.
    */
   readMarkers?: (rows: readonly SnapshottedProcess[]) => Promise<Map<number, SpawnMarkerObservation>>;
 }
@@ -170,6 +171,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
     loadWorktrees: (projectId) => deps.worktrees.loadRegistry(projectId),
     getDiskUsage: (p) => deps.worktrees.getDiskUsage(p),
     orchSocket: deps.orchSocket,
+    watchedPorts: deps.watchedPorts,
     probePort: deps.probePort,
     platform: deps.platform,
     async loadProcesses(knownWorktreePaths) {

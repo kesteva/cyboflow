@@ -30,14 +30,13 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import { probePort, type PortProbeResult } from '../../portProbe';
 import {
-  CDP_PROBE_PORT,
-  DEV_RENDERER_PROBE_PORT,
   DISK_SIZING_UNSUPPORTED_REASON,
   type SystemCapability,
   type OrchSocketSnapshot,
   type SystemProcessEntry,
   type SystemSnapshot,
   type SystemWorktreeEntry,
+  type WatchedPort,
 } from '../../systemTypes';
 import type {
   WorktreeMonitorDiskUsage,
@@ -62,6 +61,8 @@ export interface SystemSnapshotProvider {
   loadProcesses(knownWorktreePaths: ReadonlySet<string>): Promise<SystemProcessEntry[]>;
   /** The running orch.sock server. */
   orchSocket: SystemOrchSocketSource;
+  /** The TCP ports to probe, read per snapshot so a settings change applies on the next refresh. Absent ⇒ none. */
+  watchedPorts?: () => WatchedPort[];
   /** Port probe seam; defaults to the real `probePort` (tests inject a fake `connect`). */
   probePort?: (port: number, label: string) => Promise<PortProbeResult>;
   /** Platform seam (PlatformProcessOptions convention); defaults to the host platform. */
@@ -74,9 +75,6 @@ let _systemProvider: SystemSnapshotProvider | null = null;
 export function setSystemProvider(provider: SystemSnapshotProvider | null): void {
   _systemProvider = provider;
 }
-
-const DEV_RENDERER_LABEL = 'dev renderer';
-const CDP_LABEL = 'CDP';
 
 function diskSizingCapability(platform: NodeJS.Platform): SystemCapability {
   return platform === 'win32'
@@ -97,8 +95,7 @@ function startingSnapshot(): SystemSnapshot {
     processes: [],
     worktrees: [],
     ports: {
-      devRenderer: { port: DEV_RENDERER_PROBE_PORT, label: DEV_RENDERER_LABEL, inUse: false },
-      cdp: { port: CDP_PROBE_PORT, label: CDP_LABEL, inUse: false },
+      tcp: [],
       orchSocket: emptyOrchSocket(),
     },
   };
@@ -136,10 +133,10 @@ export async function buildSystemSnapshot(provider: SystemSnapshotProvider, proj
   const probe = provider.probePort ?? ((port: number, label: string) => probePort(port, label));
   const diskSizing = diskSizingCapability(provider.platform ?? process.platform);
   const registry = await provider.loadWorktrees(projectId);
-  const [processes, devRenderer, cdp] = await Promise.all([
+  const watched = provider.watchedPorts?.() ?? [];
+  const [processes, tcp] = await Promise.all([
     provider.loadProcesses(new Set(registry.map((w) => w.path))),
-    probe(DEV_RENDERER_PROBE_PORT, DEV_RENDERER_LABEL),
-    probe(CDP_PROBE_PORT, CDP_LABEL),
+    Promise.all(watched.map((w) => probe(w.port, w.label))),
   ]);
   const worktrees: SystemWorktreeEntry[] = excludeNestedWorktreeUsage(
     registry.map((entry) => ({
@@ -157,8 +154,7 @@ export async function buildSystemSnapshot(provider: SystemSnapshotProvider, proj
     processes,
     worktrees,
     ports: {
-      devRenderer,
-      cdp,
+      tcp,
       orchSocket: {
         connectionCount: provider.orchSocket.getConnectionCount(),
         runBindings: provider.orchSocket.getRunBindingCounts(),

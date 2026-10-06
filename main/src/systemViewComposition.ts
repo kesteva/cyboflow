@@ -38,6 +38,9 @@ import type { RunShellManager } from './services/runShellManager';
 import type { WorktreeManager } from './services/worktreeManager';
 import type { GitStatusManager } from './services/gitStatusManager';
 import type { DatabaseService } from './database/database';
+import type { ConfigManager } from './services/configManager';
+import type { WatchedPort } from './orchestrator/systemTypes';
+import { DEFAULT_SYSTEM_WATCHED_PORTS, isValidPort } from '../../shared/types/systemWatchedPorts';
 
 export interface SystemViewCompositionDeps {
   databaseService: DatabaseService;
@@ -49,6 +52,41 @@ export interface SystemViewCompositionDeps {
   ptyCliManagers: AbstractCliManager[];
   /** Read lazily: the run-shell manager is constructed later in boot. */
   getRunShellManager: () => RunShellManager | null;
+  /** Source of the user's saved watched-port list, read per snapshot. */
+  configManager: Pick<ConfigManager, 'getSystemWatchedPorts'>;
+  /** Dev build: cyboflow's own dev renderer + CDP ports join the defaults. */
+  isDevelopment: boolean;
+}
+
+const WATCHED_PORT_LABEL = 'watched';
+
+/**
+ * The ports one snapshot probes. The user's saved list wins outright; with none
+ * saved, the defaults — plus, in a dev build, cyboflow's own dev renderer and CDP
+ * ports, resolved from the env vars `pnpm dev` binds them from (a verify instance
+ * runs on leased ports). Either way they are ordinary list entries the user can
+ * remove; in a dev build they just carry a specific label.
+ */
+export function resolveWatchedPorts(
+  saved: readonly number[] | undefined,
+  isDevelopment: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): WatchedPort[] {
+  const own = new Map<number, string>();
+  if (isDevelopment) {
+    for (const [raw, label] of [
+      [env.CYBOFLOW_VITE_PORT ?? '4521', 'cyboflow dev renderer'],
+      [env.CYBOFLOW_CDP_PORT ?? '9223', 'cyboflow CDP'],
+    ] as const) {
+      const port = Number(raw);
+      if (isValidPort(port) && !own.has(port)) own.set(port, label);
+    }
+  }
+  const ports = saved ?? [
+    ...DEFAULT_SYSTEM_WATCHED_PORTS,
+    ...[...own.keys()].filter((p) => !DEFAULT_SYSTEM_WATCHED_PORTS.includes(p)),
+  ];
+  return ports.map((port) => ({ port, label: own.get(port) ?? WATCHED_PORT_LABEL }));
 }
 
 export function composeSystemView(deps: SystemViewCompositionDeps): void {
@@ -69,6 +107,7 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
     }),
     worktrees: buildWorktreeProvider(),
     orchSocket: deps.orchSocketServer,
+    watchedPorts: () => resolveWatchedPorts(deps.configManager.getSystemWatchedPorts(), deps.isDevelopment),
   });
   setSystemProvider(systemSnapshotProvider);
   console.log('[Main] system deps wired');

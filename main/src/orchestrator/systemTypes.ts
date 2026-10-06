@@ -10,9 +10,11 @@ import type {
   WorktreeMonitorRegistryEntry,
 } from './trpc/routers/worktreeMonitor';
 
-/** The fixed ports the System view probes. */
-export const DEV_RENDERER_PROBE_PORT = 4521;
-export const CDP_PROBE_PORT = 9223;
+/** One TCP port the System view probes, with the label its row shows. */
+export interface WatchedPort {
+  port: number;
+  label: string;
+}
 
 /** `orch.sock` occupancy, matching OrchSocketServer's public getters. */
 export interface OrchSocketSnapshot {
@@ -23,10 +25,12 @@ export interface OrchSocketSnapshot {
 }
 
 export interface PortsAndSocketsSnapshot {
-  /** :4521 dev renderer. */
-  devRenderer: PortProbeResult;
-  /** :9223 CDP. */
-  cdp: PortProbeResult;
+  /**
+   * Every watched TCP port, in display order: the user's configured list
+   * (AppConfig.systemWatchedPorts) plus, in a dev build, cyboflow's own dev
+   * renderer and CDP ports.
+   */
+  tcp: PortProbeResult[];
   orchSocket: OrchSocketSnapshot;
 }
 

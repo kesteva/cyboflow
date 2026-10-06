@@ -36,6 +36,7 @@ import {
   isFanOutDispatch,
   type FanOutDispatch,
 } from '../../../shared/types/fanOutDispatch';
+import { normalizeSystemWatchedPorts } from '../../../shared/types/systemWatchedPorts';
 import {
   type QuickSessionWorktreeMode,
   DEFAULT_QUICK_SESSION_WORKTREE_MODE,
@@ -731,6 +732,17 @@ export class ConfigManager extends EventEmitter {
   getDefaultExecutionModel(): ExecutionModel {
     const value = this.config.defaultExecutionModel;
     return isExecutionModel(value) ? value : 'programmatic';
+  }
+
+  /**
+   * The user's saved System view watched-port list, normalized; undefined when
+   * unset OR malformed (config.json is user-editable), in which case the caller
+   * applies the build's defaults (resolveWatchedPorts in systemViewComposition.ts).
+   * An explicit [] means watch nothing. NOT seeded into the constructor defaults,
+   * so existing config.json files stay byte-identical.
+   */
+  getSystemWatchedPorts(): number[] | undefined {
+    return normalizeSystemWatchedPorts(this.config.systemWatchedPorts) ?? undefined;
   }
 
   /**

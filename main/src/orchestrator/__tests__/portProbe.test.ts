@@ -24,7 +24,8 @@ describe('probePort', () => {
     const p = probePort(4521, 'dev', { connect });
     sock.emit('connect');
     await expect(p).resolves.toEqual({ port: 4521, label: 'dev', inUse: true });
-    expect(connect).toHaveBeenCalledWith(4521);
+    expect(connect).toHaveBeenCalledWith(4521, '127.0.0.1');
+    expect(connect).toHaveBeenCalledWith(4521, '::1');
     expect(sock.destroy).toHaveBeenCalled();
   });
 
@@ -52,6 +53,17 @@ describe('probePort', () => {
       },
     });
     await expect(p).resolves.toEqual({ port: 1, label: 'x', inUse: false });
+  });
+
+  it('reports a port bound on only one loopback family as in use', async () => {
+    const v4 = new FakeSocket();
+    const v6 = new FakeSocket();
+    const p = probePort(4521, 'dev', { connect: (_port, host) => asSocket(host === '::1' ? v6 : v4) });
+    v4.emit('error', new Error('ECONNREFUSED'));
+    v6.emit('connect');
+    await expect(p).resolves.toEqual({ port: 4521, label: 'dev', inUse: true });
+    expect(v4.destroy).toHaveBeenCalled();
+    expect(v6.destroy).toHaveBeenCalled();
   });
 
   it('settles once: a connect after a timeout does not flip the result', async () => {

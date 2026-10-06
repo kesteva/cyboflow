@@ -8,14 +8,14 @@
  * direct kill). Nothing is planted: the marker is read back off the real child's
  * environment, and every snapshot is a new scan.
  *
- * Marker reading: production reads `/proc/<pid>/environ` on linux only (darwin has no
- * environment reader). The test injects `readEnviron` — /proc on linux, `ps -Eww` on
- * darwin — into the real reader, scoped to just this test's two pids so unrelated
- * markers on the developer's machine can never become reap targets.
+ * Marker reading: the PRODUCTION reader for the host — `/proc/<pid>/environ` on
+ * linux, the targeted `ps -E` of launchd children on darwin (the SIGKILLed instance's
+ * child is reparented to launchd, exactly the case that reader exists for). Only the
+ * rows handed to it are scoped to this test's two pids, so unrelated markers on the
+ * developer's machine can never become reap targets.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { promises as fsp } from 'node:fs';
 import { appRouter } from '../../orchestrator/trpc/router';
 import { createContext } from '../../orchestrator/trpc/context';
 import { setMonitorReapProvider } from '../../orchestrator/trpc/routers/monitorReap';
@@ -71,18 +71,6 @@ async function spawnInstanceWithChild(env: Record<string, string>): Promise<{ in
   return { instance, childPid };
 }
 
-/** Environment blob (NUL-separated) for a pid, the way the production linux reader gets it. */
-async function readEnviron(pid: number): Promise<string | null> {
-  try {
-    if (process.platform === 'linux') return await fsp.readFile(`/proc/${pid}/environ`, 'latin1');
-    // darwin: `ps -Eww` appends the environment after argv; stamped values contain no spaces.
-    const out = execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)]).toString().trim();
-    return out.split(/\s+/).join('\0');
-  } catch {
-    return null;
-  }
-}
-
 const cleanup: number[] = [];
 afterEach(() => {
   setMonitorReapProvider(null);
@@ -101,6 +89,7 @@ afterEach(() => {
  * embodies the fake instance) and the marker-read pid scope are supplied.
  */
 function harness(instanceId: string, instancePid: number, scopedPids: number[]) {
+  const readScoped = createSpawnMarkerReader();
   const provider = createSystemSnapshotProvider({
     processSnapshot: new ProcessSnapshotService({
       cliManager: { listOwnedProcesses: () => [] },
@@ -111,10 +100,7 @@ function harness(instanceId: string, instancePid: number, scopedPids: number[]) 
     getSelfInstanceId: () => SELF,
     readInstanceRecords: async () => [{ instanceId, pid: instancePid, startedAt: new Date().toISOString() }],
     isPidAlive: isAlive,
-    readMarkers: createSpawnMarkerReader({
-      platform: 'linux', // force the environ path; the injected reader supplies darwin's environment
-      readEnviron: async (pid) => (scopedPids.includes(pid) ? readEnviron(pid) : null),
-    }),
+    readMarkers: (rows) => readScoped(rows.filter((r) => scopedPids.includes(r.pid))),
   });
   const loadSnapshot = async (): Promise<ReapSnapshot> => ({
     generatedAt: Date.now(),
@@ -145,9 +131,12 @@ describe.skipIf(process.platform === 'win32')('orphan reap end to end (real proc
 
     const load = harness(instanceId, instancePid, [instancePid, childPid]);
 
-    // While the instance lives, the child is another live instance's: foreign, never sweepable.
-    const before = (await load()).processes.find((p) => p.bucket === 'foreign' && p.pidLabel === String(childPid));
-    expect(before).toBeDefined();
+    // While the instance lives, the child is another live instance's and never sweepable.
+    // linux reads its marker (foreign, read-only); darwin reads only launchd children, so
+    // the still-parented child carries no marker and is not shipped at all.
+    const beforeRows = (await load()).processes.filter((p) => (p.bucket === 'foreign' ? p.pidLabel : String(p.pid)) === String(childPid));
+    if (process.platform === 'darwin') expect(beforeRows).toEqual([]);
+    else expect(beforeRows).toEqual([expect.objectContaining({ bucket: 'foreign' })]);
     const pre = await api().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
     expect(pre.manifest.targets).toEqual([]);
     expect(isAlive(childPid)).toBe(true);

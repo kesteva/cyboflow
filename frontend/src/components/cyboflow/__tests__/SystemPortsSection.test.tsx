@@ -1,19 +1,35 @@
 /**
- * SystemPortsSection tests — rows from a fixture snapshot, the empty state, and
- * tolerance for a missing/partial `ports` payload. The section is read-only: no
- * button exists anywhere in its DOM.
+ * SystemPortsSection tests — rows from a fixture snapshot, the empty state,
+ * tolerance for a missing/partial `ports` payload, and the gear's inline
+ * watched-ports editor (the section's only control).
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 import { SystemPortsSection } from '../SystemPortsSection';
+
+const { updateSpy, fetchConfigSpy } = vi.hoisted(() => ({
+  updateSpy: vi.fn(),
+  fetchConfigSpy: vi.fn(),
+}));
+vi.mock('../../../utils/api', () => ({ API: { config: { update: updateSpy } } }));
+vi.mock('../../../stores/configStore', () => ({
+  useConfigStore: { getState: () => ({ fetchConfig: fetchConfigSpy }) },
+}));
+
+beforeEach(() => {
+  updateSpy.mockReset().mockResolvedValue({ success: true });
+  fetchConfigSpy.mockReset();
+});
 
 type Ports = SystemSnapshotData['ports'];
 
 const ports = (over: Partial<Ports> = {}): Ports => ({
-  devRenderer: { port: 4521, label: 'dev renderer', inUse: true },
-  cdp: { port: 9223, label: 'CDP', inUse: false },
+  tcp: [
+    { port: 3000, label: 'watched', inUse: true },
+    { port: 8080, label: 'watched', inUse: false },
+  ],
   orchSocket: { connectionCount: 3, runBindings: { 'run-a': 2, 'run-b': 1 } },
   ...over,
 });
@@ -21,8 +37,8 @@ const ports = (over: Partial<Ports> = {}): Ports => ({
 describe('SystemPortsSection', () => {
   it('renders a row per port/socket from the snapshot', () => {
     render(<SystemPortsSection ports={ports()} />);
-    expect(screen.getByTestId('system-port-port-4521')).toHaveAttribute('data-bound', 'true');
-    expect(screen.getByTestId('system-port-port-9223')).toHaveAttribute('data-bound', 'false');
+    expect(screen.getByTestId('system-port-port-3000')).toHaveAttribute('data-bound', 'true');
+    expect(screen.getByTestId('system-port-port-8080')).toHaveAttribute('data-bound', 'false');
     const sock = screen.getByTestId('system-port-orch-sock');
     expect(sock).toHaveTextContent('orch.sock');
     expect(sock).toHaveTextContent('3 clients · 2 runs bound');
@@ -32,9 +48,9 @@ describe('SystemPortsSection', () => {
 
   it('never asserts an owner or conflict for a bound port (no authoritative mapping)', () => {
     render(<SystemPortsSection ports={ports()} />);
-    expect(screen.getByTestId('system-port-port-4521-owner')).toHaveTextContent('owner not identified');
-    expect(screen.queryByTestId('system-port-port-4521-conflict')).toBeNull();
-    expect(screen.queryByTestId('system-port-port-9223-owner')).toBeNull();
+    expect(screen.getByTestId('system-port-port-3000-owner')).toHaveTextContent('owner not identified');
+    expect(screen.queryByTestId('system-port-port-3000-conflict')).toBeNull();
+    expect(screen.queryByTestId('system-port-port-8080-owner')).toBeNull();
   });
 
   it('does not report orch.sock as free when it has zero clients', () => {
@@ -44,6 +60,22 @@ describe('SystemPortsSection', () => {
     expect(sock).toHaveTextContent('0 clients · 0 runs bound');
     expect(sock).toHaveTextContent('listening state not reported');
     expect(sock).not.toHaveTextContent('free');
+  });
+
+  it('renders every watched port in order, with its label', () => {
+    render(
+      <SystemPortsSection
+        ports={ports({
+          tcp: [
+            { port: 5000, label: 'watched', inUse: false },
+            { port: 4521, label: 'cyboflow dev renderer', inUse: true },
+          ],
+        })}
+      />,
+    );
+    const rows = screen.getAllByTestId(/^system-port-port-\d+$/);
+    expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual(['system-port-port-5000', 'system-port-port-4521']);
+    expect(rows[1]).toHaveTextContent('cyboflow dev renderer');
   });
 
   it('renders the empty state when the snapshot reports no ports or sockets', () => {
@@ -56,12 +88,70 @@ describe('SystemPortsSection', () => {
     expect(screen.getByTestId('system-ports-empty')).toBeInTheDocument();
     rerender(<SystemPortsSection ports={null} />);
     expect(screen.getByTestId('system-ports-empty')).toBeInTheDocument();
-    rerender(<SystemPortsSection ports={{ cdp: { port: 9223, label: 'CDP', inUse: true } }} />);
-    expect(screen.getByTestId('system-port-port-9223')).toBeInTheDocument();
+    rerender(<SystemPortsSection ports={{ tcp: [{ port: 5000, label: 'watched', inUse: true }] }} />);
+    expect(screen.getByTestId('system-port-port-5000')).toBeInTheDocument();
   });
 
-  it('is read-only: no buttons in the section', () => {
+  it('has no control besides the watched-ports gear', () => {
     render(<SystemPortsSection ports={ports()} />);
-    expect(screen.getByTestId('system-ports').querySelector('button')).toBeNull();
+    const buttons = screen.getByTestId('system-ports').querySelectorAll('button');
+    expect(Array.from(buttons).map((b) => b.getAttribute('data-testid'))).toEqual(['system-ports-configure']);
+  });
+
+  it('the gear opens an editor prefilled with the ports the section shows', () => {
+    render(<SystemPortsSection ports={ports()} />);
+    expect(screen.queryByTestId('system-ports-editor')).toBeNull();
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    expect(screen.getByTestId('system-ports-editor-input')).toHaveValue('3000, 8080');
+  });
+
+  it('saves the parsed ports and re-probes', async () => {
+    const onSaved = vi.fn();
+    render(<SystemPortsSection ports={ports({ tcp: [{ port: 4000, label: 'watched', inUse: false }] })} onWatchedPortsSaved={onSaved} />);
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    const input = screen.getByDisplayValue('4000');
+    fireEvent.change(input, { target: { value: '4000 6006, 4000' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(updateSpy).toHaveBeenCalledWith({ systemWatchedPorts: [4000, 6006] });
+    expect(fetchConfigSpy).toHaveBeenCalled();
+    expect(screen.queryByTestId('system-ports-editor')).toBeNull();
+  });
+
+  it('names invalid tokens and saves nothing', async () => {
+    render(<SystemPortsSection ports={ports()} />);
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    const input = screen.getByDisplayValue('3000, 8080');
+    fireEvent.change(input, { target: { value: '3000, abc, 70000' } });
+    fireEvent.click(screen.getByTestId('system-ports-editor-save'));
+
+    expect(screen.getByTestId('system-ports-editor-error')).toHaveTextContent('abc, 70000');
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a rejected save and keeps the editor open', async () => {
+    updateSpy.mockResolvedValue({ success: false, error: 'Invalid systemWatchedPorts' });
+    render(<SystemPortsSection ports={ports()} />);
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    screen.getByDisplayValue('3000, 8080');
+    fireEvent.click(screen.getByTestId('system-ports-editor-save'));
+
+    expect(await screen.findByTestId('system-ports-editor-error')).toHaveTextContent('Invalid systemWatchedPorts');
+    expect(screen.getByTestId('system-ports-editor')).toBeInTheDocument();
+  });
+
+  it('Escape and Cancel close the editor without saving', async () => {
+    render(<SystemPortsSection ports={ports()} />);
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    const input = screen.getByDisplayValue('3000, 8080');
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByTestId('system-ports-editor')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('system-ports-configure'));
+    screen.getByDisplayValue('3000, 8080');
+    fireEvent.click(screen.getByTestId('system-ports-editor-cancel'));
+    expect(screen.queryByTestId('system-ports-editor')).toBeNull();
+    expect(updateSpy).not.toHaveBeenCalled();
   });
 });
