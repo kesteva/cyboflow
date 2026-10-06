@@ -153,8 +153,7 @@ import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { DatabaseBackupService } from './services/databaseBackupService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
-import { setRemoteSyncFacade } from './orchestrator/remoteSyncBridge';
-import { RemoteSyncService } from './services/remoteSync/remoteSyncService';
+import { wireRemoteSync } from './services/remoteSync/remoteSyncWiring';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { composeSystemView } from './systemViewComposition';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -1732,12 +1731,8 @@ async function initializeServices(): Promise<boolean> {
   // the seam. See main/src/orchestrator/trackerSyncBridge.ts.
   setTrackerSyncFacade(trackerSyncService);
 
-  // Cross-machine backlog sync — DEV BUILDS ONLY. A release build wires no
-  // facade, so cyboflow.remoteSync answers `{ available: false }`, the Settings
-  // section renders nothing, and no engine ever starts.
-  if (configManager.isRemoteSyncAvailable()) {
-    setRemoteSyncFacade(new RemoteSyncService({ configManager }));
-  }
+  // Cross-machine backlog sync (dev builds only) — see remoteSyncWiring.ts.
+  wireRemoteSync(configManager);
 
   // Daily sessions.db backup (7-day retention) — see databaseBackupService.ts
   // for why hourly-tick + file-existence-guard rather than a 24h timer, and
