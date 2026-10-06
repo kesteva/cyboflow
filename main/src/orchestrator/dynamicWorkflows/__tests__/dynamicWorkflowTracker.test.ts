@@ -269,6 +269,53 @@ describe('DynamicWorkflowTracker', () => {
     expect(state.phases).toEqual([]);
   });
 
+  it('re-reads the script when the launch beat its write, and patches the card in place', async () => {
+    rmSync(scriptPath);
+    emitLaunch();
+    expect(changed[0].state.name).toBe('foo');
+
+    // The CLI lands the script a few ms after the launch signal.
+    writeFileSync(scriptPath, SCRIPT_SOURCE);
+    await vi.advanceTimersByTimeAsync(100);
+
+    const last = changed[changed.length - 1].state;
+    expect(last.name).toBe('Parallel refactor');
+    expect(last.description).toBe('Refactors the API layer in parallel');
+    expect(last.phases).toEqual([
+      { title: 'Analyze', detail: 'Map the modules' },
+      { title: 'Execute' },
+    ]);
+    expect(tracker.list()[0].name).toBe('Parallel refactor');
+  });
+
+  it('warns once, only after the last re-read still finds no script', async () => {
+    const warn = vi.fn();
+    DynamicWorkflowTracker._resetForTesting();
+    tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
+      logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    });
+    rmSync(scriptPath);
+    emitLaunch();
+    const scriptWarns = (): unknown[][] =>
+      warn.mock.calls.filter((c) => String(c[0]).includes('could not read workflow script'));
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(scriptWarns()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(scriptWarns()).toHaveLength(1);
+    expect(changed.every((e) => e.state.name === 'foo')).toBe(true);
+  });
+
+  it('drops a pending re-read when the card is dismissed', async () => {
+    rmSync(scriptPath);
+    emitLaunch();
+    tracker.dismiss('wf_aa11-2b');
+    writeFileSync(scriptPath, SCRIPT_SOURCE);
+    const before = changed.length;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(changed).toHaveLength(before);
+  });
+
   // -------------------------------------------------------------------------
   // journal tailing
   // -------------------------------------------------------------------------
