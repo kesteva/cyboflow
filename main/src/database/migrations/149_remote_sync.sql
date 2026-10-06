@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS remote_sync_projects (
   status             TEXT NOT NULL DEFAULT 'pending',
   status_detail      TEXT,
   cursor             INTEGER NOT NULL DEFAULT 0,
+  reset_next_pull    INTEGER NOT NULL DEFAULT 0,   -- 1 after the user resumes from a rewind
   epoch              INTEGER,
   last_sync_at       TEXT,
   log_json           TEXT NOT NULL DEFAULT '[]',

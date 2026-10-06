@@ -15,6 +15,8 @@
  * the staging harness drives two of these against the real service.
  */
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { TaskChangeRouter } from '../../orchestrator/taskChangeRouter';
 import type { DatabaseLike } from '../../orchestrator/types';
 import {
@@ -48,6 +50,10 @@ export interface EngineDeps {
   client: SyncHttpClient;
   deviceId: string;
   now?: () => number;
+  /** Where a server restore writes the local values it discards (the app data dir). */
+  restoreExportDir?: string;
+  /** Raise a human-visible finding (the review queue in the app). */
+  onFinding?: (projectId: number, title: string, body: string) => void;
   logger?: { info(msg: string, meta?: unknown): void; warn(msg: string, meta?: unknown): void };
 }
 
@@ -124,21 +130,23 @@ export class RemoteSyncEngine {
       // 2. Head.
       const head = await this.deps.client.head();
       const maxSeq = head.body.projects[remoteId] ?? 0;
-      if (head.epoch !== null && project.epoch !== null && head.epoch !== project.epoch) {
-        store.updateProject(projectId, { status: 'paused', statusDetail: 'epoch_changed' });
-        store.appendLog(projectId, `epoch changed ${project.epoch} → ${head.epoch}: paused for re-bootstrap`);
-        return { status: 'paused', reason: 'epoch_changed' };
-      }
-      if (head.epoch !== null && project.epoch === null) store.updateProject(projectId, { epoch: head.epoch });
-      if (maxSeq < project.cursor) {
-        store.updateProject(projectId, { status: 'paused', statusDetail: 'server_behind_cursor' });
-        store.appendLog(projectId, `server maxSeq ${maxSeq} < cursor ${project.cursor}: paused for re-bootstrap`);
-        return { status: 'paused', reason: 'epoch_changed' };
-      }
-
-      // 3. Pull.
       let pulled = 0;
-      if (maxSeq > project.cursor) pulled = await this.pullAll(projectId, remoteId, project.cursor);
+      const restored = head.epoch !== null && project.epoch !== null && head.epoch !== project.epoch;
+      if (restored || maxSeq < project.cursor) {
+        // 2b. The server was restored (new epoch), or is behind what we
+        // committed (the backstop): re-bootstrap, server wins.
+        store.appendLog(
+          projectId,
+          restored ? `epoch ${project.epoch} → ${head.epoch}: re-bootstrapping` : `server maxSeq ${maxSeq} < cursor ${project.cursor}: re-bootstrapping`,
+        );
+        pulled = await this.rebootstrap(projectId, remoteId, head.epoch);
+      } else {
+        if (head.epoch !== null && project.epoch === null) store.updateProject(projectId, { epoch: head.epoch });
+        // 3. Pull.
+        if (maxSeq > project.cursor || project.resetNextPull) {
+          pulled = await this.pullAll(projectId, remoteId, project.cursor, project.resetNextPull);
+        }
+      }
 
       // 4. Apply.
       const apply = await this.applier.applyInbox(projectId);
@@ -193,14 +201,36 @@ export class RemoteSyncEngine {
     return out;
   }
 
+  /**
+   * The user chose to resume after a rewind banner ("this machine's sync state
+   * went backwards"): the next pull resets the server's high-water mark and
+   * re-applies other machines' changes, deletions included.
+   */
+  resumeAfterRewind(projectId: number): void {
+    this.deps.store.updateProject(projectId, { status: 'active', statusDetail: null, resetNextPull: true });
+  }
+
   // ---- pull ----------------------------------------------------------------
 
-  private async pullAll(projectId: number, remoteId: string, cursor: number): Promise<number> {
+  private async pullAll(
+    projectId: number,
+    remoteId: string,
+    cursor: number,
+    reset = false,
+    seen?: Set<string>,
+  ): Promise<number> {
     let since = cursor;
     let count = 0;
+    let first = true;
     for (let guard = 0; guard < 10_000; guard += 1) {
-      const { body: page } = await this.deps.client.pull(remoteId, { since, limit: SYNC_LIMITS.maxPullLimit });
-      this.ingestPage(projectId, page);
+      const { body: page } = await this.deps.client.pull(remoteId, {
+        since,
+        limit: SYNC_LIMITS.maxPullLimit,
+        reset: first && reset ? true : undefined,
+      });
+      this.ingestPage(projectId, page, seen);
+      if (first && reset) this.deps.store.updateProject(projectId, { resetNextPull: false });
+      first = false;
       count += page.items.length;
       since = page.nextSince;
       if (!page.hasMore) break;
@@ -208,21 +238,99 @@ export class RemoteSyncEngine {
     return count;
   }
 
+  /**
+   * Re-bootstrap after a server restore (desktop doc, "Epochs, restores,
+   * rewinds"): the server wins. Every base drops to v:0 so the snapshot's
+   * values apply over clean local fields; entities this machine had agreed on
+   * that are missing from the snapshot are removed. Only edits the server never
+   * acknowledged (dirty fields, unpushed creates, pending deletes) push again
+   * afterwards. Every local value the restore discards is exported to a file
+   * with one finding pointing at it.
+   */
+  private async rebootstrap(projectId: number, remoteId: string, epoch: number | null): Promise<number> {
+    const { store, db } = this.deps;
+    const before = readProjection(db, projectId);
+    store.tx(() => {
+      store.deleteBatch(projectId);
+      for (const st of store.listEntities(projectId)) {
+        for (const f of Object.keys(st.base)) st.base[f] = { ...st.base[f], v: 0 };
+        st.inbox = {};
+        st.pendingDelete = null;
+        st.version = 0;
+        store.putEntity(st);
+      }
+      store.updateProject(projectId, { cursor: 0, resetNextPull: false, ...(epoch !== null ? { epoch } : {}) });
+    });
+
+    const seen = new Set<string>();
+    const pulled = await this.pullAll(projectId, remoteId, 0, true, seen);
+
+    const discarded: Array<{ entityId: string; ref: string | null; field?: string; local: unknown }> = [];
+    store.tx(() => {
+      for (const st of store.listEntities(projectId)) {
+        const local = before.get(st.entityId);
+        const acknowledged = Object.keys(st.base).length > 0;
+        if (!seen.has(st.entityId) && acknowledged) {
+          st.pendingDelete = { reason: 'pending' };
+          store.putEntity(st);
+          if (local) discarded.push({ entityId: st.entityId, ref: st.ref, local: local.fields });
+          continue;
+        }
+        if (!local) continue;
+        for (const [f, entry] of Object.entries(st.inbox)) {
+          const base = st.base[f];
+          const clean = base !== undefined && same(local.fields[f], base.value);
+          if (clean && !same(local.fields[f], entry.value)) {
+            discarded.push({ entityId: st.entityId, ref: st.ref, field: f, local: local.fields[f] });
+          }
+        }
+      }
+    });
+    if (discarded.length > 0) this.exportDiscarded(projectId, discarded);
+    return pulled;
+  }
+
+  private exportDiscarded(projectId: number, discarded: unknown[]): void {
+    const dir = this.deps.restoreExportDir;
+    let where = 'not written (no export directory configured)';
+    if (dir) {
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, `sync-restore-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}.json`);
+      writeFileSync(file, JSON.stringify({ projectId, discarded }, null, 2));
+      where = file;
+    }
+    this.deps.store.appendLog(projectId, `server restore discarded ${discarded.length} local values: ${where}`);
+    this.deps.onFinding?.(
+      projectId,
+      'Sync server was restored',
+      `The sync server was restored from a backup, so its state replaced this machine's for ${discarded.length} value(s). The values this machine had are saved in ${where}.`,
+    );
+  }
+
   /** Write one feed page into the inbox and advance the cursor, in one transaction. */
-  private ingestPage(projectId: number, page: FeedPage): void {
+  private ingestPage(projectId: number, page: FeedPage, seen?: Set<string>): void {
     const { store } = this.deps;
     store.tx(() => {
       for (const item of page.items) {
+        seen?.add(item.entityId);
         if (!isSyncedEntityType(item.entityType)) continue; // a later protocol's type
         const st = store.getEntity(item.entityType, item.entityId) ?? this.blankState(projectId, item.entityType, item.entityId);
         st.ref = item.ref ?? st.ref;
-        st.version = Math.max(st.version, item.version);
         if (item.deleted) {
           st.inbox = {};
           st.pendingDelete = { reason: 'pending' };
+          st.version = Math.max(st.version, item.version);
           store.putEntity(st);
           continue;
         }
+        // Deleted here but not yet pushed: keep the version the user saw when
+        // deleting, so the tombstone's baseVersion makes the server record any
+        // edit it never saw (delete_vs_edit) instead of silently dropping it.
+        if (Object.keys(st.base).length > 0 && !this.existsLocally(st.entityType, st.entityId)) {
+          store.putEntity(st);
+          continue;
+        }
+        st.version = Math.max(st.version, item.version);
         for (const [field, value] of Object.entries(item.fields)) {
           const clock = item.clocks[field];
           if (!clock) continue;
@@ -235,6 +343,11 @@ export class RemoteSyncEngine {
       for (const record of page.conflicts) store.upsertServerConflict(projectId, record);
       store.updateProject(projectId, { cursor: page.nextSince });
     });
+  }
+
+  private existsLocally(type: SyncedEntityType, id: string): boolean {
+    const table = type === 'idea' ? 'ideas' : type === 'epic' ? 'epics' : 'tasks';
+    return this.deps.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id) !== undefined;
   }
 
   private blankState(projectId: number, entityType: SyncedEntityType, entityId: string): SyncEntityState {

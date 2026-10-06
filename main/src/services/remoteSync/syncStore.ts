@@ -73,6 +73,8 @@ export interface SyncProjectRow {
   status: SyncProjectStatus;
   statusDetail: string | null;
   cursor: number;
+  /** Send `reset` on the next pull (the user resumed after a rewind). */
+  resetNextPull: boolean;
   epoch: number | null;
   lastSyncAt: string | null;
 }
@@ -177,6 +179,7 @@ export class SyncStore {
       status: r.status as SyncProjectStatus,
       statusDetail: (r.status_detail as string | null) ?? null,
       cursor: r.cursor as number,
+      resetNextPull: r.reset_next_pull === 1,
       epoch: (r.epoch as number | null) ?? null,
       lastSyncAt: (r.last_sync_at as string | null) ?? null,
     };
@@ -217,13 +220,16 @@ export class SyncStore {
 
   updateProject(
     projectId: number,
-    patch: Partial<Pick<SyncProjectRow, 'remoteProjectId' | 'status' | 'statusDetail' | 'cursor' | 'epoch' | 'lastSyncAt'>>,
+    patch: Partial<
+      Pick<SyncProjectRow, 'remoteProjectId' | 'status' | 'statusDetail' | 'cursor' | 'resetNextPull' | 'epoch' | 'lastSyncAt'>
+    >,
   ): void {
     const cols: Record<string, string> = {
       remoteProjectId: 'remote_project_id',
       status: 'status',
       statusDetail: 'status_detail',
       cursor: 'cursor',
+      resetNextPull: 'reset_next_pull',
       epoch: 'epoch',
       lastSyncAt: 'last_sync_at',
     };
@@ -233,7 +239,7 @@ export class SyncStore {
       const value = (patch as Record<string, unknown>)[key];
       if (value === undefined) continue;
       sets.push(`${col} = ?`);
-      params.push(value);
+      params.push(typeof value === 'boolean' ? (value ? 1 : 0) : value);
     }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
