@@ -110,6 +110,15 @@ interface EntityDbRow {
 
 const DELETE_KEY = '__delete';
 
+/**
+ * Whether this machine has agreed with the server on at least one field it
+ * models. A base holding only fields a newer client added does not count: the
+ * entity has not been applied (or pushed) here yet.
+ */
+export function hasKnownBase(st: SyncEntityState, knownFields: readonly string[]): boolean {
+  return knownFields.some((f) => st.base[f] !== undefined);
+}
+
 function parseObject<T>(json: string): Record<string, T> {
   try {
     const parsed: unknown = JSON.parse(json);

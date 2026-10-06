@@ -35,7 +35,7 @@ import {
   type ProjectedEntity,
   type SyncedEntityType,
 } from './projection';
-import type { InboxField, InboxReason, SyncEntityState, SyncStore } from './syncStore';
+import { hasKnownBase, type InboxField, type InboxReason, type SyncEntityState, type SyncStore } from './syncStore';
 import { clientConflictId } from './conflictIds';
 
 const PRIORITIES: readonly Priority[] = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
@@ -232,7 +232,7 @@ export class RemoteApplier {
     if (!st) return;
     const local = readEntityProjection(db, projectId, st.entityType, st.entityId);
     if (!local) {
-      if (Object.keys(st.base).length === 0) await this.applyCreate(projectId, st, report);
+      if (!hasKnownBase(st, SYNCED_FIELDS[st.entityType])) await this.applyCreate(projectId, st, report);
       // Otherwise the entity was deleted here: the pending tombstone push
       // settles it at the server (which records the lost values).
       return;
@@ -253,12 +253,6 @@ export class RemoteApplier {
         st.base[field] = { value: entry.value, v: entry.v, hlc: entry.hlc };
         delete st.inbox[field];
         if (st.dirty[field] && same(st.dirty[field].value, L)) delete st.dirty[field];
-        continue;
-      }
-      if (!(field in local.fields)) {
-        // A field this client does not model: keep it in the base, verbatim.
-        st.base[field] = { value: entry.value, v: entry.v, hlc: entry.hlc };
-        delete st.inbox[field];
         continue;
       }
       const dirty = base === undefined ? true : !same(L, base.value);

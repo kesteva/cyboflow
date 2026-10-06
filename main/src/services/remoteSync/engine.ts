@@ -39,7 +39,7 @@ import {
 } from './projection';
 import { RemoteApplier, type ApplyReport } from './remoteApply';
 import { SyncHttpError, type SyncHttpClient } from './syncHttpClient';
-import type { SyncEntityState, SyncStore } from './syncStore';
+import { hasKnownBase, type SyncEntityState, type SyncStore } from './syncStore';
 
 const same = (a: unknown, b: unknown): boolean => canonicalJson(a) === canonicalJson(b);
 
@@ -152,11 +152,16 @@ export class RemoteSyncEngine {
       const apply = await this.applier.applyInbox(projectId);
 
       // 5. Diff + push (several batches when one would exceed the limits).
+      // An entity is pushed at most once per pass: a result whose state was
+      // omitted (the response budget) leaves its fields dirty until the next
+      // pull settles them, and must not loop here.
       let pushed = 0;
+      const pushedThisPass = new Set<string>();
       for (let guard = 0; guard < 50; guard += 1) {
-        const batch = this.buildBatch(projectId);
+        const batch = this.buildBatch(projectId, pushedThisPass);
         if (!batch) break;
         await this.pushFrozen(projectId, remoteId, batch);
+        for (const op of batch.request.ops) pushedThisPass.add(op.entityId);
         pushed += batch.request.ops.length;
         // A result can deliver new inbox entries (lost fields, deletes).
         await this.applier.applyInbox(projectId);
@@ -269,7 +274,7 @@ export class RemoteSyncEngine {
     store.tx(() => {
       for (const st of store.listEntities(projectId)) {
         const local = before.get(st.entityId);
-        const acknowledged = Object.keys(st.base).length > 0;
+        const acknowledged = hasKnownBase(st, SYNCED_FIELDS[st.entityType]);
         if (!seen.has(st.entityId) && acknowledged) {
           st.pendingDelete = { reason: 'pending' };
           store.putEntity(st);
@@ -326,7 +331,7 @@ export class RemoteSyncEngine {
         // Deleted here but not yet pushed: keep the version the user saw when
         // deleting, so the tombstone's baseVersion makes the server record any
         // edit it never saw (delete_vs_edit) instead of silently dropping it.
-        if (Object.keys(st.base).length > 0 && !this.existsLocally(st.entityType, st.entityId)) {
+        if (hasKnownBase(st, SYNCED_FIELDS[st.entityType]) && !this.existsLocally(st.entityType, st.entityId)) {
           store.putEntity(st);
           continue;
         }
@@ -336,6 +341,12 @@ export class RemoteSyncEngine {
           if (!clock) continue;
           this.clock.observe(clock.hlc);
           if (clock.v <= (st.base[field]?.v ?? 0) || clock.v <= (st.inbox[field]?.v ?? 0)) continue;
+          if (!SYNCED_FIELDS[item.entityType].includes(field)) {
+            // A field a newer client added: nothing to apply, keep it verbatim
+            // in the base (it counts in the checksum and is never pushed).
+            st.base[field] = { value, v: clock.v, hlc: clock.hlc };
+            continue;
+          }
           st.inbox[field] = { value, v: clock.v, hlc: clock.hlc, reason: 'pending' };
         }
         store.putEntity(st);
@@ -361,7 +372,7 @@ export class RemoteSyncEngine {
    * creates parents-first, tombstones children-first, within the op and byte
    * limits. Stamps the dirty edit times it needs. Null when nothing to push.
    */
-  private buildBatch(projectId: number): FrozenBatch | null {
+  private buildBatch(projectId: number, skip: ReadonlySet<string> = new Set()): FrozenBatch | null {
     const { store, db } = this.deps;
     const projection = readProjection(db, projectId);
     const states = new Map(store.listEntities(projectId).map((s) => [s.entityId, s]));
@@ -375,7 +386,7 @@ export class RemoteSyncEngine {
         if (local.entityType !== type) continue;
         const st = states.get(local.entityId);
         // Never acknowledged by the server (no base, no server version): a create.
-        if (!st || (Object.keys(st.base).length === 0 && st.version === 0)) {
+        if (!st || (!hasKnownBase(st, SYNCED_FIELDS[st.entityType]) && st.version === 0)) {
           const fresh = st ?? this.blankState(projectId, type, local.entityId);
           fresh.ref = local.ref;
           creates.push(this.opFor(local, fresh, true));
@@ -395,8 +406,9 @@ export class RemoteSyncEngine {
     for (const st of states.values()) {
       if (projection.has(st.entityId) || st.pendingDelete) continue;
       // A pulled entity that has not applied here yet (its create is parked).
-      if (Object.keys(st.base).length === 0 && Object.keys(st.inbox).length > 0) continue;
-      if (Object.keys(st.base).length === 0) {
+      const known = hasKnownBase(st, SYNCED_FIELDS[st.entityType]);
+      if (!known && Object.keys(st.inbox).length > 0) continue;
+      if (!known) {
         // Never acknowledged by the server: nothing to delete there.
         store.tx(() => {
           store.deleteEntity(st.entityType, st.entityId);
@@ -417,7 +429,7 @@ export class RemoteSyncEngine {
     }
     tombstones.sort((a, b) => APPLY_ORDER.indexOf(b.type) - APPLY_ORDER.indexOf(a.type));
 
-    const all = [...creates, ...updates, ...tombstones.map((t) => t.op)];
+    const all = [...creates, ...updates, ...tombstones.map((t) => t.op)].filter((op) => !skip.has(op.entityId));
     if (all.length === 0) {
       for (const st of touched) if (states.has(st.entityId)) store.putEntity(st);
       return null;
