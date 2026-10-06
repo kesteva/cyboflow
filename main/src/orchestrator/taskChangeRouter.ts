@@ -161,7 +161,13 @@ export type TaskChangeErrorCode =
   // abandon) fails CLOSED — it must NOT stamp the experiment settled or drop the
   // seed-clone mapping rows while tagged orphans remain, so a retry can sweep
   // them once the underlying cause is fixed.
-  | 'experiment_sweep_failed';
+  | 'experiment_sweep_failed'
+  // Cross-machine backlog sync: a REMOTE-APPLY request was malformed or came
+  // from the wrong actor (remote fields are accepted only from
+  // 'cyboflow-remote', and that actor must use the remote paths).
+  | 'remote_only'
+  // Remote apply: a supplied ref is already used by another entity locally.
+  | 'ref_conflict';
 
 /** Edge kind for a task->task dependency (mirrors the task_dependencies.kind CHECK). */
 export type TaskDependencyKind = 'blocking' | 'related';
@@ -221,6 +227,31 @@ export interface TaskFieldChanges {
 // into the renderer) and re-exported here so the chokepoint stays the one import
 // site every caller already uses.
 export type { TaskActor };
+
+/**
+ * REMOTE-APPLY fields (cross-machine backlog sync, desktop doc "Router
+ * remote-apply mode"). Accepted ONLY from actor 'cyboflow-remote', which in
+ * turn must never carry a runId (another machine's run id would fail the
+ * entity_events.run_id FK) and must set expectedVersion on every update.
+ *
+ * Every stamp is written VERBATIM: `undefined` leaves the column alone and
+ * `null` clears it. Remote apply never stamps `now` on another machine's behalf
+ * (a pending draft must not turn visible, an archive time must not drift).
+ */
+export interface RemoteApplyFields {
+  /** CREATE only (required there): the entity id minted on the other machine. */
+  id?: string;
+  /** CREATE only (required there): the ref, used as-is instead of minting one. */
+  ref?: string;
+  /** CREATE only (required there): created_at, ISO-8601 like every router write. */
+  createdAt?: string;
+  /** Epics/tasks: the plan-approval stamp. A remote create without it lands PENDING. */
+  approvedAt?: string | null;
+  /** Ideas: the retire stamp. */
+  decomposedAt?: string | null;
+  /** Archive-in-place stamp. Archiving is subject to the active-run/review-item guard. */
+  archivedAt?: string | null;
+}
 
 export interface TaskChange {
   actor: TaskActor;
@@ -352,7 +383,45 @@ export interface TaskChange {
   initialStageId?: string;
   /** Kind label for the emitted entity_events row. Defaults to a sensible value per path. */
   kind?: string;
+  /** Cross-machine sync only — see {@link RemoteApplyFields}. */
+  remote?: RemoteApplyFields;
 }
+
+/** Outcome of {@link TaskChangeRouter.applyRemoteDelete}. */
+export type RemoteDeleteResult =
+  | { status: 'deleted' }
+  | { status: 'not_found' }
+  /** A live run or a pending blocking review item holds the entity; retry later. */
+  | { status: 'deferred'; reason: string };
+
+/** One task's complete remote `depends_on` set for {@link TaskChangeRouter.applyRemoteEdges}. */
+export interface RemoteDependencySet {
+  taskId: string;
+  dependsOn: Array<{ id: string; kind: TaskDependencyKind }>;
+}
+
+/** Outcome of {@link TaskChangeRouter.applyRemoteEdges}. */
+export interface RemoteEdgesResult {
+  /** Tasks whose edge set actually changed. */
+  changedTaskIds: string[];
+  /** Blocking edges NOT added because they would close a cycle (accept-then-repair). */
+  cycles: Array<{ taskId: string; dependsOnId: string }>;
+  /** Edges NOT added because an endpoint is not here (yet), or is sandboxed. */
+  missing: Array<{ taskId: string; dependsOnId: string }>;
+}
+
+/** One rename for {@link TaskChangeRouter.applyRemoteRefRenames}. */
+export interface RemoteRefRename {
+  entityType: TaskType;
+  entityId: string;
+  newRef: string;
+}
+
+/** The actor every remote-apply write carries. */
+const REMOTE_ACTOR: TaskActor = 'cyboflow-remote';
+
+/** Device codes are three capital letters (overview, "Refs"). */
+const DEVICE_CODE_RE = /^[A-Z]{3}$/;
 
 // ---------------------------------------------------------------------------
 // Internal row shapes for the SELECTs below.
@@ -621,6 +690,7 @@ export class TaskChangeRouter {
     removed?: boolean;
     event: { id: number; seq: number };
   }> {
+    this.assertRemoteRequest(change);
     const result = (await this.getProjectQueue(projectId).add(() => {
       if (change.taskId === undefined) {
         return this.runCreate(projectId, change);
@@ -684,6 +754,8 @@ export class TaskChangeRouter {
       (change.stageId !== undefined ||
         change.archived !== undefined ||
         change.approved !== undefined ||
+        change.remote?.archivedAt !== undefined ||
+        change.remote?.approvedAt !== undefined ||
         change.parentEpicId !== undefined)
     ) {
       const parent = this.db
@@ -820,6 +892,9 @@ export class TaskChangeRouter {
     projectId: number,
     opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
   ): Promise<{ taskId: string; deletedIds: string[] }> {
+    if (opts.actor === REMOTE_ACTOR) {
+      throw new TaskChangeError('remote_only', 'a remote delete never cascades — use applyRemoteDelete');
+    }
     const result = (await this.getProjectQueue(projectId).add(() =>
       this.runDelete(projectId, opts),
     )) as {
@@ -871,6 +946,309 @@ export class TaskChangeRouter {
     }
 
     return { taskId: result.taskId, deletedIds: result.deletedIds };
+  }
+
+  // --------------------------------------------------------------------------
+  // Remote apply (cross-machine backlog sync)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Reject a malformed remote-apply request before it reaches the queue.
+   * Remote fields come only from 'cyboflow-remote'; that actor carries no runId
+   * (another machine's run id fails the entity_events FK), always sets
+   * expectedVersion on an update (a CAS miss simply retries), uses the verbatim
+   * `remote` stamps instead of the now-stamping toggles, and changes edges and
+   * deletes only through applyRemoteEdges / applyRemoteDelete.
+   */
+  private assertRemoteRequest(change: TaskChange): void {
+    if (change.actor !== REMOTE_ACTOR) {
+      if (change.remote !== undefined) {
+        throw new TaskChangeError('remote_only', `remote fields are accepted only from ${REMOTE_ACTOR}`);
+      }
+      return;
+    }
+    const reject = (why: string): never => {
+      throw new TaskChangeError('remote_only', `remote apply: ${why}`);
+    };
+    if (change.runId !== undefined) reject('a remote write never carries a runId');
+    if (change.dependsOnTaskId !== undefined) reject('dependency edges go through applyRemoteEdges');
+    if (change.archived !== undefined || change.approved !== undefined || change.decomposed !== undefined) {
+      reject('use the verbatim remote stamps, not the archived/approved/decomposed toggles');
+    }
+    if (change.clearExperiment !== undefined || change.experimentId !== undefined || change.experimentArm !== undefined) {
+      reject('experiment rows never sync');
+    }
+    if (change.taskId === undefined) {
+      const r = change.remote;
+      if (!r?.id || !r.ref || !r.createdAt) reject('a create needs remote.id, remote.ref and remote.createdAt');
+    } else {
+      if (change.expectedVersion === undefined) reject('an update needs expectedVersion');
+      if (change.remote?.id !== undefined || change.remote?.ref !== undefined || change.remote?.createdAt !== undefined) {
+        reject('id, ref and createdAt are create-only (refs change only through applyRemoteRefRenames)');
+      }
+    }
+  }
+
+  /**
+   * Why a remote delete or archive of this entity must wait, or null when it
+   * may proceed (spike ruling D1). Held while:
+   *   - a PENDING BLOCKING review item references it: a delete would dismiss
+   *     that item, which resumes the parked programmatic run, so a remote
+   *     write would restart agent work;
+   *   - any run associated with it is non-terminal (for an idea or epic as
+   *     well as a task: ideas/epics have no local active-run guard).
+   */
+  private remoteRetireBlocker(type: TaskType, id: string): string | null {
+    try {
+      const blocking = this.db
+        .prepare(
+          `SELECT 1 FROM review_items
+            WHERE entity_type = ? AND entity_id = ? AND status = 'pending' AND blocking = 1
+            LIMIT 1`,
+        )
+        .get(type, id);
+      if (blocking) return `${type} ${id} has a pending blocking review item`;
+    } catch {
+      // No review_items table (partial test schema) — nothing can be blocking.
+    }
+    if (type === 'task' && this.hasNonTerminalRun(id)) return `task ${id} has an active run`;
+    if (listRunIdsForEntity(this.db, type, id).some((runId) => this.isRunNonTerminal(runId))) {
+      return `${type} ${id} is tied to an active run`;
+    }
+    // A run that wrote the entity itself (e.g. a planner mid-plan that minted
+    // this epic) — listRunIdsForEntity follows only an epic's child tasks.
+    const writers = this.db
+      .prepare(
+        `SELECT DISTINCT run_id AS runId FROM entity_events
+          WHERE entity_type = ? AND entity_id = ? AND run_id IS NOT NULL`,
+      )
+      .all(type, id) as Array<{ runId: string }>;
+    if (writers.some((w) => this.isRunNonTerminal(w.runId))) return `${type} ${id} was written by an active run`;
+    return null;
+  }
+
+  /**
+   * Delete EXACTLY one entity on behalf of another machine (desktop doc,
+   * "Accept, then repair → Remote deletes"). Unlike applyDelete it never
+   * cascades: children survive with their lineage nulled by the FK (the engine
+   * then files an `orphaned` conflict), and a missing entity is success.
+   *
+   * Deferred (nothing written) while a live run or a pending blocking review
+   * item references the entity — see {@link remoteRetireBlocker}. Pending
+   * NON-blocking review items for it are dismissed, as a local delete does.
+   * Children whose lineage the FK nulled are re-broadcast so a mounted board
+   * re-reads them.
+   */
+  async applyRemoteDelete(
+    projectId: number,
+    opts: { entityType: TaskType; entityId: string },
+  ): Promise<RemoteDeleteResult> {
+    const { entityType: type, entityId: id } = opts;
+    const outcome = (await this.getProjectQueue(projectId).add(async () => {
+      const located = this.locateEntity(projectId, id, type);
+      if (!located) return { result: { status: 'not_found' } as RemoteDeleteResult };
+      const blocker = this.remoteRetireBlocker(type, id);
+      if (blocker) return { result: { status: 'deferred', reason: blocker } as RemoteDeleteResult };
+
+      const children: Array<{ type: TaskType; id: string }> = [];
+      const collect = (childType: TaskType, sql: string): void => {
+        for (const r of this.db.prepare(sql).all(id, projectId) as Array<{ id: string }>) {
+          children.push({ type: childType, id: r.id });
+        }
+      };
+      if (type === 'idea') {
+        collect('epic', 'SELECT id FROM epics WHERE originating_idea_id = ? AND project_id = ?');
+        collect('task', 'SELECT id FROM tasks WHERE originating_idea_id = ? AND project_id = ?');
+      } else if (type === 'epic') {
+        collect('task', 'SELECT id FROM tasks WHERE parent_epic_id = ? AND project_id = ?');
+      }
+      const parentEpicId = type === 'task' ? located.row.parent_epic_id : null;
+      const snapshot = this.buildBacklogTaskItem(type, id);
+      const artifactRunIds = listRunIdsForEntity(this.db, type, id);
+
+      const txn = this.db.transaction(() => {
+        this.db.prepare('DELETE FROM entity_events WHERE entity_type = ? AND entity_id = ?').run(type, id);
+        this.db.prepare(`DELETE FROM ${describe(type).table} WHERE id = ?`).run(id);
+      });
+      (txn as () => void)();
+
+      await this.dismissReviewItemsForDeleted(projectId, REMOTE_ACTOR, null, [{ type, id }], {
+        nonBlockingOnly: true,
+      });
+      if (snapshot) {
+        this.broadcast(projectId, { projectId, taskId: id, action: 'deleted', task: snapshot, actor: REMOTE_ACTOR });
+      }
+      for (const child of children) this.emitChange(projectId, child.type, child.id, 'updated', REMOTE_ACTOR);
+      return { result: { status: 'deleted' } as RemoteDeleteResult, parentEpicId, artifactRunIds };
+    })) as { result: RemoteDeleteResult; parentEpicId?: string | null; artifactRunIds?: string[] };
+
+    if (outcome.result.status !== 'deleted') return outcome.result;
+
+    // Post-commit follow-ons, outside the queue task (see applyDelete).
+    await this.reapArtifactsForRunIds(projectId, outcome.artifactRunIds ?? []);
+    if (type === 'idea') {
+      try {
+        await IdeaComponentRouter.getInstance().applyChange(projectId, { op: 'delete-for-idea', ideaId: id });
+      } catch {
+        // Missing singleton or a failed ledger purge never fails the delete.
+      }
+    }
+    if (outcome.parentEpicId) await this.recomputeEpicStage(outcome.parentEpicId).catch(() => {});
+    return outcome.result;
+  }
+
+  /**
+   * Make each listed task's dependency edges EXACTLY the given remote set, for
+   * many tasks in ONE transaction, so a cycle repair is never visible half-done
+   * to a sprint. Removals run first, then additions in the order given: the
+   * engine orders them so the edge it wants to lose comes last.
+   *
+   * Accept-then-repair: a blocking edge that would close a cycle is not added
+   * and is reported in `cycles`; an edge whose endpoint is not here (or is an
+   * experiment-sandboxed task) is reported in `missing`. Neither throws. A task
+   * that is itself missing reports all of its wanted edges as missing.
+   */
+  async applyRemoteEdges(projectId: number, sets: RemoteDependencySet[]): Promise<RemoteEdgesResult> {
+    const result = (await this.getProjectQueue(projectId).add(() => {
+      const now = new Date().toISOString();
+      const out: RemoteEdgesResult = { changedTaskIds: [], cycles: [], missing: [] };
+      const changed = new Set<string>();
+      const usable = (taskId: string): boolean => {
+        const row = this.db
+          .prepare('SELECT project_id AS projectId FROM tasks WHERE id = ?')
+          .get(taskId) as { projectId: number } | undefined;
+        return row !== undefined && row.projectId === projectId && this.taskExperimentIdFor(taskId) === null;
+      };
+      const logEdge = (taskId: string, kind: string, deltas: FieldDelta[]): void => {
+        this.insertEvent('task', taskId, kind, REMOTE_ACTOR, null, deltas, now);
+        changed.add(taskId);
+      };
+
+      const txn = this.db.transaction(() => {
+        const additions: Array<{ taskId: string; id: string; kind: TaskDependencyKind }> = [];
+        for (const set of sets) {
+          if (!usable(set.taskId)) {
+            for (const dep of set.dependsOn) out.missing.push({ taskId: set.taskId, dependsOnId: dep.id });
+            continue;
+          }
+          const current = this.db
+            .prepare('SELECT depends_on_task_id AS id, kind FROM task_dependencies WHERE task_id = ?')
+            .all(set.taskId) as Array<{ id: string; kind: TaskDependencyKind }>;
+          const wanted = new Map(set.dependsOn.map((d) => [d.id, d.kind]));
+          for (const edge of current) {
+            if (wanted.get(edge.id) === edge.kind) continue;
+            this.db
+              .prepare('DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+              .run(set.taskId, edge.id);
+            logEdge(set.taskId, 'dependency-removed', [
+              { field: 'depends_on_task_id', from: edge.id, to: null },
+              { field: 'dependency_kind', from: edge.kind, to: null },
+            ]);
+          }
+          const kept = new Set(current.filter((e) => wanted.get(e.id) === e.kind).map((e) => e.id));
+          for (const dep of set.dependsOn) {
+            if (kept.has(dep.id)) continue;
+            if (dep.id === set.taskId || !usable(dep.id)) {
+              out.missing.push({ taskId: set.taskId, dependsOnId: dep.id });
+              continue;
+            }
+            additions.push({ taskId: set.taskId, id: dep.id, kind: dep.kind });
+          }
+        }
+        for (const add of additions) {
+          if (add.kind === 'blocking') {
+            try {
+              this.validateDependencyEdge(add.taskId, add.id);
+            } catch (err) {
+              if (err instanceof TaskChangeError && err.code === 'dependency_cycle') {
+                out.cycles.push({ taskId: add.taskId, dependsOnId: add.id });
+                continue;
+              }
+              throw err;
+            }
+          }
+          this.db
+            .prepare('INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, ?)')
+            .run(add.taskId, add.id, add.kind);
+          logEdge(add.taskId, 'dependency-added', [
+            { field: 'depends_on_task_id', from: null, to: add.id },
+            { field: 'dependency_kind', from: null, to: add.kind },
+          ]);
+        }
+      });
+      (txn as () => void)();
+
+      out.changedTaskIds = [...changed];
+      for (const taskId of changed) this.emitChange(projectId, 'task', taskId, 'updated', REMOTE_ACTOR);
+      return out;
+    })) as RemoteEdgesResult;
+    return result;
+  }
+
+  /**
+   * Rename several refs atomically (an M1b join renames colliding legacy refs to
+   * this device's prefixed form). Runs through temporary refs so a swap or a
+   * chain inside the set can never trip UNIQUE(project_id, ref); bumps each
+   * entity's version with a `ref-renamed` event. With `recordAliases`, the old
+   * ref is kept in entity_ref_aliases for fail-closed `ambiguous_ref`
+   * resolution. All-or-nothing: a missing entity or a ref already held outside
+   * the set rejects the whole batch.
+   */
+  async applyRemoteRefRenames(
+    projectId: number,
+    renames: RemoteRefRename[],
+    opts: { recordAliases?: boolean } = {},
+  ): Promise<void> {
+    await this.getProjectQueue(projectId).add(() => {
+      const now = new Date().toISOString();
+      const done: Array<{ type: TaskType; id: string }> = [];
+      const txn = this.db.transaction(() => {
+        const plans = renames.map((r) => {
+          const located = this.locateEntity(projectId, r.entityId, r.entityType);
+          if (!located) throw new TaskChangeError('not_found', `${r.entityType} ${r.entityId} not found`);
+          return { ...r, table: describe(r.entityType).table, oldRef: located.row.ref };
+        });
+        const renamedIds = new Set(plans.map((p) => p.entityId));
+        const seen = new Set<string>();
+        for (const p of plans) {
+          const key = `${p.table}:${p.newRef}`;
+          if (seen.has(key)) throw new TaskChangeError('ref_conflict', `ref ${p.newRef} appears twice in one rename`);
+          seen.add(key);
+          const holder = this.db
+            .prepare(`SELECT id FROM ${p.table} WHERE project_id = ? AND ref = ?`)
+            .get(projectId, p.newRef) as { id: string } | undefined;
+          if (holder && !renamedIds.has(holder.id)) {
+            throw new TaskChangeError('ref_conflict', `ref ${p.newRef} is already used by ${holder.id}`);
+          }
+        }
+        for (const p of plans) {
+          this.db.prepare(`UPDATE ${p.table} SET ref = ? WHERE id = ?`).run(`__tmp_${p.entityId}`, p.entityId);
+        }
+        const hasAliases = this.db
+          .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entity_ref_aliases'`)
+          .get();
+        for (const p of plans) {
+          this.db
+            .prepare(`UPDATE ${p.table} SET ref = ?, version = version + 1, updated_at = ? WHERE id = ?`)
+            .run(p.newRef, now, p.entityId);
+          if (p.oldRef === p.newRef) continue;
+          this.insertEvent(p.entityType, p.entityId, 'ref-renamed', REMOTE_ACTOR, null, [
+            { field: 'ref', from: p.oldRef, to: p.newRef },
+          ], now);
+          if (opts.recordAliases && hasAliases) {
+            this.db
+              .prepare(
+                `INSERT OR REPLACE INTO entity_ref_aliases (project_id, ref, entity_id, renamed_to, created_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+              )
+              .run(projectId, p.oldRef, p.entityId, p.newRef, now);
+          }
+          done.push({ type: p.entityType, id: p.entityId });
+        }
+      });
+      (txn as () => void)();
+      for (const e of done) this.emitChange(projectId, e.type, e.id, 'updated', REMOTE_ACTOR);
+    });
   }
 
   /**
@@ -1171,7 +1549,10 @@ export class TaskChangeRouter {
     const type: TaskType = change.entityType ?? change.type ?? 'idea';
     const desc = describe(type);
     const now = new Date().toISOString();
-    const taskId = `${desc.idPrefix}_${randomBytes(10).toString('hex')}`;
+    // Remote apply supplies the id, ref and created_at (assertRemoteRequest
+    // guarantees all three are present for a remote create).
+    const remote = change.actor === REMOTE_ACTOR ? change.remote : undefined;
+    const taskId = remote?.id ?? `${desc.idPrefix}_${randomBytes(10).toString('hex')}`;
 
     let eventId = 0;
     let eventSeq = 0;
@@ -1279,12 +1660,28 @@ export class TaskChangeRouter {
       // IDEA-NEEDS-EPIC: a NEW task landing epic-less directly under an idea is the
       // idea's second-or-later dangling task -> forbidden. `taskId` is freshly
       // minted (not yet inserted) so it never self-counts; pass it as the exclude.
-      if (type === 'task' && parentEpicId === null && originatingIdeaId !== null) {
+      // Remote apply tolerates it (accept-then-repair: the shape was already
+      // accepted on another machine, and the engine files a finding).
+      if (type === 'task' && parentEpicId === null && originatingIdeaId !== null && !remote) {
         this.assertIdeaEpicInvariant(originatingIdeaId, taskId);
       }
 
-      // Mint the ref: UPDATE ... RETURNING. INSERT OR IGNORE seeds the counter row first.
-      const ref = this.mintRef(projectId, type);
+      let ref: string;
+      if (remote?.ref !== undefined) {
+        if (this.idExistsAnywhere(taskId)) {
+          throw new TaskChangeError('concurrency', `entity ${taskId} already exists`);
+        }
+        const taken = this.db
+          .prepare(`SELECT id FROM ${desc.table} WHERE project_id = ? AND ref = ?`)
+          .get(projectId, remote.ref) as { id: string } | undefined;
+        if (taken) {
+          throw new TaskChangeError('ref_conflict', `ref ${remote.ref} is already used by ${taken.id}`);
+        }
+        ref = remote.ref;
+      } else {
+        // Mint the ref: UPDATE ... RETURNING. INSERT OR IGNORE seeds the counter row first.
+        ref = this.mintRef(projectId, type);
+      }
 
       const title = change.title ?? change.fields?.title ?? 'Untitled';
       const summary = change.summary ?? change.fields?.summary ?? null;
@@ -1333,8 +1730,12 @@ export class TaskChangeRouter {
       // by approved_at), so its approved_at tracks sprint-eligibility only: PENDING
       // during the arm's unapproved plan, sprint-eligible once the arm's approve-plan
       // gate reveals it, still board-hidden until decide clears the tag.
+      // Remote apply writes the other machine's stamp verbatim, NULL included
+      // (a pending draft must stay pending).
       const approvedAt = desc.hasApproval
-        ? this.computeCreateApprovedAt(change, now)
+        ? remote
+          ? (remote.approvedAt ?? null)
+          : this.computeCreateApprovedAt(change, now)
         : null;
 
       this.insertEntity(desc, {
@@ -1358,6 +1759,14 @@ export class TaskChangeRouter {
         experimentId: createExperimentId,
         experimentArm: createExperimentArm,
         now,
+        remote: remote
+          ? {
+              createdAt: remote.createdAt as string,
+              archivedAt: remote.archivedAt ?? null,
+              decomposedAt: desc.hasDecomposed ? (remote.decomposedAt ?? null) : null,
+              sortOrder: change.fields?.sortOrder ?? null,
+            }
+          : undefined,
       });
 
       const changes: FieldDelta[] = [
@@ -1414,6 +1823,8 @@ export class TaskChangeRouter {
       /** A/B experiment ARM ownership (migration 053); non-null iff experimentId is. */
       experimentArm: ExperimentArm | null;
       now: string;
+      /** Remote apply only: columns a local create never sets, written verbatim. */
+      remote?: { createdAt: string; archivedAt: string | null; decomposedAt: string | null; sortOrder: number | null };
     },
   ): void {
     const cols = ['id', 'project_id', 'ref', 'title', 'summary', 'body', 'priority', 'category', 'repo', 'board_id', 'stage_id'];
@@ -1467,8 +1878,22 @@ export class TaskChangeRouter {
       cols.push('originating_idea_id');
       vals.push(v.originatingIdeaId);
     }
+    if (v.remote) {
+      if (this.columnExists(desc.table, 'archived_at')) {
+        cols.push('archived_at');
+        vals.push(v.remote.archivedAt);
+      }
+      if (desc.hasDecomposed && this.columnExists(desc.table, 'decomposed_at')) {
+        cols.push('decomposed_at');
+        vals.push(v.remote.decomposedAt);
+      }
+      if (this.columnExists(desc.table, 'sort_order')) {
+        cols.push('sort_order');
+        vals.push(v.remote.sortOrder);
+      }
+    }
     cols.push('version', 'created_at', 'updated_at');
-    vals.push(1, v.now, v.now);
+    vals.push(1, v.remote?.createdAt ?? v.now, v.now);
 
     const placeholders = cols.map(() => '?').join(', ');
     this.db.prepare(`INSERT INTO ${desc.table} (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
@@ -1484,7 +1909,36 @@ export class TaskChangeRouter {
         'UPDATE task_ref_counters SET next_seq = next_seq + 1 WHERE project_id = ? AND type = ? RETURNING next_seq',
       )
       .get(projectId, type) as { next_seq: number };
-    return `${type.toUpperCase()}-${String(counter.next_seq).padStart(3, '0')}`;
+    const number = String(counter.next_seq).padStart(3, '0');
+    // Once this machine is signed in to sync, EVERY project mints
+    // device-prefixed refs (TASK-WRK-103), sharing the same counter, so refs
+    // minted offline on two machines can never collide (overview, "Refs").
+    const code = this.deviceRefCode();
+    return code ? `${type.toUpperCase()}-${code}-${number}` : `${type.toUpperCase()}-${number}`;
+  }
+
+  /**
+   * This device's sync ref code, or null when the machine is not signed in
+   * (no remote_sync_account row, or a pre-149 schema). Read per mint: mints
+   * are rare, and sign-in / sign-out must take effect without a restart.
+   */
+  private deviceRefCode(): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT device_code AS code FROM remote_sync_account WHERE singleton = 1')
+        .get() as { code?: unknown } | undefined;
+      return typeof row?.code === 'string' && DEVICE_CODE_RE.test(row.code) ? row.code : null;
+    } catch {
+      return null; // pre-149 schema
+    }
+  }
+
+  /** Whether any entity table already holds `id` (in any project). */
+  private idExistsAnywhere(id: string): boolean {
+    for (const desc of Object.values(ENTITY_TABLES)) {
+      if (this.db.prepare(`SELECT 1 FROM ${desc.table} WHERE id = ?`).get(id)) return true;
+    }
+    return false;
   }
 
   /**
@@ -1940,6 +2394,44 @@ export class TaskChangeRouter {
         archiveKind = change.archived ? 'archived' : 'unarchived';
       }
 
+      // ----- remote-apply stamps (cross-machine sync), written verbatim -----
+      const remote = change.actor === REMOTE_ACTOR ? change.remote : undefined;
+      if (remote?.approvedAt !== undefined) {
+        if (!desc.hasApproval) {
+          throw new TaskChangeError('invalid_lineage', `only epics/tasks carry approved_at (got '${type}')`);
+        }
+        if (remote.approvedAt !== current.approved_at) {
+          sets.push('approved_at = ?');
+          params.push(remote.approvedAt);
+          deltas.push({ field: 'approved_at', from: current.approved_at, to: remote.approvedAt });
+        }
+      }
+      if (remote?.decomposedAt !== undefined) {
+        if (!desc.hasDecomposed) {
+          throw new TaskChangeError('invalid_lineage', `only type='idea' may be decomposed (got '${type}')`);
+        }
+        if (remote.decomposedAt !== current.decomposed_at) {
+          sets.push('decomposed_at = ?');
+          params.push(remote.decomposedAt);
+          deltas.push({ field: 'decomposed_at', from: current.decomposed_at, to: remote.decomposedAt });
+          if (remote.decomposedAt !== null) action = 'decomposed';
+        }
+      }
+      if (remote?.archivedAt !== undefined && remote.archivedAt !== current.archived_at) {
+        // Archiving (not re-stamping an already-archived row) is held while a
+        // live run or a pending blocking review item references the entity.
+        if (remote.archivedAt !== null && current.archived_at === null) {
+          const blocker = this.remoteRetireBlocker(type, taskId);
+          if (blocker) throw new TaskChangeError('active_runs', blocker);
+        }
+        sets.push('archived_at = ?');
+        params.push(remote.archivedAt);
+        deltas.push({ field: 'archived_at', from: current.archived_at, to: remote.archivedAt });
+        if ((remote.archivedAt === null) !== (current.archived_at === null)) {
+          archiveKind = remote.archivedAt !== null ? 'archived' : 'unarchived';
+        }
+      }
+
       // ----- re-parent (tasks only) -----
       if (change.parentEpicId !== undefined && change.parentEpicId !== current.parent_epic_id) {
         if (!desc.hasParentEpic) {
@@ -1981,8 +2473,10 @@ export class TaskChangeRouter {
       // unrelated field edit (or a no-op archived flag) on a pre-existing direct
       // task stays idempotent — never retroactively rejected. Only a task that will
       // be LIVE and epic-less under an idea post-update is checked.
-      const isUnarchiveTransition = change.archived === false && current.archived_at !== null;
+      const isUnarchiveTransition =
+        (change.archived === false || remote?.archivedAt === null) && current.archived_at !== null;
       if (
+        !remote &&
         type === 'task' &&
         (change.parentEpicId !== undefined ||
           change.originatingIdeaId !== undefined ||
@@ -2330,14 +2824,19 @@ export class TaskChangeRouter {
     actor: TaskActor,
     runId: string | null,
     deleted: Array<{ type: TaskType; id: string }>,
+    opts: { nonBlockingOnly?: boolean } = {},
   ): Promise<void> {
     try {
       const reviewRouter = ReviewItemRouter.getInstance();
+      // Remote deletes never dismiss a BLOCKING item: that would resume the
+      // run it parked (remoteRetireBlocker already defers such deletes; this
+      // also covers an item filed between that check and here).
+      const blockingClause = opts.nonBlockingOnly ? 'AND blocking = 0' : '';
       for (const entity of deleted) {
         const pending = this.db
           .prepare(
             `SELECT id FROM review_items
-              WHERE project_id = ? AND status = 'pending' AND entity_type = ? AND entity_id = ?`,
+              WHERE project_id = ? AND status = 'pending' AND entity_type = ? AND entity_id = ? ${blockingClause}`,
           )
           .all(projectId, entity.type, entity.id) as Array<{ id: string }>;
         for (const row of pending) {

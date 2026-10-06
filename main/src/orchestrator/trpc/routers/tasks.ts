@@ -76,6 +76,8 @@ function rethrowAsTRPCError(err: unknown): never {
       idea_needs_epic: 'CONFLICT',
       experiment_sandboxed: 'CONFLICT',
       experiment_sweep_failed: 'INTERNAL_SERVER_ERROR',
+      remote_only: 'FORBIDDEN',
+      ref_conflict: 'CONFLICT',
     };
     throw new TRPCError({
       code: codeMap[err.code],
