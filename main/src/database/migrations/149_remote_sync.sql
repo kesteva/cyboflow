@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS remote_sync_account (
   singleton         INTEGER PRIMARY KEY,
   origin            TEXT NOT NULL,
   account_id        TEXT NOT NULL,
-  workspace_id      TEXT NOT NULL,
+  workspace_id      TEXT,             -- not returned by registration; sync creates it lazily
   device_id         TEXT NOT NULL,
   device_name       TEXT NOT NULL,
   device_code       TEXT NOT NULL,

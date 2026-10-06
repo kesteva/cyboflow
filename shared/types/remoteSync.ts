@@ -29,8 +29,11 @@ export interface RemoteSyncConfig {
 /** The complete set of storable keys; the config boundary iterates THIS. */
 export const REMOTE_SYNC_CONFIG_KEYS = ['enabled'] as const satisfies readonly (keyof RemoteSyncConfig)[];
 
-/** The staging deployment of cyboflow-sync. Dev builds talk to it by default. */
-export const REMOTE_SYNC_STAGING_ORIGIN = 'https://cyboflow-remote-staging.jolly-cliff-20260824.workers.dev';
+/**
+ * The staging deployment: one origin, path-routed to the accounts Worker
+ * (sign-in, device registry) and the sync Worker (`/v1/*`). Dev builds talk to it.
+ */
+export const REMOTE_SYNC_STAGING_ORIGIN = 'https://cloud-staging.cyboflow.com';
 
 /** The wire protocol version every `/v1` call declares (`Cyboflow-Sync-Protocol`). */
 export const REMOTE_SYNC_PROTOCOL_VERSION = 1;
