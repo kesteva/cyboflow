@@ -1733,6 +1733,9 @@ export class TaskChangeRouter {
     // an IDEA update that actually changed `body` (epics/tasks carry a body
     // field too, but have no component ledger).
     let staleComponentsOnBodyChange: IdeaComponentKey[] | null = null;
+    // Whether the txn actually wrote a row. A no-op update mints no event and
+    // bumps no version, so it must not broadcast a change either.
+    let wrote = false;
 
     const txn = this.db.transaction(() => {
       // Resolve the entity type: prefer the declared discriminator, else look up
@@ -2120,10 +2123,11 @@ export class TaskChangeRouter {
       );
       eventId = ev.id;
       eventSeq = ev.seq;
+      wrote = true;
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, resolvedType, taskId, action, change.actor);
+    if (wrote) this.emitChange(projectId, resolvedType, taskId, action, change.actor);
     return {
       taskId,
       event: { id: eventId, seq: eventSeq },
