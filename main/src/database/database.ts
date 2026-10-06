@@ -7,6 +7,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
 import { reconcileSessionsPluginsColumn } from './reconcileSessionsPluginsColumn';
 import { splitSqlStatements, stripLeadingSqlComments } from './splitSqlStatements';
+import { ensureRemoteSyncTriggers } from './remoteSyncTriggers';
 import {
   IllegalSessionTransitionError,
   isSessionTransitionAllowed,
@@ -1170,6 +1171,10 @@ export class DatabaseService {
     this.reconcileWorkflowsSchema();
     this.reconcileWorkflowRunsSchema();
     this.reconcileSessionsSchema();
+
+    // Sync tombstone triggers live outside the migration files: any later
+    // table rebuild of ideas/epics/tasks drops them, so re-create them here.
+    ensureRemoteSyncTriggers(this.db);
 
     // Reclaim disk after any bulk-delete migration (e.g. 072's raw_events
     // cleanup). Runs after all migrations/reconcilers so freed pages are
