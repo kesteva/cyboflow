@@ -25,6 +25,8 @@ const WATCHED: ReadonlyArray<keyof NavigationState> = [
   'experimentComparisonId',
   'verifyQueueOpen',
   'systemOpen',
+  'agentsEnvOpen',
+  'agentsEnvAgentId',
   'projectOverviewOpen',
   'wizardOpts',
 ];

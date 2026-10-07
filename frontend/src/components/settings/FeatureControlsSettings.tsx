@@ -1,4 +1,4 @@
-import { AlarmClock, FileText, FolderOpen, Globe, ScanEye, Terminal, ToggleRight } from 'lucide-react';
+import { AlarmClock, FileText, FolderOpen, Globe, ScanEye, Server, Terminal, ToggleRight } from 'lucide-react';
 import { Checkbox } from '../ui/Input';
 import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
@@ -37,6 +37,12 @@ export interface FeatureControlsSettingsProps {
   /** number | '' so clearing the field shows empty (never value={NaN}). */
   idleReviewThresholdMinutes: number | '';
   onIdleReviewThresholdMinutesChange: (minutes: number | '') => void;
+  /** Render the Agents & Environments section at all (main says this is a dev build). Default false. */
+  agentsAvailable?: boolean;
+  agentsEnabled?: boolean;
+  onAgentsEnabledChange?: (enabled: boolean) => void;
+  /** CYBOFLOW_DISABLE_PERSISTENT_AGENTS is set: show why it stays off. */
+  agentsKillSwitch?: boolean;
 }
 
 export function FeatureControlsSettings({
@@ -62,6 +68,10 @@ export function FeatureControlsSettings({
   onIdleReviewEnabledChange,
   idleReviewThresholdMinutes,
   onIdleReviewThresholdMinutesChange,
+  agentsAvailable = false,
+  agentsEnabled = false,
+  onAgentsEnabledChange,
+  agentsKillSwitch = false,
 }: FeatureControlsSettingsProps): React.JSX.Element {
   return (
     <section data-testid="settings-feature-controls">
@@ -289,6 +299,31 @@ export function FeatureControlsSettings({
             How long a session may sit finished-and-unviewed before it's surfaced. Defaults to 5.
           </p>
         </SettingsSection>
+
+        {agentsAvailable && (
+          <SettingsSection
+            title="Agents & Environments"
+            description="Persistent agents you message from cyboflow (dev builds only)"
+            icon={<Server className="w-4 h-4" />}
+          >
+            <Checkbox
+              data-testid="settings-agents-toggle"
+              label="Enable Agents & Environments"
+              checked={agentsEnabled}
+              onChange={(e) => onAgentsEnabledChange?.(e.target.checked)}
+            />
+            <p className="text-xs text-text-tertiary mt-1">
+              Adds the Agents &amp; Environments pane, the Persistent agents rail section and the cyboflow cloud
+              card in Integrations. Connect agents that live with other vendors and message them here. Off by
+              default. Turning it off stops agent messaging but keeps your agents, threads and sign-in.
+            </p>
+            {agentsKillSwitch && (
+              <p className="text-xs text-status-warning mt-1">
+                Turned off on this computer by CYBOFLOW_DISABLE_PERSISTENT_AGENTS.
+              </p>
+            )}
+          </SettingsSection>
+        )}
       </CollapsibleCard>
     </section>
   );

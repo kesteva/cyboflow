@@ -25,6 +25,8 @@ function reset(): void {
     experimentComparisonId: null,
     verifyQueueOpen: false,
     projectOverviewOpen: false,
+    agentsEnvOpen: false,
+    agentsEnvAgentId: null,
   });
 }
 
@@ -62,6 +64,7 @@ describe('navigationStore — projectOverviewOpen', () => {
       workflowsOpen: true,
       experimentComparisonId: 'exp_1',
       verifyQueueOpen: true,
+      agentsEnvOpen: true,
     });
     useNavigationStore.getState().openProjectOverview();
     const s = useNavigationStore.getState();
@@ -72,6 +75,7 @@ describe('navigationStore — projectOverviewOpen', () => {
     expect(s.workflowsOpen).toBe(false);
     expect(s.experimentComparisonId).toBeNull();
     expect(s.verifyQueueOpen).toBe(false);
+    expect(s.agentsEnvOpen).toBe(false);
   });
 
   it('opening/toggling any sibling overlay closes the project overview (reverse exclusion)', () => {
@@ -124,6 +128,14 @@ describe('navigationStore — projectOverviewOpen', () => {
     open();
     useNavigationStore.getState().openExperimentComparison('exp_1');
     expect(useNavigationStore.getState().projectOverviewOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().openAgentsEnv();
+    expect(useNavigationStore.getState().projectOverviewOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().toggleAgentsEnv();
+    expect(useNavigationStore.getState().projectOverviewOpen).toBe(false);
   });
 
   it('toggleProjectOverview while a sibling is open swaps panes', () => {
@@ -163,6 +175,7 @@ describe('navigationStore — projectOverviewOpen', () => {
       workflowsOpen: true,
       experimentComparisonId: 'exp_1',
       verifyQueueOpen: true,
+      agentsEnvOpen: true,
     });
     useNavigationStore.getState().navigateToProject(5);
     const s = useNavigationStore.getState();
@@ -176,6 +189,7 @@ describe('navigationStore — projectOverviewOpen', () => {
     expect(s.workflowsOpen).toBe(false);
     expect(s.experimentComparisonId).toBeNull();
     expect(s.verifyQueueOpen).toBe(false);
+    expect(s.agentsEnvOpen).toBe(false);
   });
 
   it('navigateToProject opens the overview even when nothing else was open', () => {

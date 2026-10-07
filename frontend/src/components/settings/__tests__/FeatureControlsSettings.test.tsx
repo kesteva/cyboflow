@@ -39,6 +39,7 @@ function renderGroup(over: Partial<FeatureControlsSettingsProps> = {}) {
     onIdleReviewEnabledChange: vi.fn(),
     idleReviewThresholdMinutes: 5,
     onIdleReviewThresholdMinutesChange: vi.fn(),
+    onAgentsEnabledChange: vi.fn(),
     ...over,
   };
   render(<FeatureControlsSettings {...props} />);
@@ -160,5 +161,38 @@ describe('FeatureControlsSettings — web viewer', () => {
 
     fireEvent.click(screen.getByLabelText('Enable the web viewer'));
     expect(props.onWebViewerEnabledChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('FeatureControlsSettings — Agents & Environments', () => {
+  it('the section is absent by default', () => {
+    renderGroup();
+    expect(screen.queryByRole('heading', { name: 'Agents & Environments', level: 4 })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-agents-toggle')).not.toBeInTheDocument();
+  });
+
+  it('when available, the heading, the toggle state and the change callback', () => {
+    const props = renderGroup({ agentsAvailable: true, agentsEnabled: false });
+    expect(screen.getByRole('heading', { name: 'Agents & Environments', level: 4 })).toBeInTheDocument();
+    const toggle = screen.getByTestId('settings-agents-toggle');
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(props.onAgentsEnabledChange).toHaveBeenCalledWith(true);
+  });
+
+  it('the toggle reflects an enabled value', () => {
+    renderGroup({ agentsAvailable: true, agentsEnabled: true });
+    expect(screen.getByTestId('settings-agents-toggle')).toBeChecked();
+  });
+
+  it('the kill-switch note renders on its flag, and there is no restart-required copy', () => {
+    renderGroup({ agentsAvailable: true, agentsKillSwitch: true });
+    expect(screen.getByText('Turned off on this computer by CYBOFLOW_DISABLE_PERSISTENT_AGENTS.')).toBeInTheDocument();
+    expect(screen.queryByText(/Restart cyboflow/)).not.toBeInTheDocument();
+  });
+
+  it('no kill-switch note without the flag', () => {
+    renderGroup({ agentsAvailable: true });
+    expect(screen.queryByText(/CYBOFLOW_DISABLE_PERSISTENT_AGENTS/)).not.toBeInTheDocument();
   });
 });

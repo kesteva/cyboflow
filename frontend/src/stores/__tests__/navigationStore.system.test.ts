@@ -22,6 +22,8 @@ function reset(): void {
     verifyQueueOpen: false,
     systemOpen: false,
     projectOverviewOpen: false,
+    agentsEnvOpen: false,
+    agentsEnvAgentId: null,
   });
 }
 
@@ -60,6 +62,7 @@ describe('navigationStore — systemOpen', () => {
       experimentComparisonId: 'exp_1',
       verifyQueueOpen: true,
       projectOverviewOpen: true,
+      agentsEnvOpen: true,
     });
     useNavigationStore.getState()[action]();
     const s = useNavigationStore.getState();
@@ -71,6 +74,7 @@ describe('navigationStore — systemOpen', () => {
     expect(s.experimentComparisonId).toBeNull();
     expect(s.verifyQueueOpen).toBe(false);
     expect(s.projectOverviewOpen).toBe(false);
+    expect(s.agentsEnvOpen).toBe(false);
   });
 
   const clearers: Array<[string, () => void]> = [
@@ -87,6 +91,8 @@ describe('navigationStore — systemOpen', () => {
     ['openProjectOverview', () => useNavigationStore.getState().openProjectOverview()],
     ['toggleProjectOverview', () => useNavigationStore.getState().toggleProjectOverview()],
     ['openExperimentComparison', () => useNavigationStore.getState().openExperimentComparison('exp_1')],
+    ['openAgentsEnv', () => useNavigationStore.getState().openAgentsEnv()],
+    ['toggleAgentsEnv', () => useNavigationStore.getState().toggleAgentsEnv()],
     ['goHome', () => useNavigationStore.getState().goHome()],
     ['goToWizard', () => useNavigationStore.getState().goToWizard()],
     ['goToSession', () => useNavigationStore.getState().goToSession()],

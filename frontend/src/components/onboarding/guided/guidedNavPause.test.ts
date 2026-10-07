@@ -23,7 +23,7 @@ function activeAt(step: number): void {
 
 beforeEach(() => {
   localStorage.clear();
-  useNavigationStore.setState({ view: 'home', humanReviewOpen: false, backlogOpen: false, activeProjectId: null });
+  useNavigationStore.setState({ view: 'home', humanReviewOpen: false, backlogOpen: false, agentsEnvOpen: false, agentsEnvAgentId: null, activeProjectId: null });
   uninstall = installGuidedNavPause();
 });
 
@@ -38,6 +38,25 @@ describe('guidedNavPause', () => {
     useNavigationStore.getState().openBacklog();
     expect(useOnboardingStore.getState().status).toBe('skipped');
     expect(useOnboardingStore.getState().step).toBe(9);
+  });
+
+  it('parks the tour when Agents & Environments opens', () => {
+    activeAt(9);
+    useNavigationStore.getState().openAgentsEnv();
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+  });
+
+  it('parks the tour when an agent is selected from the rail', () => {
+    activeAt(10);
+    useNavigationStore.getState().openAgentsEnv({ agentId: 'a1' });
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+  });
+
+  it('does not park when only the Agents & Environments sub-tab changes', () => {
+    useNavigationStore.setState({ agentsEnvOpen: true });
+    activeAt(10);
+    useNavigationStore.getState().setAgentsEnvTab('environments');
+    expect(useOnboardingStore.getState().status).toBe('active');
   });
 
   it('ignores navigation before step 9 (the shell is not on screen) and when not active', () => {

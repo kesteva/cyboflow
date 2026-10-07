@@ -118,7 +118,8 @@ instead.
 `navigateToSessions()` (`frontend/src/stores/navigationStore.ts`) is a **wide reset, not a
 narrow one**: it sets `view: 'home'`, `activeView: 'sessions'`, `activeProjectId: null`,
 and clears every overlay flag (`humanReviewOpen`, `backlogOpen`, `insightsOpen`,
-`workflowsOpen`, `experimentComparisonId`, `verifyQueueOpen`) — nine fields in total.
+`workflowsOpen`, `experimentComparisonId`, `verifyQueueOpen`, `systemOpen`,
+`projectOverviewOpen`, `agentsEnvOpen`) — twelve fields in total.
 Calling it while activating a run un-mounts `CyboflowRoot` immediately (REG-SPRINT-028-1),
 and it also drops out of whatever overlay pane the user was in. Rules:
 
@@ -126,3 +127,14 @@ and it also drops out of whatever overlay pane the user was in. Rules:
   Use `setActiveProjectId(run.project_id)` or a dedicated `selectRun(runId, projectId)`
   action instead.
 - When adding a new App-level mount condition, document it in this section.
+- **Agents & Environments** (`agentsEnvOpen`): a full-width center overlay, mutually
+  exclusive with every other overlay flag (every open/toggle/nav action clears it; Settings
+  does not). App mounts `AgentsEnvironmentsView` after `showSystem` and before `showBacklog`,
+  only while `persistentAgentsStore.featureStatus.running` (dev build + `config.agents.enabled`,
+  and the kill switch not set); turning the feature off closes the pane. `agentsEnvTab`
+  (`'agents' | 'environments'`, persisted under `cyboflow.agentsEnv.tab`) and
+  `agentsEnvAgentId` (deep link to one agent's thread, not persisted) refine it;
+  `openAgentsEnv({ agentId })` is the rail-row entry point. The global AgentRail stays
+  mounted beside it. `guidedNavPause` watches `agentsEnvOpen` and `agentsEnvAgentId`. The
+  pane's mount calls `cyboflow.cloud.unlock` (opening the pane is a user action that may
+  decrypt the saved cloud sign-in).

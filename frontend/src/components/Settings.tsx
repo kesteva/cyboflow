@@ -33,6 +33,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import { useConfigStore } from '../stores/configStore';
+import { usePersistentAgentsStore } from '../stores/persistentAgentsStore';
 import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore';
 import {
   Sun,
@@ -267,6 +268,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
     WEB_VIEWER_DEFAULTS.persistLogin,
   );
   const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
+  const [agentsEnabled, setAgentsEnabled] = useState(false);
+  // Read-only: App owns the persistent-agents store's init(); Settings never calls it.
+  const agentsStatus = usePersistentAgentsStore((s) => s.featureStatus);
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
   const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState<number | ''>(5);
@@ -365,6 +369,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         data.webViewer?.persistLogin ?? WEB_VIEWER_DEFAULTS.persistLogin,
       );
       setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
+      setAgentsEnabled(data.agents?.enabled === true);
       setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
 
       // Load additional paths
@@ -487,6 +492,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               ? idleReviewThresholdMinutes
               : 5,
         },
+        // Agents & Environments: sent ONLY in a dev build. A release build rejects the key, which would
+        // fail the whole save. The spread keeps unknown future members.
+        ...(agentsStatus?.devBuild === true
+          ? { agents: { ..._config?.agents, enabled: agentsEnabled } }
+          : {}),
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
         // Spread the existing telemetry first so the persisted installId is
@@ -945,6 +955,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onIdleReviewEnabledChange={setIdleReviewEnabled}
               idleReviewThresholdMinutes={idleReviewThresholdMinutes}
               onIdleReviewThresholdMinutesChange={setIdleReviewThresholdMinutes}
+              agentsAvailable={agentsStatus?.devBuild === true}
+              agentsEnabled={agentsEnabled}
+              onAgentsEnabledChange={setAgentsEnabled}
+              agentsKillSwitch={agentsStatus?.killed === true}
             />
 
             <SessionSettings

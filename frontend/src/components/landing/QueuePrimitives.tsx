@@ -219,10 +219,13 @@ export function Chip({
   children,
   tone = 'neutral',
   title,
+  noTruncate = false,
 }: {
   children: React.ReactNode;
   tone?: 'neutral' | 'success' | 'warning' | 'error';
   title?: string;
+  /** Wrap long text instead of truncating it (capability chips must show their whole label). */
+  noTruncate?: boolean;
 }): React.JSX.Element {
   const skin =
     tone === 'success'
@@ -235,7 +238,9 @@ export function Chip({
   return (
     <span
       title={title}
-      className={`shrink-0 truncate border px-[5px] text-[9px] font-bold leading-[15px] ${skin}`}
+      className={`shrink-0 border px-[5px] text-[9px] font-bold leading-[15px] ${
+        noTruncate ? 'max-w-full whitespace-normal break-words' : 'truncate'
+      } ${skin}`}
     >
       {children}
     </span>

@@ -6,6 +6,10 @@ import type { AgentProviderAccess } from '../../../../shared/types/agentRuntime'
 import { useConfigStore } from '../../stores/configStore';
 import type { AppConfig } from '../../types/config';
 import { IntegrationsSettings } from './IntegrationsSettings';
+import { trpc } from '../../trpc/client';
+import { useCloudAccountStore } from '../../stores/cloudAccountStore';
+import { usePersistentAgentsStore } from '../../stores/persistentAgentsStore';
+import { makeCloudStatus, makeStatus } from '../agentsEnv/__tests__/fixtures';
 
 const detectClaude = vi.fn();
 const detectCodex = vi.fn();
@@ -409,5 +413,33 @@ describe('IntegrationsSettings — the Aria gate on Pi', () => {
         agentProviderAccess: { claude: true, codex: true, omp: true, pi: true },
       }),
     );
+  });
+});
+
+describe('IntegrationsSettings: cloud and credentials placement', () => {
+  it('renders nothing extra with the default (not running, cloud unavailable) state', async () => {
+    usePersistentAgentsStore.setState({ featureStatus: null });
+    render(<IntegrationsSettings />);
+    await screen.findByText('claude@example.com');
+    expect(screen.queryByTestId('cloud-account-section')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('vendor-credentials-section')).not.toBeInTheDocument();
+  });
+
+  it('puts the cloud card first, then the agent API keys, then the existing sections', async () => {
+    vi.mocked(trpc.cyboflow.cloud.status.query).mockResolvedValue(makeCloudStatus('signed_in'));
+    vi.mocked(trpc.cyboflow.persistentAgents.listCredentials.query).mockResolvedValue([]);
+    useCloudAccountStore.setState({ status: null });
+    usePersistentAgentsStore.setState({ featureStatus: makeStatus() });
+
+    render(<IntegrationsSettings />);
+
+    const cloud = await screen.findByTestId('cloud-account-section');
+    const credentials = await screen.findByTestId('vendor-credentials-section');
+    const providers = await screen.findByTestId('provider-toggle-claude');
+    expect(cloud.compareDocumentPosition(credentials) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(credentials.compareDocumentPosition(providers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    vi.mocked(trpc.cyboflow.cloud.status.query).mockResolvedValue({ available: false });
+    usePersistentAgentsStore.setState({ featureStatus: null });
   });
 });

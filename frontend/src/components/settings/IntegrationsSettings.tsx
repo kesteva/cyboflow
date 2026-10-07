@@ -16,6 +16,8 @@ import { Button } from '../ui/Button';
 import { SettingsSection } from '../ui/SettingsSection';
 import { Toggle } from '../ui/Toggle';
 import { TrackerIntegrationSection } from './tracker/TrackerIntegrationSection';
+import { CloudAccountSection } from './cloud/CloudAccountSection';
+import { VendorCredentialsSection } from './agents/VendorCredentialsSection';
 
 type ProviderStatus = 'checking' | 'connected' | 'attention' | 'unavailable';
 
@@ -494,6 +496,8 @@ export function IntegrationsSettings(): React.JSX.Element {
 
   return (
     <div className="space-y-6">
+      <CloudAccountSection />
+      <VendorCredentialsSection />
       <SettingsSection
         title="Agent providers"
         description="Accounts Cyboflow can use for quick sessions and workflow runs."

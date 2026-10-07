@@ -140,6 +140,17 @@ export interface NavigationState {
    * hosts one full-width pane at a time.
    */
   projectOverviewOpen: boolean;
+  /**
+   * Whether the full-width Agents & Environments pane is the active center
+   * surface. Mutually exclusive with every other overlay flag, exactly like
+   * `systemOpen`.
+   */
+  agentsEnvOpen: boolean;
+  /** Which sub-tab the pane shows. Persisted (localStorage 'cyboflow.agentsEnv.tab'); defaults 'agents'. */
+  agentsEnvTab: AgentsEnvTab;
+  /** Deep link: the persistent agent whose thread the Agents tab shows, or null for the card list.
+   *  Meaningful only while agentsEnvOpen; NOT persisted. */
+  agentsEnvAgentId: string | null;
   /** Whether the Settings dialog is open (a modal, not a center surface). */
   settingsOpen: boolean;
   /** Tab the Settings dialog opens on. */
@@ -177,6 +188,17 @@ export interface NavigationState {
   openProjectOverview: () => void;
   closeProjectOverview: () => void;
   toggleProjectOverview: () => void;
+  /** Open the pane (forces view 'home', clears every sibling flag). `tab` defaults to the current
+   *  agentsEnvTab; a non-undefined `agentId` forces tab 'agents'. agentsEnvAgentId := opts.agentId ?? null. */
+  openAgentsEnv: (opts?: { tab?: AgentsEnvTab; agentId?: string | null }) => void;
+  /** agentsEnvOpen := false, agentsEnvAgentId := null. Siblings untouched (mirrors closeSystem). */
+  closeAgentsEnv: () => void;
+  /** Nav-item toggle: closed opens the card list on the remembered tab; open closes. */
+  toggleAgentsEnv: () => void;
+  /** Switch sub-tab; persists; clears agentsEnvAgentId when switching to 'environments'. Does not open the pane. */
+  setAgentsEnvTab: (tab: AgentsEnvTab) => void;
+  /** Select (or with null, deselect) the agent whose thread shows. Does not open the pane. */
+  selectPersistentAgent: (agentId: string | null) => void;
   /**
    * Open the Settings dialog on a given tab. Deliberately NOT part of the
    * mutually-exclusive center-surface group above — Settings is a MODAL that
@@ -187,6 +209,25 @@ export interface NavigationState {
    */
   openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
+}
+
+export type AgentsEnvTab = 'agents' | 'environments';
+
+const AGENTS_ENV_TAB_KEY = 'cyboflow.agentsEnv.tab';
+function readAgentsEnvTab(): AgentsEnvTab {
+  try {
+    if (typeof localStorage === 'undefined') return 'agents';
+    return localStorage.getItem(AGENTS_ENV_TAB_KEY) === 'environments' ? 'environments' : 'agents';
+  } catch {
+    return 'agents';
+  }
+}
+function writeAgentsEnvTab(tab: AgentsEnvTab): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(AGENTS_ENV_TAB_KEY, tab);
+  } catch {
+    /* ignore: the tab is a convenience */
+  }
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -202,18 +243,21 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   verifyQueueOpen: false,
   systemOpen: false,
   projectOverviewOpen: false,
+  agentsEnvOpen: false,
+  agentsEnvTab: readAgentsEnvTab(),
+  agentsEnvAgentId: null,
   settingsOpen: false,
   settingsTab: 'general',
 
   // Center-surface state machine. goHome returns to the rail-overlay surface
-  // (clearing any wizard opts + all five overlays); goToWizard swaps in the
+  // (clearing any wizard opts + every overlay); goToWizard swaps in the
   // new-flow launcher; goToSession is called by the run/session OPEN handlers.
   // Each transition also clears `insightsOpen` / `workflowsOpen` /
   // `experimentComparisonId` / `verifyQueueOpen` so navigating away always tears
   // those panes down (mirrors the human-review / backlog clears).
-  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
-  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
-  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
+  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
+  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
+  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
 
   setActiveView: (view) => set({ activeView: view }),
 
@@ -236,7 +280,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     experimentComparisonId: null,
     verifyQueueOpen: false,
     systemOpen: false,
-    projectOverviewOpen: true
+    projectOverviewOpen: true,
+    agentsEnvOpen: false
   }),
 
   // Navigating to sessions likewise dismisses all full-width center panes.
@@ -251,7 +296,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     experimentComparisonId: null,
     verifyQueueOpen: false,
     systemOpen: false,
-    projectOverviewOpen: false
+    projectOverviewOpen: false, agentsEnvOpen: false
   }),
 
   // Opening human review closes the backlog, insights, workflows, the experiment
@@ -259,58 +304,58 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   // time) and forces the home view — the overlays only ever render over the home
   // surface. Closing/toggling leave the sibling flags untouched (toggle still
   // clears them on the open transition).
-  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
+  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeHumanReview: () => set({ humanReviewOpen: false }),
   toggleHumanReview: () => set((s) => {
     if (!s.humanReviewOpen) fireViewOpened('human_review');
-    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false };
+    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false };
   }),
 
   // Symmetric with the human-review actions — opening/toggling the backlog
   // closes the other overlays and forces home so the center never tries
   // to render two panes.
-  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
+  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeBacklog: () => set({ backlogOpen: false }),
   toggleBacklog: () => set((s) => {
     if (!s.backlogOpen) fireViewOpened('backlog');
-    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false };
+    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false };
   }),
 
   // Third sibling — opening/toggling insights closes the other overlays and
   // forces home, so the mutual-exclusion invariant holds in every direction.
-  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
+  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeInsights: () => set({ insightsOpen: false }),
   toggleInsights: () => set((s) => {
     if (!s.insightsOpen) fireViewOpened('insights');
-    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false };
+    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false };
   }),
 
   // Fourth sibling — opening/toggling the Workflows gallery closes the other
   // overlays + the experiment comparison + verify queue and forces home,
   // mirroring the insights actions exactly.
-  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false }),
+  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeWorkflows: () => set({ workflowsOpen: false }),
   toggleWorkflows: () => set((s) => {
     if (!s.workflowsOpen) fireViewOpened('workflows');
-    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false };
+    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false };
   }),
 
   // Fifth sibling — opening/toggling the Verify Queue closes the other overlays
   // + the experiment comparison and forces home, mirroring the workflows actions exactly.
-  openVerifyQueue: () => set({ view: 'home', verifyQueueOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, systemOpen: false, projectOverviewOpen: false }),
+  openVerifyQueue: () => set({ view: 'home', verifyQueueOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeVerifyQueue: () => set({ verifyQueueOpen: false }),
   toggleVerifyQueue: () => set((s) => {
     if (!s.verifyQueueOpen) fireViewOpened('verify_queue');
-    return { view: 'home', verifyQueueOpen: !s.verifyQueueOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, systemOpen: false, projectOverviewOpen: false };
+    return { view: 'home', verifyQueueOpen: !s.verifyQueueOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, systemOpen: false, projectOverviewOpen: false, agentsEnvOpen: false };
   }),
 
   // Eighth sibling — opening/toggling the System view closes the other overlays
   // + the experiment comparison and forces home, mirroring the verify-queue
   // actions exactly. No fireViewOpened call: the shared telemetry union
   // (shared/types/telemetry.ts) carries no 'system' arm.
-  openSystem: () => set({ view: 'home', systemOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, projectOverviewOpen: false }),
+  openSystem: () => set({ view: 'home', systemOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, projectOverviewOpen: false, agentsEnvOpen: false }),
   closeSystem: () => set({ systemOpen: false }),
-  toggleSystem: () => set((s) => ({ view: 'home', systemOpen: !s.systemOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, projectOverviewOpen: false })),
+  toggleSystem: () => set((s) => ({ view: 'home', systemOpen: !s.systemOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, projectOverviewOpen: false, agentsEnvOpen: false })),
 
   // Seventh sibling — opening/toggling the Project Overview page closes the
   // other overlays + the experiment comparison and forces home, mirroring the
@@ -318,9 +363,32 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   // sets it directly alongside activeProjectId. No fireViewOpened call here —
   // the shared telemetry union (shared/types/telemetry.ts) doesn't carry a
   // 'project_overview' arm.
-  openProjectOverview: () => set({ view: 'home', projectOverviewOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false }),
+  openProjectOverview: () => set({ view: 'home', projectOverviewOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, agentsEnvOpen: false }),
   closeProjectOverview: () => set({ projectOverviewOpen: false }),
-  toggleProjectOverview: () => set((s) => ({ view: 'home', projectOverviewOpen: !s.projectOverviewOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false })),
+  toggleProjectOverview: () => set((s) => ({ view: 'home', projectOverviewOpen: !s.projectOverviewOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, agentsEnvOpen: false })),
+
+  // Agents & Environments — a peer of System in the center-surface group. No
+  // fireViewOpened call: the shared telemetry union carries no arm for it.
+  openAgentsEnv: (opts) => set((s) => {
+    const agentId = opts?.agentId ?? null;
+    const tab: AgentsEnvTab = agentId !== null ? 'agents' : (opts?.tab ?? s.agentsEnvTab);
+    writeAgentsEnvTab(tab);
+    return {
+      view: 'home', agentsEnvOpen: true, agentsEnvTab: tab, agentsEnvAgentId: agentId,
+      humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false,
+      experimentComparisonId: null, verifyQueueOpen: false, systemOpen: false, projectOverviewOpen: false,
+    };
+  }),
+  closeAgentsEnv: () => set({ agentsEnvOpen: false, agentsEnvAgentId: null }),
+  toggleAgentsEnv: () => {
+    if (useNavigationStore.getState().agentsEnvOpen) useNavigationStore.getState().closeAgentsEnv();
+    else useNavigationStore.getState().openAgentsEnv();
+  },
+  setAgentsEnvTab: (tab) => {
+    writeAgentsEnvTab(tab);
+    set((s) => ({ agentsEnvTab: tab, agentsEnvAgentId: tab === 'environments' ? null : s.agentsEnvAgentId }));
+  },
+  selectPersistentAgent: (agentId) => set({ agentsEnvAgentId: agentId }),
 
   // Settings modal. Independent of the center-surface group: no nav action
   // clears it and it clears nothing, so it can be opened from anywhere (the
@@ -343,7 +411,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     workflowsOpen: false,
     verifyQueueOpen: false,
     systemOpen: false,
-    projectOverviewOpen: false,
+    projectOverviewOpen: false, agentsEnvOpen: false,
   }),
   closeExperimentComparison: () => set({ experimentComparisonId: null }),
 }));

@@ -89,6 +89,8 @@ beforeEach(() => {
     wizardOpts: null,
     humanReviewOpen: false,
     backlogOpen: false,
+    agentsEnvOpen: false,
+    agentsEnvAgentId: null,
     settingsOpen: false,
     settingsTab: 'general',
   });

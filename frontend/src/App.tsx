@@ -33,6 +33,7 @@ import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
 import { SystemView } from './components/cyboflow/SystemView';
+import { AgentsEnvironmentsView } from './components/agentsEnv/AgentsEnvironmentsView';
 import { ProjectOverviewPage } from './components/overview/ProjectOverviewPage';
 import { StatusBar } from './components/StatusBar';
 import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
@@ -40,6 +41,7 @@ import { DesignPlannerPrompt } from './components/cyboflow/design/DesignPlannerP
 import { useDesignModeStore } from './stores/designModeStore';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useAgentThreadStore } from './stores/agentThreadStore';
+import { usePersistentAgentsStore, useAgentsEnvAvailable } from './stores/persistentAgentsStore';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useOmpFleetStore } from './stores/ompFleetStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
@@ -87,6 +89,11 @@ function App() {
   const toggleVerifyQueue = useNavigationStore((s) => s.toggleVerifyQueue);
   const showSystem = useNavigationStore((s) => s.systemOpen);
   const toggleSystem = useNavigationStore((s) => s.toggleSystem);
+  const showAgentsEnv = useNavigationStore((s) => s.agentsEnvOpen);
+  const toggleAgentsEnv = useNavigationStore((s) => s.toggleAgentsEnv);
+  // Agents & Environments is running (dev build + config.agents.enabled, kill switch not set). The hook also
+  // closes a pane left open when the feature is switched off.
+  const agentsEnvAvailable = useAgentsEnvAvailable();
   // The per-project overview page (sidebar project click). Rendered only with a
   // resolved activeProjectId — a set flag with no project falls through to
   // LandingHome rather than rendering a project page for no project.
@@ -223,6 +230,10 @@ function App() {
   // unsubscribe used as the cleanup.
   useEffect(() => useAgentThreadStore.getState().init(), []);
 
+  // Persistent agents store (feature status gate, agents list, thread subscriptions). App owns init; Settings
+  // and the pane only read. The cloud store is NOT initialised here: each cloud consumer takes its own ref.
+  useEffect(() => usePersistentAgentsStore.getState().init(), []);
+
   // Load config on app startup
   useEffect(() => {
     fetchConfig();
@@ -333,6 +344,9 @@ function App() {
             onToggleVerifyQueue={toggleVerifyQueue}
             systemActive={showSystem}
             onToggleSystem={toggleSystem}
+            agentsEnvAvailable={agentsEnvAvailable}
+            agentsEnvActive={showAgentsEnv && agentsEnvAvailable}
+            onToggleAgentsEnv={toggleAgentsEnv}
           />
         </PerfProfiler>
         </div>
@@ -360,19 +374,15 @@ function App() {
         )}
         {/* Center-surface state machine, keyed off navigationStore.view
               (pre-empted by the guided set-up column while the in-shell tour
-              steps 9-14 run — see `guidedShell` above):
-              • 'session' → CyboflowRoot (the active run/session workspace, the
-                only mount point for the run surface; legacy SessionView retired
-                in TASK-690).
-              • 'wizard'  → SessionStartWizard (the new-flow launcher).
-              • 'home'    → the rail-driven overlays, checked in priority order:
-                InsightsView when the insights rail item is active, else
-                BacklogPane when the backlog rail item is active, else
-                LandingHome (the cross-project home). The navigationStore
-                mutual-exclusion invariant guarantees at most one overlay flag
-                is set, so the order is just a tiebreaker. focusQueue scrolls
-                LandingHome to its review queue when the user arrived from the
-                human-review rail affordance. */}
+              steps 9-14 run — see `guidedShell` above). Priority order:
+              guided → session (CyboflowRoot) → wizard (SessionStartWizard) →
+              experimentComparison → insights → workflows → verifyQueue →
+              system → agentsEnv (only while the feature is running) → backlog →
+              projectOverview (needs activeProjectId) → LandingHome. The
+              navigationStore mutual-exclusion invariant guarantees at most one
+              overlay flag is set, so the order is just a tiebreaker. focusQueue
+              scrolls LandingHome to its review queue when the user arrived from
+              the human-review rail affordance. */}
         <div className="flex flex-col flex-1 overflow-hidden">
           {guidedShell !== 'none' ? (
             <GuidedSetupSurface />
@@ -443,6 +453,17 @@ function App() {
               </div>
             )}>
               <SystemView />
+            </ErrorBoundary>
+          ) : showAgentsEnv && agentsEnvAvailable ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Agents &amp; Environments error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <AgentsEnvironmentsView />
             </ErrorBoundary>
           ) : showBacklog ? (
             <ErrorBoundary fallback={(error) => (

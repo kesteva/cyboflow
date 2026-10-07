@@ -2,7 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, MonitorCog, Bug, ChevronLeft } from 'lucide-react';
+import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, MonitorCog, Bug, ChevronLeft, Server } from 'lucide-react';
 import { BugReportDialog } from './BugReportDialog';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
@@ -23,6 +23,7 @@ import {
 } from '../utils/onboarding';
 import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
 import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
+import { PersistentAgentsRailSection } from './agentsEnv/PersistentAgentsRailSection';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -81,6 +82,16 @@ interface SidebarProps {
   systemActive?: boolean;
   /** Toggle the System center pane. */
   onToggleSystem?: () => void;
+  /**
+   * Whether the Agents & Environments feature is running (= featureStatus.running: dev build +
+   * config.agents.enabled, and the kill switch not set). When false the nav item and the rail
+   * section are ABSENT (not disabled).
+   */
+  agentsEnvAvailable?: boolean;
+  /** Whether the Agents & Environments pane is the active center view. */
+  agentsEnvActive?: boolean;
+  /** Toggle the Agents & Environments pane. */
+  onToggleAgentsEnv?: () => void;
 }
 
 // Shared className for the circular icon "pill" that fronts each primary rail
@@ -115,6 +126,9 @@ export const Sidebar = memo(function Sidebar({
   onToggleVerifyQueue,
   systemActive = false,
   onToggleSystem,
+  agentsEnvAvailable = false,
+  agentsEnvActive = false,
+  onToggleAgentsEnv,
 }: SidebarProps) {
   // Settings dialog state lives in navigationStore, not here: any surface can
   // need to open it (e.g. the chat's provider-disabled failure row offering
@@ -521,7 +535,35 @@ export const Sidebar = memo(function Sidebar({
           </button>
         )}
 
+        {/* Agents & Environments — primary rail item below System; opens the full-width pane
+            (persistent agents + environments placeholder). Absent unless the feature is running.
+            No badge: unread shows on each agent's row in the rail section below. Shown on every
+            platform (it is not POSIX-shaped like System). */}
+        {agentsEnvAvailable && (
+          <button
+            type="button"
+            onClick={() => onToggleAgentsEnv?.()}
+            aria-pressed={agentsEnvActive}
+            data-testid="agents-env-rail-item"
+            className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
+              agentsEnvActive
+                ? 'border-border-emphasized bg-surface-primary'
+                : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
+            }`}
+            style={agentsEnvActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+          >
+            <span className={pillClass}>
+              <Server className="h-3 w-3" strokeWidth={2} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[11.5px] font-bold leading-tight text-text-primary">Agents &amp; Environments</span>
+              <span className="block truncate text-[10px] text-text-secondary">Machines · persistent agents</span>
+            </span>
+          </button>
+        )}
+
         <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
+          {agentsEnvAvailable && <PersistentAgentsRailSection />}
           <div className="px-4 py-2 text-sm uppercase flex items-center justify-between overflow-hidden">
             <span className="truncate text-text-tertiary">Projects & Sessions</span>
             <div className="flex items-center space-x-1">
