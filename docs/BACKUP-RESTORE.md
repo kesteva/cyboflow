@@ -72,6 +72,22 @@ missing, corrupt, or short shard set, leaving no output file. A refusal is
 deliberate: a partial restore looks like a recovered database and simply reads as
 though history ended early, which is far worse than a clear failure.
 
+## Secrets do not restore across machines
+
+Secrets stored with the operating system keychain (Electron `safeStorage`) are bound to the machine and OS
+user that wrote them. That covers the ciphertext in `tracker_connections`, `vendor_credentials` and
+`cloud_account`. A backup restored on another machine (or under another OS user) still contains those rows,
+but they cannot be decrypted there:
+
+- **Tracker keys** must be re-entered.
+- **Vendor keys** (agent API keys) must be rotated: Settings → Integrations → Agent API keys → Rotate.
+- **cyboflow cloud** shows that your saved sign-in "can't be read". On the same machine after a keychain
+  reset, press **Try again**. On a new device, press **Sign in again**, then revoke the old device on the
+  account's Devices page.
+
+Each data directory (`~/.cyboflow`, `~/.cyboflow_dev`, or a `CYBOFLOW_DIR` override) keeps its own cloud
+sign-in and its own keychain entry, so each one registers as its own device.
+
 ## Lineages
 
 A restore rewinds the id space: the recovered database starts issuing ids the
