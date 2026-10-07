@@ -149,6 +149,25 @@ export function redactHomePath(input: string): string {
 }
 
 /**
+ * Redact secrets of KNOWN SHAPES from a string, in order:
+ *   - cyboflow cloud tokens: `cbd_` (device), `cbh_` (relay-http) and the reserved
+ *     `cbf_` / `cbr_` / `cbt_` prefixes → `<prefix>[redacted]`
+ *   - `cba_c_…` client secrets → `cba_c_[redacted]`
+ *   - `Bearer <credential>` (any case) → `Bearer [redacted]`
+ *   - Bridge pairing codes `WORD-WORD-NNNN` (case-insensitive) → `[pairing-code]`
+ *   - Anthropic API keys `sk-ant-…` → `sk-ant-[redacted]`
+ * A string containing none of these is returned unchanged.
+ */
+export function redactSecrets(input: string): string {
+  return input
+    .replace(/\b(cb[dhfrt]_)[A-Za-z0-9_-]+/g, '$1[redacted]')
+    .replace(/\bcba_c_\S+/g, 'cba_c_[redacted]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b[A-Za-z]{3,8}-[A-Za-z]{3,8}-\d{4}\b/g, '[pairing-code]')
+    .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[redacted]');
+}
+
+/**
  * NOT A GENERAL-PURPOSE SCRUBBER — read this before reusing `redactHomePath`.
  *
  * `redactHomePath` removes the USERNAME segment and nothing else. By design it
@@ -160,6 +179,13 @@ export function redactHomePath(input: string): string {
  * It is therefore safe on stack frames and exception messages — the closed set
  * of values `scrubSentryEvent` feeds it — and unsafe on log output, command
  * stderr, or anything else free-form.
+ *
+ * `redactSecrets` (above) additionally redacts TOKENS OF KNOWN SHAPES — cyboflow
+ * cloud device/relay tokens (`cbd_`/`cbh_`/…), Bearer credentials, Bridge
+ * pairing codes and Anthropic API keys — in the same exception messages,
+ * event messages and breadcrumbs, and in the local bug-report error buffer.
+ * That is defence in depth behind the rule that error messages never embed a
+ * secret in the first place; it does NOT make arbitrary free-form text safe.
  *
  * Consequence for user-submitted bug reports: raw log text can never be made
  * safe by passing it through here. The bug reporter treats a log tail as
@@ -207,16 +233,26 @@ export function scrubSentryEvent<T extends Event>(event: T): T | null {
         }
       }
 
-      // Exception messages may embed absolute home paths.
+      // Exception messages may embed absolute home paths (and, defensively,
+      // tokens of known shapes).
       if (typeof value.value === 'string') {
-        value.value = redactHomePath(value.value);
+        value.value = redactSecrets(redactHomePath(value.value));
       }
     }
   }
 
   // Top-level message may embed absolute home paths.
   if (typeof event.message === 'string') {
-    event.message = redactHomePath(event.message);
+    event.message = redactSecrets(redactHomePath(event.message));
+  }
+
+  // Breadcrumb messages attached to the event: same treatment.
+  if (Array.isArray(event.breadcrumbs)) {
+    for (const crumb of event.breadcrumbs) {
+      if (typeof crumb.message === 'string') {
+        crumb.message = redactSecrets(redactHomePath(crumb.message));
+      }
+    }
   }
 
   return event;

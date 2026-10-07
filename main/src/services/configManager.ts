@@ -59,6 +59,11 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
+import { isDevBuild } from '../utils/buildChannel';
+import { resolveCloudOrigin } from '../../../shared/types/cloudOrigins';
+
+/** cloud.origin overrides already warned about (one warning per distinct rejected value per process). */
+const warnedCloudOrigins = new Set<string>();
 
 /**
  * Default telemetry posture for a FRESH config (no telemetry block on disk yet).
@@ -861,6 +866,39 @@ export class ConfigManager extends EventEmitter {
           ? threshold
           : IDLE_SESSION_REVIEW_DEFAULTS.thresholdMinutes,
     };
+  }
+
+  /** Agents & Environments exists in this build at all: dev builds only (isDevBuild fails closed). */
+  isAgentsAvailable(): boolean {
+    return isDevBuild();
+  }
+
+  /** THE agents gate: isDevBuild() && agents.enabled === true. Floor-on-read; live per call. */
+  isAgentsEnabled(): boolean {
+    return this.isAgentsAvailable() && this.config.agents?.enabled === true;
+  }
+
+  /**
+   * The cyboflow cloud origin (shared/types/cloudOrigins.ts). Release builds: production, any override
+   * ignored. Dev builds: the `cloud.origin` override when it is acceptable, else staging. A present but
+   * rejected override is warned about once per distinct value.
+   */
+  getCloudOrigin(): string {
+    const raw: unknown = this.config.cloud?.origin;
+    const devBuild = this.isAgentsAvailable();
+    const origin = resolveCloudOrigin(raw, devBuild);
+    if (devBuild && raw !== undefined && raw !== null && raw !== '' && raw !== 'staging' && raw !== 'production') {
+      let requested: string | null = null;
+      if (typeof raw === 'string') {
+        try { requested = new URL(raw).origin; } catch { requested = null; }
+      }
+      const key = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      if (requested !== origin && !warnedCloudOrigins.has(key)) {
+        warnedCloudOrigins.add(key);
+        console.warn('[ConfigManager] Ignoring unsupported cloud.origin override; using the staging origin');
+      }
+    }
+    return origin;
   }
 
   /**

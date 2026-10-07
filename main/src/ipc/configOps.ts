@@ -20,6 +20,7 @@ import {
   type WebViewerConfig,
 } from '../../../shared/types/webViewer';
 import { normalizeSystemWatchedPorts } from '../../../shared/types/systemWatchedPorts';
+import { AGENTS_CONFIG_KEYS, type AgentsConfig } from '../../../shared/types/persistentAgents';
 
 /**
  * Concrete implementation of {@link ConfigOpsLike}, backing the `config`
@@ -62,6 +63,9 @@ export function createConfigOps(
         // it unconditionally rather than trusting the type system alone.
         const strippedUpdates: UpdateConfigRequest = { ...updates };
         delete (strippedUpdates as Record<string, unknown>).runTypeDefaults;
+        // The cyboflow cloud origin override is hand-edited in config.json only (dev builds): the renderer
+        // can never write it, whatever its static type says.
+        delete (strippedUpdates as Record<string, unknown>).cloud;
 
         // Validate the untyped provider-access patch at the IPC boundary: a
         // malformed shape is rejected outright, and a well-formed one is stored
@@ -185,6 +189,42 @@ export function createConfigOps(
           normalized = {
             ...normalized,
             webViewer: Object.keys(merged).length === 0 ? undefined : merged,
+          };
+        }
+
+        // Agents & Environments: dev builds only. A release build rejects the write outright, so the
+        // feature has no reachable surface there. Booleans only, unknown keys rejected, merged over
+        // the STORED block, an empty block stored as absent (same as webViewer above).
+        if (updates.agents !== undefined) {
+          if (!configManager.isAgentsAvailable()) {
+            return { success: false, error: 'Agents & Environments is not available in this build' };
+          }
+          const patch: unknown = updates.agents;
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            return { success: false, error: 'Invalid agents payload' };
+          }
+          const raw = patch as Record<string, unknown>;
+          for (const key of Object.keys(raw)) {
+            if (!(AGENTS_CONFIG_KEYS as readonly string[]).includes(key)) {
+              return { success: false, error: `Unknown agents key: ${key}` };
+            }
+          }
+          const merged: AgentsConfig = { ...(oldConfig.agents ?? {}) };
+          for (const key of AGENTS_CONFIG_KEYS) {
+            if (!(key in raw)) continue;
+            const value = raw[key];
+            if (value === undefined || value === null) {
+              delete merged[key];
+              continue;
+            }
+            if (typeof value !== 'boolean') {
+              return { success: false, error: `Invalid agents.${key}: expected a boolean` };
+            }
+            merged[key] = value;
+          }
+          normalized = {
+            ...normalized,
+            agents: Object.keys(merged).length === 0 ? undefined : merged,
           };
         }
 

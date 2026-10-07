@@ -17,7 +17,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { redactHomePath } from './scrub';
+import { redactHomePath, redactSecrets } from './scrub';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import { getDevDebugLogPath } from '../../utils/devDebugLog';
 import type { TelemetryEnvironment } from './environment';
@@ -73,7 +73,7 @@ export function recordLocalError(seam: string, error: unknown, at: string): void
       at,
       seam,
       errorClass: err.constructor?.name ?? 'Error',
-      message: truncate(redactHomePath(err.message), MESSAGE_MAX_CHARS),
+      message: truncate(redactSecrets(redactHomePath(err.message)), MESSAGE_MAX_CHARS),
     });
     // Evict oldest beyond the cap so a crash loop cannot grow this unbounded.
     while (recentErrors.length > RECENT_ERROR_LIMIT) {

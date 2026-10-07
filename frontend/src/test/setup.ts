@@ -152,6 +152,27 @@ vi.mock('../trpc/client', () => ({
       ideaComponents: {
         onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
+      // cyboflow cloud sign-in + Agents & Environments — the Settings cloud card, the
+      // Feature controls toggle, the nav item and the rail section read these. Inert
+      // by default (unavailable / not running, never emits) so tests that mount
+      // App/Settings stay network-free without a per-file mock.
+      cloud: {
+        status: { query: vi.fn().mockResolvedValue({ available: false }) },
+        onCloudChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        listDevices: { query: vi.fn().mockResolvedValue({ ok: true, devices: [] }) },
+        signIn: { mutate: vi.fn() }, cancelSignIn: { mutate: vi.fn() }, signOut: { mutate: vi.fn() },
+        refreshAccount: { mutate: vi.fn() }, openDevicesPage: { mutate: vi.fn() },
+        unlock: { mutate: vi.fn().mockResolvedValue({ available: false }) },
+        reopenSignInPage: { mutate: vi.fn().mockResolvedValue({ opened: false }) },
+      },
+      persistentAgents: {
+        status: { query: vi.fn().mockResolvedValue({ devBuild: false, configEnabled: false, enabled: false, killed: false, running: false, bridgeDisabled: false }) },
+        listAgents: { query: vi.fn().mockResolvedValue([]) },
+        listConnectors: { query: vi.fn().mockResolvedValue([]) },
+        listCredentials: { query: vi.fn().mockResolvedValue([]) },
+        onAgentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onThreadEvent: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
     },
   },
 }));

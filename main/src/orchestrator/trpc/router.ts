@@ -9,6 +9,7 @@ import { router } from './trpc';
 import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
 import { claudeAuthRouter } from './routers/claudeAuth';
+import { cloudRouter } from './routers/cloud';
 import { customViewsRouter } from './routers/customViews';
 import { customWidgetServerRouter } from './routers/customWidgetServer';
 import { configRouter } from './routers/config';
@@ -38,6 +39,7 @@ import { monitorRouter } from './routers/monitor';
 import { monitorReapRouter } from './routers/monitorReap';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
+import { persistentAgentsRouter } from './routers/persistentAgents';
 import { variantsRouter } from './routers/variants';
 import { experimentsRouter } from './routers/experiments';
 import { verificationRequestsRouter } from './routers/verificationRequests';
@@ -55,6 +57,7 @@ export const appRouter = router({
     design: designRouter,
     artifacts: artifactsRouter,
     claudeAuth: claudeAuthRouter,
+    cloud: cloudRouter,
     config: configRouter,
     customViews: customViewsRouter,
     customWidgetServer: customWidgetServerRouter,
@@ -70,6 +73,7 @@ export const appRouter = router({
     mcps: mcpsRouter,
     monitor: monitorRouter,
     monitorReap: monitorReapRouter,
+    persistentAgents: persistentAgentsRouter,
     plugins: pluginsRouter,
     providerUsage: providerUsageRouter,
     questions: questionsRouter,

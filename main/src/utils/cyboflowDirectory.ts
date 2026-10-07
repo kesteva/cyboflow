@@ -71,7 +71,7 @@ function resolveCliDirOverride(): string | null {
  * the production `~/.cyboflow` directory it historically shared. Only meaningful
  * for packaged builds; callers gate on `app.isPackaged` first.
  */
-function resolvePackagedVariant(): 'stable' | 'dev' {
+export function resolvePackagedVariant(): 'stable' | 'dev' {
   if (cachedPackagedVariant) return cachedPackagedVariant;
 
   const resourcesPath = process.resourcesPath;
