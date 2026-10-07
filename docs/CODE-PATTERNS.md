@@ -567,6 +567,28 @@ its own post-commit block.
 
 - **Canonical example:** `main/src/orchestrator/ideaComponents/ideaComponentRouter.ts`.
 
+### `persistent_agent*` + `vendor_credentials` write chokepoint (`PersistentAgentStore`)
+
+Every write to the six persistent-agents tables (migration 151 — `vendor_credentials`,
+`persistent_agents`, `persistent_agent_connections`, `persistent_agent_messages`,
+`persistent_agent_events`, `persistent_agent_usage`) goes through `PersistentAgentStore`
+(`main/src/orchestrator/persistentAgents/persistentAgentStore.ts`): a per-agent
+`PQueue({concurrency: 1})` (credential writes on `'__credentials__'`, boot/retention sweeps on
+`'__global__'`), ONE synchronous transaction per operation, and events on `persistentAgentEvents`
+(`orchestrator/persistentAgentsBridge.ts`) only after the transaction returned — they are
+notifications, the renderer re-queries. Connectors never write rows: they return `InboundBatch`es
+that the store applies, and the inbound pump acknowledges a batch only after it committed. Swap steps
+are compare-and-sets (`markSwapState`, `fenceSwap`, `activateSwap`, `failSwap` return `false` with no
+write when the swap moved on underneath them). All timestamps are ISO via `Date#toISOString()`, never
+`datetime('now')` (the outbox compares `next_attempt_at` / `rate_limited_until` as text). Ciphertext
+enters only via `insertCredential` / `rotateCredential` and leaves only via `getCredentialCiphertext`
+(read solely by `CredentialService.secret`); plaintext never reaches the store. The store's error
+classes live beside it in `orchestrator/persistentAgents/errors.ts` (re-exported from
+`services/persistentAgents/errors.ts`) so the orchestrator layer never imports services at runtime.
+
+- **Canonical example:** `main/src/orchestrator/persistentAgents/persistentAgentStore.ts`.
+- **Enforced by:** `main/src/__tests__/persistentAgentsSoleWriter.test.ts` (production files only).
+
 ### In-repo workflow prompt bodies (self-containment)
 
 Six built-in flows — `planner` / `sprint` / `compound` / `ship` / `verify-setup` / `launch` —
