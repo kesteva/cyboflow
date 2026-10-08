@@ -125,6 +125,7 @@ function sleepAbortable(ms: number): { promise: Promise<void>; cancel: () => voi
   let timer: NodeJS.Timeout | null = null;
   const promise = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, ms);
+    timer.unref();
   });
   return {
     promise,
@@ -871,16 +872,26 @@ export class CloudAccountService extends EventEmitter<CloudAccountEventMap> impl
       if (token === null) {
         revokedRemotely = 'skipped';
       } else {
+        const controller = this.trackAbort();
         try {
           await this.deps
             .createHttpClient(row.origin)
-            .revokeSelf(token, AbortSignal.timeout(this.timeouts.signOutMs));
+            .revokeSelf(token, AbortSignal.any([controller.signal, AbortSignal.timeout(this.timeouts.signOutMs)]));
           revokedRemotely = 'yes';
         } catch {
           this.deps.logger.warn('[cloud] the server could not be told about the sign-out');
           revokedRemotely = 'no';
+        } finally {
+          this.inflight.delete(controller);
         }
       }
+    }
+
+    // A sign-in that completed while the hooks / revoke were awaited owns a newer row: leave it alone.
+    // Same-device rewrites (account refresh, revoke, decrypt) replace the row object too, so compare
+    // the device, not the object.
+    if (row !== null && this.row !== null && this.row.deviceId !== row.deviceId) {
+      return { remoteRevoked: revokedRemotely };
     }
 
     this.store.clear();
@@ -919,6 +930,8 @@ export class CloudAccountService extends EventEmitter<CloudAccountEventMap> impl
     if (this.bootUnlockTimer) clearTimeout(this.bootUnlockTimer);
     this.bootUnlockTimer = setTimeout(() => {
       this.bootUnlockTimer = null;
+      // The gate may have flipped off while the timer was pending: nothing would consume the token.
+      if (!this.deps.isEnabled()) return;
       this.unlock('boot');
     }, ms);
     this.bootUnlockTimer.unref();

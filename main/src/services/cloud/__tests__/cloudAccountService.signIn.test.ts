@@ -493,6 +493,7 @@ describe('CloudAccountService sign-in', () => {
     await until(() => h.calls.some((c) => c.path === '/v1/devices/register'));
     h.service.stop();
     release();
+    await until(() => h.calls.some((c) => c.method === 'DELETE' && c.path === '/v1/devices/self'));
     await new Promise((r) => setTimeout(r, 30));
     expect(h.store.read()).toBeNull();
   });

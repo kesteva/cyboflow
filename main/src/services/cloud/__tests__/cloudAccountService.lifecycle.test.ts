@@ -403,6 +403,33 @@ describe('CloudAccountService lifecycle', () => {
       expect(h.secrets.decrypt).not.toHaveBeenCalled();
     });
 
+    it('a boot unlock whose gate flipped off while pending does not decrypt', () => {
+      vi.useFakeTimers();
+      service.scheduleBootUnlock(1000);
+      h.enabled.value = false;
+      vi.advanceTimersByTime(5000);
+      expect(h.secrets.decrypt).not.toHaveBeenCalled();
+    });
+
+    it('a newer row written while sign-out awaited its hooks is not cleared', async () => {
+      service.onBeforeSignOut(async () => {
+        seedRow(h, { deviceId: 'dev_2' });
+        Object.assign(service, { row: h.store.read() });
+      });
+      await service.signOut();
+      expect(h.store.read()?.deviceId).toBe('dev_2');
+    });
+
+    it('a same-device row rewrite while sign-out awaited its hooks still clears', async () => {
+      const deviceId = h.store.read()?.deviceId;
+      service.onBeforeSignOut(async () => {
+        seedRow(h, { deviceId });
+        Object.assign(service, { row: h.store.read() });
+      });
+      await service.signOut();
+      expect(h.store.read()).toBeNull();
+    });
+
     it('a revoked row reports not_needed without network and clears', async () => {
       service.markRevoked('device_revoked');
       expect(await service.signOut()).toEqual({ remoteRevoked: 'not_needed' });
