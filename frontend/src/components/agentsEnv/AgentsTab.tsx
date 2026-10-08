@@ -1,9 +1,12 @@
+import { useEffect } from 'react';
 import { Bot, Loader2 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { EmptyWell, ProminentButton } from '../landing/QueuePrimitives';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { usePersistentAgentsStore } from '../../stores/persistentAgentsStore';
+import { useCloudAccountStore } from '../../stores/cloudAccountStore';
 import { AgentCard } from './AgentCard';
+import { CloudSignInPrompt } from './CloudSignInPrompt';
 
 export function AgentsTab({
   onConnect,
@@ -19,6 +22,17 @@ export function AgentsTab({
   const agentsError = usePersistentAgentsStore((s) => s.agentsError);
   const refreshAgents = usePersistentAgentsStore((s) => s.refreshAgents);
   const selectPersistentAgent = useNavigationStore((s) => s.selectPersistentAgent);
+  const cloud = useCloudAccountStore((s) => s.status);
+  const anyLocked = agents.some((a) => a.connection?.availability.state === 'locked');
+  // One remedy for the whole list (every Bridge card shares the one sign-in), and only when the user has
+  // to act: a transient 'locked' (unlock in flight) is already described on each card.
+  const needsCloudAction =
+    anyLocked &&
+    cloud?.available === true &&
+    (cloud.display === 'secrets_unavailable' || cloud.display === 'undecryptable');
+
+  // Keep a live cloud status while some connection waits on the sign-in.
+  useEffect(() => (anyLocked ? useCloudAccountStore.getState().init() : undefined), [anyLocked]);
 
   if (agents.length === 0) {
     if (agentsStatus === 'loading') {
@@ -57,16 +71,23 @@ export function AgentsTab({
   }
 
   return (
-    <div className="grid h-full content-start gap-3 overflow-y-auto p-7 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
-      {agents.map((a) => (
-        <AgentCard
-          key={a.id}
-          agent={a}
-          onOpen={(id) => selectPersistentAgent(id)}
-          onOpenPairing={onOpenPairing}
-          onReconnect={onReconnect}
-        />
-      ))}
+    <div className="flex h-full flex-col overflow-hidden">
+      {needsCloudAction && (
+        <div data-testid="agents-cloud-remedy" className="border-b border-border-primary bg-bg-secondary px-7 py-3">
+          <CloudSignInPrompt />
+        </div>
+      )}
+      <div className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto p-7 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
+        {agents.map((a) => (
+          <AgentCard
+            key={a.id}
+            agent={a}
+            onOpen={(id) => selectPersistentAgent(id)}
+            onOpenPairing={onOpenPairing}
+            onReconnect={onReconnect}
+          />
+        ))}
+      </div>
     </div>
   );
 }

@@ -178,10 +178,45 @@ describe('cloudAccountStore', () => {
     expect(unlockMutate.mock.invocationCallOrder[0]).toBeLessThan(refreshMutate.mock.invocationCallOrder[0]);
   });
 
-  it('retryUnlock does not refresh when the keychain is still unavailable', async () => {
+  it('retryUnlock does not refresh when the keychain is still unavailable, and says so', async () => {
     unlockMutate = vi.fn().mockResolvedValue(withDisplay('secrets_unavailable'));
     await useCloudAccountStore.getState().retryUnlock();
     expect(refreshMutate).not.toHaveBeenCalled();
+    expect(useCloudAccountStore.getState().actionError).toBe('The keychain is still unavailable.');
+  });
+
+  it('retryUnlock that leaves the sign-in undecryptable says so', async () => {
+    const base = signedIn();
+    if (!base.available) throw new Error('unreachable');
+    unlockMutate = vi.fn().mockResolvedValue({ ...base, display: 'undecryptable' });
+    await useCloudAccountStore.getState().retryUnlock();
+    expect(useCloudAccountStore.getState().actionError).toBe("cyboflow still can't read the saved sign-in.");
+  });
+
+  it('a status event that changes the display clears a stale action error; one that does not keeps it', async () => {
+    init();
+    await vi.waitFor(() => expect(handlers).not.toBeNull());
+    handlers?.onData({ kind: 'stateChanged', status: withDisplay('secrets_unavailable') });
+    useCloudAccountStore.setState({ actionError: 'The keychain is still unavailable.' });
+    handlers?.onData({ kind: 'stateChanged', status: withDisplay('secrets_unavailable') });
+    expect(useCloudAccountStore.getState().actionError).toBe('The keychain is still unavailable.');
+    handlers?.onData({ kind: 'stateChanged', status: signedIn() });
+    expect(useCloudAccountStore.getState().actionError).toBeNull();
+  });
+
+  it('restartApp asks main for a graceful relaunch, and reports a failure', async () => {
+    const relaunch = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, 'electronAPI', { value: { relaunch }, configurable: true, writable: true });
+    try {
+      await useCloudAccountStore.getState().restartApp();
+      expect(relaunch).toHaveBeenCalledWith({ graceful: true });
+      relaunch.mockRejectedValueOnce(new Error('ipc gone'));
+      await useCloudAccountStore.getState().restartApp();
+      expect(useCloudAccountStore.getState().pending).toBeNull();
+      expect(useCloudAccountStore.getState().actionError).toBe("Couldn't restart cyboflow. Quit it and open it again.");
+    } finally {
+      Reflect.deleteProperty(window, 'electronAPI');
+    }
   });
 
   it('signOut stores lastSignOut; signIn clears it', async () => {

@@ -22,6 +22,18 @@ const SIGN_IN_FAILURE_COPY: Record<CloudSignInFailureCode, string> = {
   not_available: 'Turn on Agents & Environments to use cyboflow cloud.',
 };
 
+/**
+ * macOS remembers a denied keychain prompt for the rest of the process (Electron never asks again), so an
+ * in-process retry can't recover there: only a restart brings the prompt back.
+ */
+export function keychainRetryNeedsRestart(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /^mac/i.test(navigator.platform ?? '');
+}
+
+export const KEYCHAIN_RESTART_COPY =
+  'macOS blocked access to the keychain. Restart cyboflow and choose Allow when macOS asks.';
+
 export function signInFailureCopy(code: CloudSignInFailureCode): string {
   return SIGN_IN_FAILURE_COPY[code] ?? 'Something went wrong while signing in. Try again.';
 }

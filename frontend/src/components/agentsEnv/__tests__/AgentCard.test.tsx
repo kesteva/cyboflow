@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeAgent, makeConnection, makeStatus } from './fixtures';
+import { makeAgent, makeCloudStatus, makeConnection, makeStatus } from './fixtures';
 
 let disconnectMutate: ReturnType<typeof vi.fn>;
 let archiveMutate: ReturnType<typeof vi.fn>;
 let listAgentsQuery: ReturnType<typeof vi.fn>;
 let openDevicesMutate: ReturnType<typeof vi.fn>;
+let cloudStatusQuery: ReturnType<typeof vi.fn>;
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -19,6 +20,10 @@ vi.mock('../../../trpc/client', () => ({
       },
       cloud: {
         openDevicesPage: { get mutate() { return openDevicesMutate; } },
+        status: { get query() { return cloudStatusQuery; } },
+        onCloudChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        unlock: { mutate: vi.fn().mockResolvedValue(makeCloudStatus('secrets_unavailable')) },
+        refreshAccount: { mutate: vi.fn() },
       },
     },
   },
@@ -37,6 +42,7 @@ beforeEach(() => {
   archiveMutate = vi.fn().mockResolvedValue({ ok: true });
   listAgentsQuery = vi.fn().mockResolvedValue([]);
   openDevicesMutate = vi.fn().mockResolvedValue({ opened: true });
+  cloudStatusQuery = vi.fn().mockResolvedValue(makeCloudStatus('signed_out'));
   useNavigationStore.setState({ agentsEnvOpen: true, agentsEnvAgentId: null });
 });
 
@@ -216,5 +222,32 @@ describe('AgentCard', () => {
     expect(el.className).not.toMatch(/line-clamp|truncate/);
     expect(el.className).toContain('break-words');
     expect(container.querySelector('[class*="line-clamp"]')).toBeNull();
+  });
+});
+
+describe('AgentsTab: a locked cloud sign-in', () => {
+  const locked = () => makeConnection({ availability: { state: 'locked', message: null, retryAt: null } });
+  beforeEach(() => {
+    useCloudAccountStore.setState({ status: null, actionError: null, pending: null });
+  });
+
+  it('shows ONE cloud remedy above the list when the user must act, not one per card', async () => {
+    cloudStatusQuery.mockResolvedValue(makeCloudStatus('secrets_unavailable'));
+    usePersistentAgentsStore.setState({
+      agents: [makeAgent({ id: 'a1', connection: locked() }), makeAgent({ id: 'a2', connection: locked() })],
+      agentsStatus: 'ready',
+      featureStatus: makeStatus(),
+    });
+    render(<AgentsTab onConnect={vi.fn()} onOpenPairing={vi.fn()} onReconnect={vi.fn()} />);
+    expect(await screen.findByTestId('agents-cloud-remedy')).toBeInTheDocument();
+    expect(screen.getAllByTestId('cloud-signin-prompt')).toHaveLength(1);
+  });
+
+  it('a lock the user need not act on (the sign-in is usable, the connector has not caught up) shows no remedy', async () => {
+    cloudStatusQuery.mockResolvedValue(makeCloudStatus('signed_in'));
+    usePersistentAgentsStore.setState({ agents: [makeAgent({ connection: locked() })], agentsStatus: 'ready', featureStatus: makeStatus() });
+    render(<AgentsTab onConnect={vi.fn()} onOpenPairing={vi.fn()} onReconnect={vi.fn()} />);
+    await waitFor(() => expect(cloudStatusQuery).toHaveBeenCalled());
+    expect(screen.queryByTestId('agents-cloud-remedy')).toBeNull();
   });
 });

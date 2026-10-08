@@ -204,6 +204,24 @@ describe('CloudAccountSection: states', () => {
     expect(refreshMutate).not.toHaveBeenCalledWith({ force: true });
   });
 
+  it('secrets_unavailable on macOS: Restart cyboflow replaces Try again, and Sign out stays', async () => {
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const relaunch = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, 'electronAPI', { value: { relaunch }, configurable: true, writable: true });
+    try {
+      cloudStatus = makeCloudStatus('secrets_unavailable');
+      render(<CloudAccountSection />);
+      await show('cloud-state-secrets_unavailable');
+      expect(screen.queryByTestId('cloud-retry-unlock')).toBeNull();
+      expect(screen.getByTestId('cloud-signout-button')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('cloud-restart-app'));
+      await waitFor(() => expect(relaunch).toHaveBeenCalledWith({ graceful: true }));
+    } finally {
+      platform.mockRestore();
+      Reflect.deleteProperty(window, 'electronAPI');
+    }
+  });
+
   it('no Copy sign-in link button exists in any state', async () => {
     for (const display of ['signed_out', 'signing_in', 'locked', 'signed_in', 'needs_update', 'revoked', 'undecryptable', 'secrets_unavailable'] as const) {
       cloudStatus = makeCloudStatus(display, {

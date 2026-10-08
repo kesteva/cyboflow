@@ -29,7 +29,8 @@ export type CloudPending =
   | 'refresh'
   | 'openDevices'
   | 'unlock'
-  | 'reopen';
+  | 'reopen'
+  | 'restart';
 
 export interface CloudAccountStoreState {
   status: CloudStatusT | null;
@@ -53,8 +54,10 @@ export interface CloudAccountStoreState {
   refresh: (force: boolean) => Promise<void>;
   /** A Try again / Unlock button passes true; an implicit unlock (mount, auto-unlock) passes false. */
   unlock: (explicitRetry: boolean) => Promise<CloudStatusT | null>;
-  /** unlock(true), then refresh(false) when that left the account usable. */
+  /** unlock(true), then refresh(false) when that left the account usable; says so when it did not. */
   retryUnlock: () => Promise<void>;
+  /** Relaunch the app: the only way back to a keychain prompt on macOS after a denial. */
+  restartApp: () => Promise<void>;
   loadDevices: () => Promise<void>;
   openDevicesPage: () => Promise<void>;
 }
@@ -112,7 +115,11 @@ export const useCloudAccountStore = create<CloudAccountStoreState>((set, get) =>
       {
         onData: (ev) => {
           eventSeq++;
-          set({ status: ev.status });
+          const prev = get().status;
+          const displayChanged =
+            (prev?.available === true ? prev.display : null) !== (ev.status.available === true ? ev.status.display : null);
+          // A message about the old state (e.g. "still unavailable") must not outlive it.
+          set(displayChanged ? { status: ev.status, actionError: null } : { status: ev.status });
           if (ev.kind === 'signedOut' || ev.kind === 'revoked') set({ devices: null });
         },
       },
@@ -230,7 +237,25 @@ export const useCloudAccountStore = create<CloudAccountStoreState>((set, get) =>
 
     retryUnlock: async () => {
       const status = await get().unlock(true);
-      if (usable(status)) await get().refresh(false);
+      if (usable(status)) {
+        await get().refresh(false);
+        return;
+      }
+      // A retry that changed nothing must still answer the click.
+      if (status?.available === true && status.display === 'secrets_unavailable') {
+        set({ actionError: 'The keychain is still unavailable.' });
+      } else if (status?.available === true && status.display === 'undecryptable') {
+        set({ actionError: "cyboflow still can't read the saved sign-in." });
+      }
+    },
+
+    restartApp: async () => {
+      set({ pending: 'restart', actionError: null });
+      try {
+        await window.electronAPI.relaunch({ graceful: true });
+      } catch {
+        set({ pending: null, actionError: "Couldn't restart cyboflow. Quit it and open it again." });
+      }
     },
 
     loadDevices: async () => {

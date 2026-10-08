@@ -143,7 +143,8 @@ export function ThreadBanner({
           data-kind={banner.kind}
           className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-7 py-2 text-[12px] ${TONE_CLASS[banner.tone]}`}
         >
-          <span className="min-w-0 break-words">{banner.copy}</span>
+          {/* A locked sign-in: the header's connection line already says why, so only the remedy shows here. */}
+          {banner.kind !== 'cloud_locked' && <span className="min-w-0 break-words">{banner.copy}</span>}
           {banner.action === 'sign_in' && <CloudSignInPrompt compact />}
           {banner.action === 'pairing' && (
             <Button variant="ghost" size="sm" onClick={() => onOpenPairing(agent.id)}>

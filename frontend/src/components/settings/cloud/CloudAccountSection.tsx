@@ -14,7 +14,14 @@ import { formatDistanceToNow } from '../../../utils/timestampUtils';
 import { useCloudAccountStore } from '../../../stores/cloudAccountStore';
 import { usePersistentAgentsStore } from '../../../stores/persistentAgentsStore';
 import type { CloudStatusT, ConnectorViewT } from '../../agentsEnv/types';
-import { cloudErrorCopy, formatExpiry, platformLabel, signInFailureCopy } from './cloudCopy';
+import {
+  KEYCHAIN_RESTART_COPY,
+  cloudErrorCopy,
+  formatExpiry,
+  keychainRetryNeedsRestart,
+  platformLabel,
+  signInFailureCopy,
+} from './cloudCopy';
 
 type Available = Extract<CloudStatusT, { available: true }>;
 
@@ -71,6 +78,7 @@ export function CloudAccountSection(): React.JSX.Element | null {
   const clearSignOutNotice = useCloudAccountStore((s) => s.clearSignOutNotice);
   const refresh = useCloudAccountStore((s) => s.refresh);
   const retryUnlock = useCloudAccountStore((s) => s.retryUnlock);
+  const restartApp = useCloudAccountStore((s) => s.restartApp);
   const loadDevices = useCloudAccountStore((s) => s.loadDevices);
   const openDevicesPage = useCloudAccountStore((s) => s.openDevicesPage);
 
@@ -128,6 +136,17 @@ export function CloudAccountSection(): React.JSX.Element | null {
       onClick={() => void retryUnlock()}
     >
       Try again
+    </Button>
+  );
+  const restartButton = (): React.JSX.Element => (
+    <Button
+      variant="secondary"
+      size="sm"
+      data-testid="cloud-restart-app"
+      loading={pending === 'restart'}
+      onClick={() => void restartApp()}
+    >
+      Restart cyboflow
     </Button>
   );
   const manageDevices = (): React.JSX.Element => (
@@ -422,10 +441,12 @@ export function CloudAccountSection(): React.JSX.Element | null {
         <>
           <p className="text-[12px] font-bold text-text-primary">Secure storage isn&apos;t available.</p>
           <p className="text-[11px] text-text-tertiary">
-            cyboflow keeps the cloud credential in your OS keychain, which can&apos;t be reached right now.
+            {keychainRetryNeedsRestart()
+              ? KEYCHAIN_RESTART_COPY
+              : "cyboflow keeps the cloud credential in your OS keychain, which can't be reached right now."}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            {tryAgainButton()}
+            {keychainRetryNeedsRestart() ? restartButton() : tryAgainButton()}
             {signOutButton()}
           </div>
         </>

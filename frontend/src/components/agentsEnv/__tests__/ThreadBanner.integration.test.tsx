@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import type { CloudStatus } from '../../../../../shared/types/cloudAccountWire';
 import { makeAgent, makeCloudStatus, makeConnection } from './fixtures';
@@ -40,6 +40,11 @@ beforeEach(() => {
   useCloudAccountStore.setState({ ...initial, status: null, actionError: null, pending: null });
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  Reflect.deleteProperty(window, 'electronAPI');
+});
+
 describe('ThreadBanner with the inline cloud prompt', () => {
   it('a signed_out availability shows the inline Sign in with GitHub prompt', async () => {
     const agent = makeAgent({
@@ -51,13 +56,35 @@ describe('ThreadBanner with the inline cloud prompt', () => {
 
   it('a locked availability with a keychain-unavailable cloud: Try again unlocks with an explicit retry', async () => {
     seed(makeCloudStatus('secrets_unavailable'));
+    unlockMutate = vi.fn().mockResolvedValue(makeCloudStatus('secrets_unavailable'));
     const agent = makeAgent({
       connection: makeConnection({ availability: { state: 'locked', message: 'Waiting for the sign-in.', retryAt: null } }),
     });
     render(<ThreadBanner agent={agent} onOpenPairing={vi.fn()} onReconnect={vi.fn()} />);
-    expect(screen.getByText('Waiting for the sign-in.')).toBeInTheDocument();
+    // The header's connection line already carries the reason: the banner shows only the remedy.
+    expect(screen.queryByText('Waiting for the sign-in.')).toBeNull();
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(unlockMutate).toHaveBeenCalledWith({ explicitRetry: true }));
+    // A retry that changed nothing still answers the click.
+    expect(await screen.findByText('The keychain is still unavailable.')).toBeInTheDocument();
+  });
+
+  it('on macOS a keychain-unavailable cloud offers Restart cyboflow instead of Try again', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const relaunch = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, 'electronAPI', { value: { relaunch }, configurable: true, writable: true });
+    seed(makeCloudStatus('secrets_unavailable'));
+    const agent = makeAgent({
+      connection: makeConnection({ availability: { state: 'locked', message: null, retryAt: null } }),
+    });
+    render(<ThreadBanner agent={agent} onOpenPairing={vi.fn()} onReconnect={vi.fn()} />);
+    expect(
+      await screen.findByText('macOS blocked access to the keychain. Restart cyboflow and choose Allow when macOS asks.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Restart cyboflow' }));
+    await waitFor(() => expect(relaunch).toHaveBeenCalledWith({ graceful: true }));
+    expect(unlockMutate).not.toHaveBeenCalledWith({ explicitRetry: true });
   });
 
   it('renders nothing for a healthy agent', () => {

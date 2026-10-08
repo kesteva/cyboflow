@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { useCloudAccountStore } from '../../stores/cloudAccountStore';
-import { signInFailureCopy } from '../settings/cloud/cloudCopy';
+import { KEYCHAIN_RESTART_COPY, keychainRetryNeedsRestart, signInFailureCopy } from '../settings/cloud/cloudCopy';
 
 /**
  * Inline "sign in to cyboflow cloud" prompt, embedded by the Connect dialog and the thread banner.
@@ -28,6 +28,7 @@ export function CloudSignInPrompt({
   const reopen = useCloudAccountStore((s) => s.reopenSignInPage);
   const retryUnlock = useCloudAccountStore((s) => s.retryUnlock);
   const refresh = useCloudAccountStore((s) => s.refresh);
+  const restartApp = useCloudAccountStore((s) => s.restartApp);
 
   const spacing = compact ? 'inline-flex flex-wrap items-center gap-x-2 gap-y-1' : 'flex flex-col items-start gap-2';
   const text = compact ? 'text-[12px]' : 'text-[12px] text-text-secondary';
@@ -145,6 +146,23 @@ export function CloudSignInPrompt({
     case 'locked':
       return wrap(<p className={text}>Unlocking your saved sign-in…</p>);
     case 'secrets_unavailable':
+      if (keychainRetryNeedsRestart()) {
+        return wrap(
+          <>
+            <p className={text}>{KEYCHAIN_RESTART_COPY}</p>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="cloud-prompt-restart"
+              loading={pending === 'restart'}
+              onClick={() => void restartApp()}
+            >
+              Restart cyboflow
+            </Button>
+            {errorLine}
+          </>,
+        );
+      }
       return wrap(
         <>
           <p className={text}>Your OS keychain isn&apos;t available right now.</p>
