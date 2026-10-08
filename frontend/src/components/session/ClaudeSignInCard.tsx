@@ -118,11 +118,41 @@ function isLivePhase(state: ClaudeLoginState): boolean {
 }
 
 export function ClaudeSignInDialog({ isOpen, onClose, onSignedIn }: ClaudeSignInDialogProps): React.JSX.Element {
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} size="md" closeOnOverlayClick={false}>
+      <div className="space-y-4 p-6" data-testid="claude-sign-in-dialog">
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-5 w-5 text-interactive" />
+          <h2 className="text-lg font-semibold text-text-primary">Sign in to Claude</h2>
+        </div>
+        {isOpen && <ClaudeSignInFlow onSignedIn={onSignedIn} onClose={onClose} />}
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Flow (the dialog's body, also mounted inline by the onboarding Connect step —
+// the onboarding overlay sits above the modal tier, so a Modal would open
+// behind it)
+// ---------------------------------------------------------------------------
+
+export interface ClaudeSignInFlowProps {
+  onSignedIn: (state: ClaudeLoginState) => void;
+  /** Cancel / Done. A live attempt is cancelled when the flow unmounts. */
+  onClose: () => void;
+}
+
+/**
+ * One sign-in attempt: starts `claude auth login` on mount, cancels a live
+ * attempt on unmount, polls while live.
+ */
+export function ClaudeSignInFlow({ onSignedIn, onClose }: ClaudeSignInFlowProps): React.JSX.Element {
   const [state, setState] = useState<ClaudeLoginState>(IDLE_CLAUDE_LOGIN_STATE);
   const [code, setCode] = useState('');
   const [submitError, setSubmitError] = useState<string | null>(null);
   const codeInputRef = useRef<HTMLInputElement>(null);
-  // Fire onSignedIn exactly once per open, however many polls report 'succeeded'.
+  // Fire onSignedIn exactly once per attempt, however many polls report 'succeeded'.
   const signedInReportedRef = useRef(false);
 
   const start = useCallback(async () => {
@@ -140,19 +170,18 @@ export function ClaudeSignInDialog({ isOpen, onClose, onSignedIn }: ClaudeSignIn
     }
   }, []);
 
-  // Start an attempt when the dialog opens; cancel a live one when it closes.
+  // Start an attempt on mount; cancel a live one on unmount. Cancelling a
+  // settled (succeeded/failed) attempt is a no-op main-side.
   useEffect(() => {
-    if (!isOpen) return;
     void start();
     return () => {
       void trpc.cyboflow.claudeAuth.cancelLogin.mutate().catch(() => undefined);
-      setState(IDLE_CLAUDE_LOGIN_STATE);
     };
-  }, [isOpen, start]);
+  }, [start]);
 
   // Poll while live.
   useEffect(() => {
-    if (!isOpen || !isLivePhase(state)) return;
+    if (!isLivePhase(state)) return;
     const timer = setInterval(() => {
       trpc.cyboflow.claudeAuth.loginState
         .query()
@@ -160,7 +189,7 @@ export function ClaudeSignInDialog({ isOpen, onClose, onSignedIn }: ClaudeSignIn
         .catch(() => undefined);
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [isOpen, state]);
+  }, [state]);
 
   useEffect(() => {
     if (state.phase === 'succeeded' && !signedInReportedRef.current) {
@@ -189,115 +218,106 @@ export function ClaudeSignInDialog({ isOpen, onClose, onSignedIn }: ClaudeSignIn
     if (state.authUrl && window.electronAPI) void window.electronAPI.openExternal(state.authUrl);
   }, [state.authUrl]);
 
-  // Closing after success must NOT cancel anything — the attempt is finished;
-  // the effect cleanup's cancelLogin is a no-op on a settled state.
   const close = onClose;
 
   return (
-    <Modal isOpen={isOpen} onClose={close} size="md" closeOnOverlayClick={false}>
-      <div className="space-y-4 p-6" data-testid="claude-sign-in-dialog">
-        <div className="flex items-center gap-2">
-          <KeyRound className="h-5 w-5 text-interactive" />
-          <h2 className="text-lg font-semibold text-text-primary">Sign in to Claude</h2>
+    <div className="space-y-4" data-testid="claude-sign-in-flow">
+      {(state.phase === 'idle' || state.phase === 'starting') && (
+        <div className="flex items-center gap-2 text-sm text-text-secondary">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Opening the sign-in page in your browser…
         </div>
+      )}
 
-        {(state.phase === 'idle' || state.phase === 'starting') && (
-          <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Opening the sign-in page in your browser…
+      {state.phase === 'awaiting-code' && (
+        <div className="space-y-3">
+          <p className="text-sm text-text-secondary">
+            A browser tab has opened to sign in to Claude. Approve Claude Code there, then copy the code it
+            shows and paste it below.
+          </p>
+          <button
+            type="button"
+            onClick={openBrowser}
+            disabled={!state.authUrl}
+            className="inline-flex items-center gap-1 text-xs text-interactive hover:underline disabled:opacity-50"
+            data-testid="claude-sign-in-open-browser"
+          >
+            <ExternalLink className="h-3 w-3" />
+            Browser didn&apos;t open? Open it again
+          </button>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+            className="flex gap-2"
+          >
+            <input
+              ref={codeInputRef}
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              placeholder="Paste the authorization code"
+              autoComplete="off"
+              spellCheck={false}
+              className="flex-1 rounded border border-border-primary bg-bg-primary px-3 py-2 font-mono text-sm text-text-primary focus:border-interactive focus:outline-none"
+              data-testid="claude-sign-in-code"
+            />
+            <Button type="submit" size="sm" disabled={code.trim().length === 0} data-testid="claude-sign-in-submit">
+              Continue
+            </Button>
+          </form>
+          {submitError && <p className="text-xs text-status-error">{submitError}</p>}
+        </div>
+      )}
+
+      {state.phase === 'verifying' && (
+        <div className="flex items-center gap-2 text-sm text-text-secondary">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Verifying the code…
+        </div>
+      )}
+
+      {state.phase === 'succeeded' && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-status-success">
+            <CheckCircle className="h-4 w-4" />
+            {state.account?.email ? `Signed in as ${state.account.email}` : 'Signed in'}
+            {state.account?.subscriptionType ? (
+              <span className="text-xs font-normal text-text-tertiary">· {state.account.subscriptionType}</span>
+            ) : null}
           </div>
-        )}
-
-        {state.phase === 'awaiting-code' && (
-          <div className="space-y-3">
-            <p className="text-sm text-text-secondary">
-              A browser tab has opened to sign in to Claude. Approve Claude Code there, then copy the code it
-              shows and paste it below.
-            </p>
-            <button
-              type="button"
-              onClick={openBrowser}
-              disabled={!state.authUrl}
-              className="inline-flex items-center gap-1 text-xs text-interactive hover:underline disabled:opacity-50"
-              data-testid="claude-sign-in-open-browser"
-            >
-              <ExternalLink className="h-3 w-3" />
-              Browser didn&apos;t open? Open it again
-            </button>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submit();
-              }}
-              className="flex gap-2"
-            >
-              <input
-                ref={codeInputRef}
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-                placeholder="Paste the authorization code"
-                autoComplete="off"
-                spellCheck={false}
-                className="flex-1 rounded border border-border-primary bg-bg-primary px-3 py-2 font-mono text-sm text-text-primary focus:border-interactive focus:outline-none"
-                data-testid="claude-sign-in-code"
-              />
-              <Button type="submit" size="sm" disabled={code.trim().length === 0} data-testid="claude-sign-in-submit">
-                Continue
-              </Button>
-            </form>
-            {submitError && <p className="text-xs text-status-error">{submitError}</p>}
-          </div>
-        )}
-
-        {state.phase === 'verifying' && (
-          <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Verifying the code…
-          </div>
-        )}
-
-        {state.phase === 'succeeded' && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-status-success">
-              <CheckCircle className="h-4 w-4" />
-              {state.account?.email ? `Signed in as ${state.account.email}` : 'Signed in'}
-              {state.account?.subscriptionType ? (
-                <span className="text-xs font-normal text-text-tertiary">· {state.account.subscriptionType}</span>
-              ) : null}
-            </div>
-            <div className="flex justify-end">
-              <Button size="sm" onClick={close} data-testid="claude-sign-in-done">
-                Done
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {state.phase === 'failed' && (
-          <div className="space-y-3">
-            <div className="flex items-start gap-2 text-sm text-status-error">
-              <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{state.error ?? 'The sign-in did not complete.'}</span>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={close}>
-                Cancel
-              </Button>
-              <Button size="sm" onClick={() => void start()} data-testid="claude-sign-in-retry-login">
-                Try again
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {isLivePhase(state) && (
           <div className="flex justify-end">
+            <Button size="sm" onClick={close} data-testid="claude-sign-in-done">
+              Done
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {state.phase === 'failed' && (
+        <div className="space-y-3">
+          <div className="flex items-start gap-2 text-sm text-status-error">
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{state.error ?? 'The sign-in did not complete.'}</span>
+          </div>
+          <div className="flex justify-end gap-2">
             <Button size="sm" variant="ghost" onClick={close}>
               Cancel
             </Button>
+            <Button size="sm" onClick={() => void start()} data-testid="claude-sign-in-retry-login">
+              Try again
+            </Button>
           </div>
-        )}
-      </div>
-    </Modal>
+        </div>
+      )}
+
+      {isLivePhase(state) && (
+        <div className="flex justify-end">
+          <Button size="sm" variant="ghost" onClick={close}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
