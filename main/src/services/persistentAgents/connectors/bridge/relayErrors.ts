@@ -8,7 +8,7 @@
  */
 import { computeBackoffMs, parseRetryAfter } from '../../../cloud/backoff';
 import { ConnectorError } from '../../connectorErrors';
-import { BRIDGE_COPY } from './copy';
+import { BRIDGE_COPY, isBridgeCopyKey } from './copy';
 import {
   BACKOFF_RATE_LIMITED,
   BACKOFF_RELAY_DISABLED,
@@ -261,8 +261,12 @@ export function toConnectorError(e: unknown, op: BridgeOp): ConnectorError {
   switch (e.kind) {
     case 'signed_out':
       return new ConnectorError('paused', BRIDGE_COPY.signed_out, { code: 'signed_out' });
-    case 'paused':
-      return new ConnectorError('paused', msg, { code: e.code });
+    case 'paused': {
+      // A gate refusal carries the same code and copy as the availability refusal it raced with; a
+      // stopped runtime reads as turned off, exactly like availability() reports it.
+      const code = e.code === 'stopped' ? 'disabled' : e.code;
+      return new ConnectorError('paused', isBridgeCopyKey(code) ? BRIDGE_COPY[code] : msg, { code });
+    }
     case 'device_revoked':
     case 'unauthorized':
       return new ConnectorError('device_auth', msg, { httpStatus, code: 'needs_sign_in' });

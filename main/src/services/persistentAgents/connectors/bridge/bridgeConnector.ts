@@ -173,9 +173,9 @@ export class BridgeConnector implements AgentConnector {
   private ensureCallable(h?: ConnectionHandle): BridgeRemoteV1 | null {
     const d = this.availabilityFor(h);
     if (!isConnectorCallable(d.availability)) {
-      // A relay-imposed block (429/503 Retry-After) is reported as rate_limited with its wait, not as a
-      // paused refusal: the shared error kinds define rate_limited to cover an exhausted local budget,
-      // and the caller then reschedules at retryAfterMs instead of waiting for an availability notice.
+      // Every non-callable availability is a paused refusal (no network, attempt not counted). A relay
+      // block (429/503 Retry-After) also carries its wait; the block's end flips availability back to
+      // callable and notifies the core, which wakes the paused work.
       if (d.code === 'blocked' && d.availability.retryAt !== null) {
         return this.throwBlocked(d.availability.retryAt, d.availability.message);
       }
@@ -190,7 +190,7 @@ export class BridgeConnector implements AgentConnector {
   }
 
   private throwBlocked(retryAt: string, message: string | null): never {
-    throw new ConnectorError('rate_limited', message ?? BRIDGE_COPY.rate_limited, {
+    throw new ConnectorError('paused', message ?? BRIDGE_COPY.rate_limited, {
       code: 'rate_limited', retryAfterMs: Math.max(0, Date.parse(retryAt) - this.now()),
     });
   }

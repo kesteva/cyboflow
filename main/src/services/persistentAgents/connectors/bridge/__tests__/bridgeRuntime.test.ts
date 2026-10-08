@@ -274,7 +274,10 @@ describe('BridgeRuntime', () => {
     expect(c.availability(ownH)).toEqual({
       state: 'unavailable', message: BRIDGE_COPY.relay_unavailable, retryAt: new Date(Date.now() + 30_000).toISOString(),
     });
-    await expect(c.pull(ownH, null, opts())).rejects.toMatchObject({ kind: 'rate_limited', code: 'rate_limited' });
+    // A relay block is a paused refusal (attempt not counted) that still carries its wait.
+    await expect(c.pull(ownH, null, opts())).rejects.toMatchObject({
+      kind: 'paused', code: 'rate_limited', retryAfterMs: 30_000, message: BRIDGE_COPY.relay_unavailable,
+    });
   });
 
   it('locked cloud: zero requests; recovers and sweeps on stateChanged', async () => {

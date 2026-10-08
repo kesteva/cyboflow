@@ -18,6 +18,10 @@ export const BRIDGE_COPY = {
 
 export type BridgeCopyKey = keyof typeof BRIDGE_COPY;
 
+export function isBridgeCopyKey(key: string): key is BridgeCopyKey {
+  return Object.prototype.hasOwnProperty.call(BRIDGE_COPY, key);
+}
+
 /** Gap note text (n = upper bound of expired messages). */
 export function gapNoteText(n: number): string {
   if (n === 1) {

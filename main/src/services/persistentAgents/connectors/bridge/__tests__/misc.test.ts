@@ -13,8 +13,10 @@ import {
   type BridgeRemoteV1,
 } from '../bridgeRemote';
 import { clampRetryAfterMs, DOORBELL_BACKOFF, BACKOFF_TRANSIENT } from '../constants';
+import { BRIDGE_COPY } from '../copy';
 import { BRIDGE_DEFINITION } from '../descriptor';
 import { buildHttpInstructionBrief } from '../instructionBrief';
+import { RelayHttpError, toConnectorError } from '../relayErrors';
 import { BudgetAbortError, BudgetWaitTimeoutError, RequestBudget } from '../requestBudget';
 
 const ch = (code: number): string => String.fromCharCode(code);
@@ -218,5 +220,26 @@ describe('descriptor', () => {
       id: 'bridge', kind: 'bridge', version: 1, credentialVendor: null,
       transports: ['relay-mcp', 'relay-http'], limits: { maxMessageBytes: 65536, maxLinks: 20 },
     });
+  });
+});
+
+describe('toConnectorError gate refusals', () => {
+  const gate = (code: string): RelayHttpError => new RelayHttpError({ status: 0, code, kind: 'paused', sent: false });
+
+  it('a stopped runtime reads as turned off, with the availability copy', () => {
+    const e = toConnectorError(gate('stopped'), 'pull');
+    expect([e.kind, e.code, e.message]).toEqual(['paused', 'disabled', BRIDGE_COPY.disabled]);
+  });
+
+  it('each gate code carries its availability copy', () => {
+    for (const code of ['disabled', 'signed_out', 'locked', 'needs_sign_in', 'needs_update', 'not_entitled'] as const) {
+      const e = toConnectorError(gate(code), 'send');
+      expect([e.kind, e.code, e.message, e.maybeDelivered]).toEqual(['paused', code, BRIDGE_COPY[code], false]);
+    }
+  });
+
+  it('an unknown gate code keeps the generic message', () => {
+    const e = toConnectorError(gate('mystery'), 'pull');
+    expect([e.kind, e.code, e.message]).toEqual(['paused', 'mystery', 'Bridge pull failed (mystery)']);
   });
 });
