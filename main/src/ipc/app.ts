@@ -2,6 +2,7 @@ import { IpcMain, shell } from 'electron';
 import type { AppServices } from './types';
 import { getDemoSandboxPath, DEMO_PROJECT_NAME, DEMO_REMOTE_URL } from '../services/demo/demoEnvironment';
 import { isSafeExternalOpenTarget } from './artifactFrameGuard';
+import { requestRelaunchOnQuit } from '../utils/relaunchIntent';
 
 export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app } = services;
@@ -54,7 +55,15 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
   // once at startup, so flipping it requires a fresh boot). exit(0) skips the
   // graceful before-quit drain on purpose: this is a user-requested restart,
   // mirroring how Electron docs pair relaunch() with exit().
-  ipcMain.handle('app:relaunch', () => {
+  // `graceful` (the cloud keychain "Restart cyboflow" button, reachable while
+  // runs are live) quits through the drain instead; the relaunch is armed where
+  // the process actually exits (utils/relaunchIntent).
+  ipcMain.handle('app:relaunch', (_event, opts?: { graceful?: boolean }) => {
+    if (opts?.graceful === true) {
+      requestRelaunchOnQuit();
+      app.quit();
+      return;
+    }
     app.relaunch();
     app.exit(0);
   });

@@ -120,8 +120,8 @@ interface ElectronAPI {
   // System utilities
   openExternal: (url: string) => Promise<void>;
 
-  // Relaunch the app (demo-mode toggle applies on next boot)
-  relaunch: () => Promise<void>;
+  // Relaunch the app (demo-mode toggle applies on next boot). `graceful` quits through the quit drain.
+  relaunch: (opts?: { graceful?: boolean }) => Promise<void>;
 
   // Session management
   sessions: {

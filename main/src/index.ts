@@ -243,6 +243,7 @@ import { composeWebViewer } from './webViewerComposition';
 import { composeCloudAccount } from './cloudAccountComposition';
 import { composePersistentAgents } from './persistentAgentsComposition';
 import { wireBridgeConnector } from './services/persistentAgents/connectors/bridge';
+import { armRelaunchIfRequested, cancelRelaunchOnQuit } from './utils/relaunchIntent';
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 import { stripInheritedRunEnv } from './utils/inheritedRunEnv';
 import { formatProcessWarning } from './utils/processWarning';
@@ -3539,9 +3540,12 @@ app.on('before-quit', (event) => {
       // so flush the geometry explicitly or the last ≤500ms of resize is lost.
       archiveProgressManager.clearAll();
       windowStatePersistence?.flush();
+      armRelaunchIfRequested(() => app.relaunch());
       app.exit(0);
+    } else {
+      // Otherwise, the quit is cancelled and app continues (and a requested restart is dropped)
+      cancelRelaunchOnQuit();
     }
-    // Otherwise, the quit is cancelled and app continues
     return;
   }
 
@@ -3554,12 +3558,16 @@ app.on('before-quit', (event) => {
     drain: drainOnQuit,
     finish: () => {
       quitDrainState = 'drained';
+      armRelaunchIfRequested(() => app.relaunch());
       app.quit();
     },
     // Backstop for a post-will-quit hang (see QUIT_EXIT_WATCHDOG_MS): the drain
     // deadline bounds OUR teardown, not what Electron does after the re-issued
     // quit. If the process is still here by then, nothing graceful is left.
-    forceExit: () => app.exit(0),
+    forceExit: () => {
+      armRelaunchIfRequested(() => app.relaunch());
+      app.exit(0);
+    },
     logger: consoleQuitDrainLogger,
   });
 });

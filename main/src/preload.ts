@@ -274,8 +274,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System utilities
   openExternal: (url: string): Promise<IPCResponse> => ipcRenderer.invoke('openExternal', url),
 
-  // Relaunch the app (demo-mode toggle applies on next boot)
-  relaunch: (): Promise<void> => ipcRenderer.invoke('app:relaunch'),
+  // Relaunch the app (demo-mode toggle applies on next boot). `graceful` quits through the quit drain.
+  relaunch: (opts?: { graceful?: boolean }): Promise<void> => ipcRenderer.invoke('app:relaunch', opts),
 
   // Session management
   sessions: {
