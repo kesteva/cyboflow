@@ -334,11 +334,10 @@ export function ConnectAgentDialog({
     if (isOpen) void loadConnectors();
   }, [isOpen, cloud, loadConnectors]);
 
-  // A "sign in again" demand (from a not_signed_in / device_revoked failure) clears once the cloud display moves on.
-  const cloudDisplay = cloud?.available === true ? cloud.display : null;
+  // A "sign in again" demand (from a not_signed_in / device_revoked failure) clears once the cloud status is replaced.
   useEffect(() => {
     setForceSignIn(false);
-  }, [cloudDisplay]);
+  }, [cloud]);
 
   const pairingAgent: AgentViewT | null =
     state.step === 'pairing' ? (agents.find((a) => a.id === state.agentId) ?? null) : null;

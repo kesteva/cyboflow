@@ -4,7 +4,7 @@ import { Button } from '../ui/Button';
 import { PERSISTENT_AGENT_MAX_MESSAGE_BYTES } from '../../../../shared/types/persistentAgents';
 import type { LocalFailure } from '../../stores/persistentAgentsStore';
 import { utf8ByteLength } from './agentsEnvFormat';
-import { failureCopy } from './agentsVocabulary';
+import { failureCopyAndUnlock } from './agentsVocabulary';
 import type { AgentViewT, SendResult } from './types';
 
 const MAX_ROWS_PX = 8 * 20;
@@ -51,7 +51,7 @@ export function ThreadComposer({
         requestAnimationFrame(grow);
       } else {
         setFailure({
-          copy: failureCopy(res).copy,
+          copy: failureCopyAndUnlock(res).copy,
           reconnect: res.error === 'connection_revoked' && c?.kind === 'bridge',
         });
       }

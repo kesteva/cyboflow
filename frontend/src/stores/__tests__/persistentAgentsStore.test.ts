@@ -356,12 +356,21 @@ describe('persistentAgentsStore: mutations', () => {
     expect(listAgentsQuery.mock.calls.length).toBe(before + 3);
   });
 
-  it('does not refresh agents when the mutation reports a failure', async () => {
-    archiveMutate.mockResolvedValue({ ok: false, error: 'not_found', message: 'gone' });
+  it('does not refresh agents when the mutation reports a non-not_found failure', async () => {
+    archiveMutate.mockResolvedValue({ ok: false, error: 'invalid', message: 'bad' });
     const before = listAgentsQuery.mock.calls.length;
     const res = await store.getState().archiveAgent('a1');
     expect(res.ok).toBe(false);
     await advance(0);
     expect(listAgentsQuery.mock.calls.length).toBe(before);
+  });
+
+  it('refreshes agents when the mutation reports not_found', async () => {
+    archiveMutate.mockResolvedValue({ ok: false, error: 'not_found', message: 'gone' });
+    const before = listAgentsQuery.mock.calls.length;
+    const res = await store.getState().archiveAgent('a1');
+    expect(res.ok).toBe(false);
+    await advance(0);
+    expect(listAgentsQuery.mock.calls.length).toBe(before + 1);
   });
 });

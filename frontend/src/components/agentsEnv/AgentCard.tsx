@@ -10,7 +10,7 @@ import { useCloudAccountStore } from '../../stores/cloudAccountStore';
 import { CapabilityChips } from './CapabilityChips';
 import { HealthDot } from './HealthDot';
 import { VendorAvatar } from './VendorAvatar';
-import { failureCopy, kindChipLabel } from './agentsVocabulary';
+import { failureCopyAndUnlock, kindChipLabel } from './agentsVocabulary';
 import type { AgentViewT, ConnectionViewT, RetiredConnectionViewT } from './types';
 
 /** Health for a connection row (card, rail, thread header). */
@@ -118,7 +118,7 @@ export function AgentCard({
     setNotice(null);
     const res = await disconnect(agent.id);
     if (!res.ok) {
-      setError(failureCopy(res).copy);
+      setError(failureCopyAndUnlock(res).copy);
     } else if (res.remoteRevoke === 'pending') {
       setNotice('Revoking on the Bridge — cyboflow keeps retrying.');
     }
@@ -128,7 +128,7 @@ export function AgentCard({
     setError(null);
     const res = await archiveAgent(agent.id);
     if (!res.ok) {
-      setError(failureCopy(res).copy);
+      setError(failureCopyAndUnlock(res).copy);
       return;
     }
     if (useNavigationStore.getState().agentsEnvAgentId === agent.id) {

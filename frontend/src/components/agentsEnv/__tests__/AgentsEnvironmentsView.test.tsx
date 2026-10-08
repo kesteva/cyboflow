@@ -1,3 +1,4 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { makeAgent, makeStatus } from './fixtures';
@@ -113,6 +114,15 @@ describe('AgentsEnvironmentsView', () => {
     rerender(<AgentsEnvironmentsView />);
     fireEvent.click(screen.getByTestId('agents-env-tab-environments'));
     expect(unlockMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls cloud.unlock once even under StrictMode double effects', async () => {
+    render(
+      <React.StrictMode>
+        <AgentsEnvironmentsView />
+      </React.StrictMode>,
+    );
+    await waitFor(() => expect(unlockMutate).toHaveBeenCalledTimes(1));
   });
 
   it('a rejecting unlock never surfaces', async () => {

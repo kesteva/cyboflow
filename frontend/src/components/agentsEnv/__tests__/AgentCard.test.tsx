@@ -27,6 +27,7 @@ vi.mock('../../../trpc/client', () => ({
 import { AgentCard } from '../AgentCard';
 import { AgentsTab } from '../AgentsTab';
 import { useNavigationStore } from '../../../stores/navigationStore';
+import { useCloudAccountStore } from '../../../stores/cloudAccountStore';
 import { usePersistentAgentsStore } from '../../../stores/persistentAgentsStore';
 
 const handlers = () => ({ onOpen: vi.fn(), onOpenPairing: vi.fn(), onReconnect: vi.fn() });
@@ -115,6 +116,16 @@ describe('AgentCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect…' }));
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This agent or connection no longer exists.');
+  });
+
+  it('a cloud_locked disconnect failure asks main to unlock the cloud sign-in', async () => {
+    const unlock = vi.fn().mockResolvedValue(null);
+    useCloudAccountStore.setState({ unlock });
+    disconnectMutate.mockResolvedValue({ ok: false, error: 'cloud_locked', message: 'locked' });
+    render(<AgentCard agent={makeAgent()} {...handlers()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect…' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(unlock).toHaveBeenCalledWith(false));
   });
 
   it('Open thread calls onOpen with the id', () => {

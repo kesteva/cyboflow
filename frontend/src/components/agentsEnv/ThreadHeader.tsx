@@ -9,7 +9,7 @@ import { ARCHIVE_MESSAGE, canReconnect, hasPairingDetails, healthFor } from './A
 import { CapabilityChips } from './CapabilityChips';
 import { HealthDot } from './HealthDot';
 import { VendorAvatar } from './VendorAvatar';
-import { failureCopy } from './agentsVocabulary';
+import { failureCopyAndUnlock } from './agentsVocabulary';
 import type { AgentViewT } from './types';
 
 export function ThreadHeader({
@@ -37,14 +37,14 @@ export function ThreadHeader({
   const stop = async (): Promise<void> => {
     setError(null);
     const res = await control(agent.id, 'interrupt');
-    if (!res.ok) setError(`Couldn't stop it: ${failureCopy(res).copy}`);
+    if (!res.ok) setError(`Couldn't stop it: ${failureCopyAndUnlock(res).copy}`);
   };
 
   const archive = async (): Promise<void> => {
     setError(null);
     const res = await archiveAgent(agent.id);
     if (!res.ok) {
-      setError(failureCopy(res).copy);
+      setError(failureCopyAndUnlock(res).copy);
       return;
     }
     if (useNavigationStore.getState().agentsEnvAgentId === agent.id) {

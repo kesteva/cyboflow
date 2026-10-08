@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Plus } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { trpc } from '../../trpc/client';
@@ -28,7 +28,10 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
 
   // Opening the pane is an implicit user action: ask main to decrypt the saved cloud sign-in (a no-op after
   // a failed decrypt, and when there is nothing to unlock).
+  const unlockSent = useRef(false);
   useEffect(() => {
+    if (unlockSent.current) return;
+    unlockSent.current = true;
     try {
       void Promise.resolve(trpc.cyboflow.cloud.unlock.mutate({ explicitRetry: false })).catch(() => {});
     } catch {

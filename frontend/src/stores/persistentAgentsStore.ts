@@ -264,6 +264,7 @@ export const usePersistentAgentsStore = create<PersistentAgentsState>((set, get)
     try {
       const res = await call();
       if (res.ok) void get().refreshAgents();
+      else if ((res as { error?: string }).error === 'not_found') void get().refreshAgents();
       return res;
     } catch (e) {
       return localFailure(e, fallback);
@@ -425,6 +426,7 @@ export const usePersistentAgentsStore = create<PersistentAgentsState>((set, get)
       try {
         const res = await trpc.cyboflow.persistentAgents.send.mutate({ agentId, text });
         if (res.ok) void refetchLatest(agentId);
+        else if (res.error === 'not_found') void get().refreshAgents();
         return res;
       } catch (e) {
         return localFailure(e, "Couldn't send. Try again.");

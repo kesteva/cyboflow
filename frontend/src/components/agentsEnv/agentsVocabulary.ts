@@ -1,4 +1,5 @@
 /** Vendor display vocabulary for the Agents & Environments surfaces. */
+import { useCloudAccountStore } from '../../stores/cloudAccountStore';
 import {
   vendorAppName as sharedVendorAppName,
   type ConnectorKind,
@@ -121,6 +122,13 @@ const VERBATIM: ReadonlySet<PersistentAgentsErrorCode> = new Set<PersistentAgent
   'upgrade_required',
   'conflict',
 ]);
+
+/** Failure copy that also asks main to decrypt the saved cloud sign-in when it is locked. */
+export function failureCopyAndUnlock(f: FailureLike): FailureCopy {
+  const fc = failureCopy(f);
+  if (fc.cloudLocked) void useCloudAccountStore.getState().unlock(false);
+  return fc;
+}
 
 /** Map a persistentAgents failure (or a renderer-local one) to its user-facing copy. */
 export function failureCopy(f: FailureLike): FailureCopy {
