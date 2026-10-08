@@ -81,7 +81,6 @@ import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import { useTaskRunLauncher } from '../Backlog/useTaskRunLauncher';
 import { ViewSurface } from '../../customViews/ViewSurface';
 import { scrollToSectionOrTop } from '../../customViews/scrollToSectionOrTop';
-import { useSectionPlaced } from '../../customViews/useSectionPlaced';
 import { ViewHeaderControls } from '../../customViews/edit/ViewHeaderControls';
 import { DraftBanner } from '../../customViews/edit/DraftBanner';
 import { ProviderUsageCards } from '../ReviewQueue/ProviderUsageCards';
@@ -124,14 +123,6 @@ const ELAPSED_TICK_MS = 30_000;
 /** How long a Recommended-actions jump keeps its target section ringed. */
 const FLASH_MS = 2000;
 
-export interface LandingHomeProps {
-  /**
-   * When true, the "Needs your input" section is scrolled into view on mount —
-   * used when the user arrives here from a "review queue" rail affordance.
-   */
-  focusQueue?: boolean;
-}
-
 /** Open a quick session AND mark it viewed, then refresh so its row updates promptly. */
 function openQuickSession(row: Pick<QuickSessionRow, 'sessionId' | 'runId' | 'projectId'>): void {
   useCyboflowStore.getState().setActiveQuickSession(row.sessionId, row.runId ?? undefined);
@@ -172,8 +163,8 @@ function openSessionRow(
   openQuickSession(row);
 }
 
-/** LandingHome — see {@link LandingHomeProps}. */
-export default function LandingHome({ focusQueue = false }: LandingHomeProps): React.JSX.Element {
+/** LandingHome — the cross-project home. */
+export default function LandingHome(): React.JSX.Element {
   // -------------------------------------------------------------------------
   // Store wiring
   // -------------------------------------------------------------------------
@@ -514,18 +505,13 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   }, [triage.readyForReview, experiments]);
 
   // -------------------------------------------------------------------------
-  // Section refs, focus + flash
+  // Section refs + flash
   // -------------------------------------------------------------------------
   const needsInputRef = React.useRef<HTMLElement>(null);
   const readyRef = React.useRef<HTMLDivElement>(null);
   // The page's own scroll container — the shell's center pane scrolls this
   // element, not `window`, so the scroll-to-top fallback has to target it.
   const pageScrollRef = React.useRef<HTMLDivElement>(null);
-  // Whether the ACTIVE view places each jump target at all. In Default mode
-  // both are always true, so the latch below keeps its original "wait for the
-  // data" behaviour; under a custom view that dropped the section, waiting
-  // would never end, so the jump falls back to the top of the page instead.
-  const needsInputPlaced = useSectionPlaced('review-queue', 'queue.needs-input');
   const [flashing, setFlashing] = React.useState(false);
   const flashTimer = React.useRef<number | null>(null);
 
@@ -535,19 +521,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     },
     [],
   );
-
-  // Scroll to the queue ONCE, the first render on which the section actually
-  // exists. The data arrives async, so a mount-only effect would fire while the
-  // section is still unmounted and silently do nothing; the latch lets later
-  // renders satisfy the request without re-scrolling on every state change.
-  const focusHandled = React.useRef(false);
-  React.useEffect(() => {
-    if (!focusQueue || focusHandled.current) return;
-    // Still waiting for the section's data to arrive — try again next render.
-    if (needsInputPlaced && needsInputRef.current === null) return;
-    focusHandled.current = true;
-    scrollToSectionOrTop(needsInputRef, pageScrollRef.current);
-  });
 
   const jumpToNeedsInput = (): void => {
     const outcome = scrollToSectionOrTop(needsInputRef, pageScrollRef.current, {
