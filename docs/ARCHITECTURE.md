@@ -688,6 +688,87 @@ Kill switch: `AppConfig.webViewer` `{ enabled, agentObserve, agentDrive, persist
 resolved by `ConfigManager.getWebViewerConfig()` and read live per call. Human browsing ships on;
 every agent capability ships off.
 
+### Agents & Environments (persistent agents, cyboflow cloud, Bridge)
+
+Long-lived third-party agents (a vendor's hosted coding agent, a chat assistant) that the user
+talks to in a thread, next to cyboflow's own runs. Dev builds only, behind Settings → Feature
+controls → Agents (`AppConfig.agents.enabled`; `ConfigManager.isAgentsEnabled()` = dev build AND
+the toggle). Three layers, each composed by a sibling of `index.ts` so `orchestrator/**` stays
+free of `electron` and `services/*`.
+
+**cyboflow cloud sign-in** (`main/src/services/cloud/`, migration 150 `cloud_account`). One device
+registration per data dir: a single-row table holding the account and device ids, the device code
+and name, entitlements and the device token as safeStorage ciphertext. Sign-in opens the system
+browser from MAIN against a one-shot loopback listener on `127.0.0.1` (random port) with PKCE S256
+and a `state` check, then registers the device; the login URL, `state`, verifier and token never
+cross IPC (the "Open the browser again" action asks main to re-open the in-memory URL). Consumers
+depend only on `CloudAccountHandle` (`cloudAccountHandle.ts`): synchronous `getDevice()`,
+`getToken()`, `getState()`, `getEntitlements()`, `markRevoked()`, `requestAccountRefresh()`,
+`onBeforeSignOut()` and the `signedIn`/`signedOut`/`revoked`/`stateChanged` events. **Unlock
+rule:** `getToken()` never decrypts — it returns null and `getState()` reports `locked` until
+`unlock()` succeeds, which happens only on a user action (sign-in, the Settings card, opening the
+Agents pane) or once, 10 s after boot, when agents are enabled. A denied or failed decrypt is
+never retried in the background; only an explicit **Try again** re-prompts the keychain. Composed in
+`cloudAccountComposition.ts` (returns null in release builds); the router `cyboflow.cloud`
+(`status`, `signIn`, `cancelSignIn`, `reopenSignInPage`, `signOut`, `refreshAccount`,
+`listDevices`, `openDevicesPage`, `unlock`, `onCloudChanged`) reaches it through
+`orchestrator/cloudAccountBridge.ts`. Expected HTTP failures come back as values in the status;
+5xx is always retryable and never signs the device out. `cloudAccountStore.ts` is the only writer
+of `cloud_account`.
+
+**Persistent-agents core** (`main/src/services/persistentAgents/`,
+`main/src/orchestrator/persistentAgents/`, migration 151: `persistent_agents`,
+`persistent_agent_connections`, `persistent_agent_messages`, `persistent_agent_events`,
+`persistent_agent_usage`, `vendor_credentials`). Vendor-neutral: an agent owns one current
+connection to a **connector** (`connectorContract.ts`: connect, verify, send, pull, acknowledge,
+reconcile, disconnect, optional repair), registered in a composition-owned `ConnectorRegistry`
+(never a process singleton). `PersistentAgentStore` is the sole writer of the six tables
+(`docs/CODE-PATTERNS.md` → the persistent-agent store chokepoint); every timestamp it writes is
+ISO-8601 UTC. The `InboundPump` (one unref'd 1 s tick; 5 s while active, backing off to 5 min when
+idle) pulls each live connection, applies the batch in one transaction and acknowledges only after
+the commit, so a crash re-serves a page and the store dedupes it. The `OutboxWorker` claims queued
+sends with a single-statement claim per agent; a send whose outcome is unknown at a restart becomes
+`ambiguous` and is reconciled by re-posting under the same message id. `ConnectionService` runs
+connect, verify (with an optional probe message), repair and the resumable connection **swap**
+(switch / reconnect): it drains the old connection before revoking it remotely, moves anything
+still queued to the new one with compare-and-set writes, and retries a failing remote revoke
+without blocking activation. Vendor API keys go through `CredentialService` and the
+`services/secrets/safeStorageSecret.ts` seam (add / rotate / forget; forget is refused while a
+connection references the key). The router `cyboflow.persistentAgents` reaches the service through
+`orchestrator/persistentAgentsBridge.ts`; **mutations return result unions** (`{ ok: true, … }` or a
+`PersistentAgentsFailure` with a fixed-text message), queries throw mapped `TRPCError`s. No secret
+crosses IPC: a Bridge one-time token and its pasteable instructions appear only in the responses of
+`connect`, `switchConnection` and `repairPairing`. Inbound vendor text is untrusted: the renderer
+shows it as escaped plain text with link domains, never through markdown or a tool-capable
+context. Composed in `persistentAgentsComposition.ts`; the toggle applies live (off stops the pump,
+outbox and connector wiring with all data kept; on resumes them), and `stop()` is the synchronous
+quit-drain hook.
+
+**Bridge connector** (`main/src/services/persistentAgents/connectors/bridge/`). Connects agents
+that cannot be called directly: the vendor's client talks to the cyboflow Bridge (an MCP URL plus
+a pairing code, or an HTTP base plus a one-time token) and this computer collects messages with
+the device token. The **pull is the source of truth** — paginated, cursor-and-epoch based, acked
+only after the core committed the page; an optional doorbell WebSocket only triggers earlier
+pulls, and everything works without it. Until the cloud sign-in is unlocked (about 10 s after
+start) Bridge calls see a locked account and make no request. A client-side request budget (100/min) backstops every call, and relay errors
+map onto the connector error kinds (a 5xx or network failure is retryable; a revoked device marks
+the cloud account revoked). The wire contract is `shared/types/relayProtocol.ts`: the desktop owns
+`shared/types/relayProtocol.ts`; changes are additive within a protocol version, land in both
+repos the same day and re-pin both checksum tests. `wireBridgeConnector` registers nothing when
+there is no cloud account (release builds).
+
+**Gating and kill switches.**
+
+| Condition | Cloud sign-in | Agents core | Nav / pane / credentials | Bridge network |
+|---|---|---|---|---|
+| Release build | not constructed | never boots | hidden | none |
+| Dev, toggle off | idle, no boot unlock | idle | hidden | none |
+| Dev, toggle on | boot unlock at +10 s | running | shown | per availability |
+| `CYBOFLOW_DISABLE_PERSISTENT_AGENTS=1` | no boot unlock (user actions still unlock) | no boot; reads answer, mutations refuse | hidden | none |
+| `CYBOFLOW_DISABLE_BRIDGE=1` | unaffected | running | Bridge connections show "Disabled on this computer" | none |
+
+Turning agents off keeps every row; turning it back on resumes the same device and connections.
+
 ### System view (`cyboflow.system` / `cyboflow.monitorReap` / `cyboflow.worktreeMonitor`)
 
 A top-level Sidebar view ("System · live process & worktree monitor"; `systemOpen` in

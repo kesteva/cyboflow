@@ -240,6 +240,9 @@ import { composePermissionTrust } from './permissionTrustComposition';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
+import { composeCloudAccount } from './cloudAccountComposition';
+import { composePersistentAgents } from './persistentAgentsComposition';
+import { wireBridgeConnector } from './services/persistentAgents/connectors/bridge';
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 import { stripInheritedRunEnv } from './utils/inheritedRunEnv';
 import { formatProcessWarning } from './utils/processWarning';
@@ -789,6 +792,7 @@ let sessionOps: SessionOpsLike | undefined;
  * subscriptions complete immediately.
  */
 let webViewerComposition: ReturnType<typeof composeWebViewer> | undefined;
+let persistentAgentsComposition: ReturnType<typeof composePersistentAgents> | undefined;
 
 /**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
@@ -1913,6 +1917,9 @@ async function initializeServices(): Promise<boolean> {
     runbookBootstrapStamps,
   });
 
+  const cloudAccount = composeCloudAccount({ db: cyboflowDb, configManager, logger: cyboflowLogger });
+  persistentAgentsComposition = composePersistentAgents({ db: cyboflowDb, configManager, logger: cyboflowLogger, cloud: cloudAccount?.handle ?? null, wireConnectors: wireBridgeConnector });
+  persistentAgentsComposition.start();
   // Native web viewer — the WebContentsView manager, its context menu and its
   // teardown hooks (docs/proposals/native-web-viewer.md). Composed in
   // webViewerComposition.ts (a sibling, like verifyComposition above: it imports
@@ -3315,6 +3322,7 @@ async function drainOnQuit(): Promise<void> {
   if (trackerSyncService) {
     trackerSyncService.stop();
   }
+  persistentAgentsComposition?.stop();
 
   // Kill every live OMP fleet worker. Unlike the other managers' children these
   // are REMOTE processes: nothing about this app exiting stops them, so without
