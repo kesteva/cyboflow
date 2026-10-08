@@ -30,7 +30,7 @@ import {
 } from '../../../../shared/types/persistentAgents';
 import type { DisconnectOutcome } from '../../orchestrator/persistentAgentsBridge';
 import type { AgentConnector, ConnectRequest, ConnectRequestInput, ConnectionHandle, ReconcileItem } from './connectorContract';
-import { ConnectorError, asConnectorError } from './connectorErrors';
+import { ConnectorError, asConnectorError, isNamedCoreError } from './connectorErrors';
 import type { ConnectorRegistry } from './connectorRegistry';
 import type { CredentialService } from './credentialService';
 import {
@@ -128,6 +128,29 @@ export class ConnectionService {
     }
   }
 
+  /**
+   * Classify a failed connector call. A named core error passes through unchanged (the router maps it by
+   * name); anything else becomes a ConnectorError. Non-ConnectorError causes and `permanent` failures are
+   * reported (environment kinds are not). `auth` marks the connection when `authConnectionId` is given.
+   */
+  private async connectorFailure(
+    seam: string,
+    err: unknown,
+    connector: { id: string; version: number },
+    authConnectionId: string | null,
+  ): Promise<Error> {
+    if (isNamedCoreError(err)) return err;
+    const e = asConnectorError(err);
+    if (e.kind === 'auth' && authConnectionId !== null) await this.onAuthFailure(authConnectionId, e);
+    const unexpected = !(err instanceof ConnectorError);
+    if (unexpected || e.kind === 'permanent') {
+      this.deps.captureSeamError(seam, unexpected ? err : e, {
+        connectorId: connector.id, connectorVersion: String(connector.version), errorKind: e.kind,
+      });
+    }
+    return e;
+  }
+
   private rememberPairing(connectionId: string, payload: PairingPayload | null): void {
     if (!payload) return;
     const parsed = payload.pairingExpiresAt ? Date.parse(payload.pairingExpiresAt) : NaN;
@@ -194,7 +217,7 @@ export class ConnectionService {
       outcome = await connector.connect(req, { signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
     } catch (err) {
       await this.deps.store.abortConnectionCreate(req.connectionId, 'Could not create the connection').catch(() => undefined);
-      throw asConnectorError(err);
+      throw await this.connectorFailure('connector-connect', err, connector.definition, null);
     }
     try {
       await this.deps.store.completeConnectionCreate(req.connectionId, outcome);
@@ -207,6 +230,9 @@ export class ConnectionService {
       await this.deps.store.abortConnectionCreate(req.connectionId, 'Could not save the connection').catch(() => undefined);
       throw err;
     }
+    // Disconnected, archived or cancelled while the remote create was outstanding: the row is revoked and
+    // completeConnectionCreate queued the new remote object's revoke. Its pairing code is never handed out.
+    if (this.deps.store.getConnectionRow(req.connectionId)?.state === 'revoked') return null;
     this.rememberPairing(req.connectionId, outcome.pairing);
     this.deps.pump.noteActive(req.connectionId);
     this.deps.pump.kick(req.connectionId);
@@ -248,14 +274,7 @@ export class ConnectionService {
     try {
       outcome = await connector.verify(h, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     } catch (err) {
-      const e = asConnectorError(err);
-      if (e.kind === 'auth') await this.onAuthFailure(connectionId, e);
-      if (!(err instanceof ConnectorError) || e.kind === 'permanent') {
-        this.deps.captureSeamError('connector-verify', err instanceof ConnectorError ? e : err, {
-          connectorId: h.connectorId, connectorVersion: String(h.connectorVersion), errorKind: e.kind,
-        });
-      }
-      throw e;
+      throw await this.connectorFailure('connector-verify', err, { id: h.connectorId, version: h.connectorVersion }, connectionId);
     }
     const { probeQueued } = await this.deps.store.applyVerifyOutcome(connectionId, outcome);
     this.deps.pump.kick(connectionId);
@@ -533,9 +552,7 @@ export class ConnectionService {
     try {
       await connector.control(h, verb, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     } catch (err) {
-      const e = asConnectorError(err);
-      if (e.kind === 'auth') await this.onAuthFailure(cur.id, e);
-      throw e;
+      throw await this.connectorFailure('connector-control', err, { id: h.connectorId, version: h.connectorVersion }, cur.id);
     }
   }
 
@@ -553,9 +570,7 @@ export class ConnectionService {
     try {
       r = await connector.repairPairing(h, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     } catch (err) {
-      const e = asConnectorError(err);
-      if (e.kind === 'auth') await this.onAuthFailure(connectionId, e);
-      throw e;
+      throw await this.connectorFailure('connector-repair', err, { id: h.connectorId, version: h.connectorVersion }, connectionId);
     }
     await this.deps.store.applyRepair(connectionId, r);
     this.rememberPairing(connectionId, r.pairing);

@@ -153,13 +153,15 @@ export class OutboxWorker {
     // 3. Claim loop.
     for (;;) {
       if (this.stopped || !this.deps.isRunning()) return;
-      const current = store.getCurrentConnection(agentId);
-      const currentHandle = current ? this.deps.buildHandle(current.id) : null;
-      const currentConnector = currentHandle ? registry.get(currentHandle.connectorId) : undefined;
-      if (currentHandle && currentConnector && !isConnectorCallable(currentConnector.availability(currentHandle))) return;
-      if (!store.hasClaimable(agentId, this.nowIso())) return;
+      // Gate on, and budget against, the connection the next claim will send through: usually the current
+      // one, but a probe on a swap target goes through that target.
+      const targetId = store.peekClaimableConnection(agentId, this.nowIso());
+      if (targetId === null) return;
+      const targetHandle = this.deps.buildHandle(targetId);
+      const targetConnector = targetHandle ? registry.get(targetHandle.connectorId) : undefined;
+      if (targetHandle && targetConnector && !isConnectorCallable(targetConnector.availability(targetHandle))) return;
 
-      const key = currentHandle && currentConnector ? budgetKeyFor(budget, currentConnector, currentHandle) : `agent:${agentId}`;
+      const key = targetHandle && targetConnector ? budgetKeyFor(budget, targetConnector, targetHandle) : `agent:${agentId}`;
       if (!(await budget.take(key, BUDGET_WAIT_MS))) return;
       if (this.stopped || !this.deps.isRunning()) {
         budget.refund(key);

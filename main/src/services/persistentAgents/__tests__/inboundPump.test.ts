@@ -373,4 +373,36 @@ describe('InboundPump', () => {
     expect(log).toHaveLength(2);
   });
 
+  it('drainNow of a connection with no pump entry holds it: a mid-drain kick never pulls concurrently', async () => {
+    h.pump.start();
+    await tick(0);
+    const { connectionId } = await seedConn();
+    expect(h.pump._entries().has(connectionId)).toBe(false);
+    const log = recordPulls();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const pull = fake.connector.pull.bind(fake.connector);
+    fake.connector.pull = async (hh, cursor, o) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try { return await pull(hh, cursor, o); } finally { inFlight -= 1; }
+    };
+    let release: () => void = () => undefined;
+    fake.script.pushPull(() => new Promise<InboundBatch>((r) => { release = () => r(emptyBatch()); }));
+    const p = h.pump.drainNow(connectionId);
+    await tick(0);
+    expect(log).toHaveLength(1);
+    // A kick refreshes targets and creates the entry while the drain is still pulling.
+    h.pump.kick(connectionId);
+    expect(h.pump._entries().has(connectionId)).toBe(true);
+    await tick(0);
+    expect(log).toHaveLength(1);
+    release();
+    expect(await p).toEqual({ pages: 1, complete: true });
+    await tick(0);
+    // The kick is honoured once the drain let go.
+    expect(log).toHaveLength(2);
+    expect(maxInFlight).toBe(1);
+  });
+
 });

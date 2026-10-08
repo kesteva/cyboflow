@@ -18,6 +18,10 @@ async function connectNative(fake: FakeConnector, secret = SECRET): Promise<{ ag
   return { ...r, credentialId };
 }
 
+/** Serializes spy calls including Error messages and causes (JSON.stringify alone renders an Error as {}). */
+const dump = (calls: unknown): string =>
+  JSON.stringify(calls, (_k, v: unknown) => (v instanceof Error ? { name: v.name, message: v.message, cause: v.cause } : v));
+
 const connState = (id: string): string =>
   (h.raw.prepare('SELECT state FROM persistent_agent_connections WHERE id = ?').get(id) as { state: string }).state;
 const credState = (id: string): string =>
@@ -41,6 +45,7 @@ describe('CredentialService', () => {
     expect(JSON.stringify(view)).not.toContain(SECRET);
     expect(JSON.stringify(h.credentials.list())).not.toContain(SECRET);
     expect(JSON.stringify(h.logger.calls)).not.toContain(SECRET);
+    expect(dump(h.capture.mock.calls)).not.toContain(SECRET);
     const stored = h.raw.prepare('SELECT secret_ciphertext AS c FROM vendor_credentials').get() as { c: Buffer };
     expect(stored.c.toString('utf8')).toBe(`enc:${SECRET}`);
     expect(await h.credentials.secret(view.id)).toBe(SECRET);
@@ -124,12 +129,18 @@ describe('CredentialService', () => {
     await expect(h.credentials.secret(credentialId)).rejects.toBeInstanceOf(CredentialUndecryptableError);
     expect(credState(credentialId)).toBe('undecryptable');
     expect(connState(connectionId)).toBe('auth_failed');
+    const lastError = (h.raw.prepare('SELECT last_error AS e FROM persistent_agent_connections WHERE id = ?').get(connectionId) as { e: string }).e;
+    expect(lastError).toBe('Stored key cannot be decrypted on this computer');
     broken = false;
     await h.credentials.rotate({ id: credentialId, secret: 'sk-ant-NEW-KEY-654321' });
     expect(credState(credentialId)).toBe('ok');
     await pullOnce(fake, connectionId);
     expect(connState(connectionId)).toBe('verified');
     expect(await h.credentials.secret(credentialId)).toBe('sk-ant-NEW-KEY-654321');
+    for (const s of [SECRET, 'sk-ant-NEW-KEY-654321']) {
+      expect(dump(h.logger.calls)).not.toContain(s);
+      expect(dump(h.capture.mock.calls)).not.toContain(s);
+    }
   });
 
   it('SecretsUnavailableError on decrypt is rethrown without marking the row', async () => {

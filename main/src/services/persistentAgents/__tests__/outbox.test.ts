@@ -199,6 +199,30 @@ describe('OutboxWorker', () => {
     expect(sends(fake)).toBe(1);
   });
 
+  it('a probe on a swap target is gated and budgeted by the target connection, not the current one', async () => {
+    const fake = createFakeConnector();
+    const other = createFakeConnector({ id: 'bridge-b', budget: { key: 'bridge-b-key', ratePerMinute: 20, capacity: 20 } });
+    h = makeHarness({ connectors: [fake, other] });
+    const { agentId } = await connectBridge(fake);
+    const { connectionId: n } = await h.store.createPendingConnection(agentId, {
+      kind: 'bridge', connectorId: 'bridge-b', connectorVersion: 1, transport: 'relay-mcp', credentialId: null,
+      descriptor: other.registration.definition.capabilities,
+    });
+    await h.store.completeConnectionCreate(n, {
+      remoteId: 'remote-b', remote: {}, transport: 'relay-mcp', inboundCursor: null, relayEpoch: 1, pairing: null, facts: [],
+    });
+    expect(connRow(n).swap_state).toBe('awaiting_verify');
+    const { messageId } = await h.store.enqueueOutbound(agentId, { kind: 'text', body: 'probe', links: [], isProbe: true, connectionId: n });
+    // The current connection's connector is unavailable; the target's is fine.
+    fake.script.setAvailability({ state: 'signed_out', message: 'Signed out', retryAt: null });
+    const take = vi.spyOn(h.budget, 'take');
+    await h.outbox._runForTest(agentId);
+    expect(sends(other)).toBe(1);
+    expect(sends(fake)).toBe(0);
+    expect(take.mock.calls.map((c) => c[0])).toEqual(['bridge-b-key']);
+    expect(msgRow(messageId).send_state).not.toBe('queued');
+  });
+
   it('a run with nothing claimable takes no token', async () => {
     const fake = createFakeConnector();
     h = makeHarness({ connectors: [fake] });

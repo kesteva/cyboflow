@@ -4,9 +4,10 @@ import { REVOKE_BACKOFF_MS, REVOKE_MAX_ATTEMPTS } from '../connectionService';
 import {
   ConnectorUnavailableError,
   ControlNotSupportedError,
+  CredentialUndecryptableError,
   NoSwapInProgressError,
 } from '../errors';
-import type { InboundBatch, ReconcileResult, SendReceipt } from '../connectorContract';
+import type { ConnectRequest, InboundBatch, ReconcileResult, SendReceipt } from '../connectorContract';
 import { buildConnectionView } from '../../../orchestrator/persistentAgents/views';
 import type { SwapState } from '../../../../../shared/types/persistentAgents';
 import { createFakeConnector, emptyBatch, makeHarness, type Harness } from './fakeConnector';
@@ -91,6 +92,40 @@ describe('connect', () => {
     });
     await h.connections.recoverOnBoot();
     expect((h.raw.prepare('SELECT COUNT(*) AS n FROM persistent_agents').get() as { n: number }).n).toBe(0);
+  });
+
+  it('disconnect while the first remote create is outstanding revokes the late remote object and hands out no pairing', async () => {
+    const fake = createFakeConnector({ now: () => h.clock.now() });
+    h = makeHarness({ connectors: [fake] });
+    fake.script.pushConnect(async () => {
+      const req = fake.calls.find((c) => c.method === 'connect')?.args[0] as ConnectRequest;
+      const res = await h.connections.disconnect(req.agent.id);
+      expect(res.remoteRevoke).toBe('pending');
+      return {
+        remoteId: 'remote-late', remote: { label: 'x' }, transport: 'relay-mcp', inboundCursor: null, relayEpoch: 1, facts: [],
+        pairing: {
+          kind: 'bridge', connectionId: req.connectionId, transport: 'relay-mcp', mcpUrl: 'https://relay.example.test/mcp/late',
+          httpBase: 'https://relay.example.test/http/late', pairingCode: 'LATE-CODE-0001',
+          pairingExpiresAt: new Date(h.clock.now().getTime() + 600_000).toISOString(), oneTimeToken: null, instructionBrief: null,
+        },
+      };
+    });
+    const r = await connectBridge();
+    expect(r.pairing).toBeNull();
+    expect(h.connections.getPairing(r.connectionId)).toBeNull();
+    expect(conn(r.connectionId)).toMatchObject({ state: 'revoked', remote_id: 'remote-late', remote_revoke_state: 'pending', connect_state: null });
+    await h.connections.runRevokeRetries();
+    expect(fake.calls.some((c) => c.method === 'disconnect' && c.handle?.connectionId === r.connectionId)).toBe(true);
+    expect(conn(r.connectionId)?.remote_revoke_state).toBe('done');
+  });
+
+  it('an unexpected connect failure is wrapped as a retryable ConnectorError and reported', async () => {
+    const fake = createFakeConnector();
+    h = makeHarness({ connectors: [fake] });
+    const boom = new TypeError('boom');
+    fake.script.pushConnect(boom);
+    await expect(connectBridge()).rejects.toMatchObject({ name: 'ConnectorError', kind: 'retryable' });
+    expect(h.capture).toHaveBeenCalledWith('connector-connect', boom, expect.objectContaining({ connectorId: 'bridge', errorKind: 'retryable' }));
   });
 
   it('connect refused when connector unavailable (signed out)', async () => {
@@ -317,6 +352,18 @@ describe('disconnect / control / repair', () => {
     expect(first.remoteRevoke).toBe('done');
     const second = await h.connections.disconnect(b.agentId);
     expect(second.offerForgetCredentialId).toBe(credentialId);
+  });
+
+  it('a named core error from a connector call passes through unchanged and is not reported', async () => {
+    const fake = createFakeConnector({ kind: 'native', withControl: true });
+    h = makeHarness({ connectors: [fake] });
+    const { agentId, connectionId } = await connectNative();
+    fake.script.pushVerify(new CredentialUndecryptableError(credOf(connectionId)));
+    await expect(h.connections.verify(connectionId)).rejects.toBeInstanceOf(CredentialUndecryptableError);
+    fake.connector.control = async () => { throw new CredentialUndecryptableError(credOf(connectionId)); };
+    await expect(h.connections.control(agentId, 'interrupt')).rejects.toMatchObject({ name: 'CredentialUndecryptableError' });
+    expect(h.capture).not.toHaveBeenCalled();
+    expect(conn(connectionId)?.state).not.toBe('auth_failed');
   });
 
   it('control allowed when declared even if unobserved; refused when undeclared', async () => {

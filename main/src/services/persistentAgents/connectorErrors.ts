@@ -9,6 +9,7 @@
  */
 import {
   CONNECTOR_ERROR_KINDS,
+  PERSISTENT_AGENTS_ERROR_NAMES,
   type ConnectorErrorKind,
 } from '../../../../shared/types/persistentAgents';
 
@@ -50,4 +51,16 @@ export class ConnectorError extends Error {
 export function asConnectorError(err: unknown): ConnectorError {
   if (err instanceof ConnectorError) return err;
   return new ConnectorError('retryable', 'Unexpected connector failure', { maybeDelivered: true, cause: err });
+}
+
+const CORE_ERROR_NAMES: ReadonlySet<string> = new Set<string>(
+  Object.values(PERSISTENT_AGENTS_ERROR_NAMES).filter((n) => n !== PERSISTENT_AGENTS_ERROR_NAMES.connector),
+);
+
+/**
+ * A named core error a connector let through (e.g. CredentialUndecryptableError or SecretsUnavailableError
+ * from `secret()`). The router maps these by name, so they are rethrown unchanged rather than wrapped.
+ */
+export function isNamedCoreError(err: unknown): err is Error {
+  return err instanceof Error && !(err instanceof ConnectorError) && CORE_ERROR_NAMES.has(err.name);
 }

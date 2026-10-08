@@ -110,6 +110,8 @@ export class InboundPump {
   private lastRevoke = 0;
   private lastOutbound = new Map<string, number>();
   private readonly pendingActive = new Map<string, number>();
+  /** Connections a final drain holds (keyed by connectionId, independent of the entry map). */
+  private readonly draining = new Map<string, Promise<void>>();
   private unsubscribe: (() => void) | null = null;
   private lastTargetRows: ReturnType<PersistentAgentStore['listPumpTargets']> = [];
   /** Bumped on every start/stop so a stale arm callback never re-arms a stopped pump. */
@@ -171,7 +173,8 @@ export class InboundPump {
       return;
     }
     entry.nextDueAt = this.nowMs();
-    queueMicrotask(() => this.runDue());
+    // While a final drain holds the connection, runDue skips it; the drain re-runs runDue when it ends.
+    if (!this.draining.has(connectionId)) queueMicrotask(() => this.runDue());
   }
 
   kickAll(filter?: (t: PumpTarget) => boolean): void {
@@ -218,12 +221,22 @@ export class InboundPump {
   ): Promise<{ pages: number; complete: boolean }> {
     const maxPages = opts.maxPages ?? 50;
     let entry = this.entries.get(connectionId);
-    while (entry?.inFlight) {
-      await entry.inFlight.catch(() => undefined);
+    for (;;) {
+      const other = this.draining.get(connectionId);
+      if (other) {
+        await other;
+      } else if (entry?.inFlight) {
+        await entry.inFlight.catch(() => undefined);
+      } else {
+        break;
+      }
       entry = this.entries.get(connectionId);
     }
     let release: () => void = () => undefined;
     const hold = new Promise<void>((resolve) => { release = resolve; });
+    // Held by id for the whole drain: an entry created mid-drain (target refresh, kick) is never pulled
+    // concurrently by runDue, so the cursor and acknowledge order cannot regress.
+    this.draining.set(connectionId, hold);
     if (entry) entry.inFlight = hold;
     let pages = 0;
     let complete = false;
@@ -253,14 +266,16 @@ export class InboundPump {
         connectionId, error: err instanceof ConnectorError ? err.kind : 'unexpected',
       });
     } finally {
+      this.draining.delete(connectionId);
       if (entry && entry.inFlight === hold) {
         entry.inFlight = null;
         if (entry.rerun) {
           entry.rerun = false;
           entry.nextDueAt = this.nowMs();
-          queueMicrotask(() => this.runDue());
         }
       }
+      const now = this.entries.get(connectionId);
+      if (now && !now.inFlight && now.nextDueAt <= this.nowMs()) queueMicrotask(() => this.runDue());
       release();
     }
     return { pages, complete };
@@ -370,7 +385,7 @@ export class InboundPump {
     let inFlight = 0;
     for (const e of this.entries.values()) if (e.inFlight) inFlight += 1;
     const due = [...this.entries.values()]
-      .filter((e) => !e.inFlight && e.nextDueAt <= now && e.rateLimitedUntilMs <= now)
+      .filter((e) => !e.inFlight && !this.draining.has(e.connectionId) && e.nextDueAt <= now && e.rateLimitedUntilMs <= now)
       .sort((a, b) => a.nextDueAt - b.nextDueAt);
     for (const e of due) {
       if (inFlight >= MAX_CONCURRENT_PULLS) break;

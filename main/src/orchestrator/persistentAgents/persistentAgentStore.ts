@@ -37,6 +37,7 @@ import {
   USAGE_COVERAGES,
   VERIFIED_FLAGS,
   BRIDGE_STALE_AFTER_MS,
+  REVOKE_SURFACE_AFTER,
   isOneOf,
   type ConnectorCapabilities,
   type CredentialReference,
@@ -1280,7 +1281,11 @@ export class PersistentAgentStore {
     });
   }
 
-  /** Current connection → revoked (+ remote revoke pending); an in-progress swap fails. Queued outbound stays queued. */
+  /**
+   * Current connection → revoked (+ remote revoke pending); an in-progress swap fails. Queued outbound stays queued.
+   * A connection whose remote create is still outstanding keeps remote_revoke_state NULL: the remote object
+   * appears a moment later and completeConnectionCreate queues its revoke (otherwise it would be orphaned).
+   */
   async disconnectAgent(agentId: string): Promise<DisconnectAgentResult> {
     return this.write(agentId, () => {
       const now = this.iso();
@@ -1291,8 +1296,10 @@ export class PersistentAgentStore {
         `UPDATE persistent_agent_connections
             SET state = 'revoked',
                 remote_revoke_state = CASE WHEN remote_revoke_state IS NOT NULL THEN remote_revoke_state
+                                           WHEN connect_state = 'creating_remote' THEN NULL
                                            WHEN remote_id IS NULL THEN 'done' ELSE 'pending' END,
-                remote_revoke_next_at = CASE WHEN remote_revoke_state IS NOT NULL THEN remote_revoke_next_at ELSE ? END,
+                remote_revoke_next_at = CASE WHEN remote_revoke_state IS NOT NULL THEN remote_revoke_next_at
+                                             WHEN connect_state = 'creating_remote' THEN NULL ELSE ? END,
                 updated_at = ?
           WHERE id = ?`,
       ).run(now, now, cur.id);
@@ -1481,9 +1488,9 @@ export class PersistentAgentStore {
       `SELECT * FROM persistent_agent_connections
         WHERE is_current = 1 OR swap_state IS NOT NULL OR swap_error IS NOT NULL
            OR (is_current = 0 AND swap_state IS NULL
-               AND (remote_revoke_state = 'gave_up' OR (remote_revoke_state = 'pending' AND remote_revoke_attempts >= 3)))
+               AND (remote_revoke_state = 'gave_up' OR (remote_revoke_state = 'pending' AND remote_revoke_attempts >= ?)))
         ORDER BY created_at ASC, rowid ASC`,
-    ).all() as ConnectionRow[];
+    ).all(REVOKE_SURFACE_AFTER) as ConnectionRow[];
     const connections = new Map<string, AgentConnectionsData>();
     const lastSwitchAt = new Map<string, string>();
     for (const a of agents) connections.set(a.id, { current: null, swap: null, retired: [], lastSwitchError: null });
@@ -1493,7 +1500,8 @@ export class PersistentAgentStore {
       if (c.is_current === 1) entry.current = c;
       if (c.swap_state !== null) entry.swap = c;
       if (c.is_current === 0 && c.swap_state === null
-        && (c.remote_revoke_state === 'gave_up' || (c.remote_revoke_state === 'pending' && c.remote_revoke_attempts >= 3))) {
+        && (c.remote_revoke_state === 'gave_up'
+          || (c.remote_revoke_state === 'pending' && c.remote_revoke_attempts >= REVOKE_SURFACE_AFTER))) {
         entry.retired.push(c);
       }
       if (c.swap_error !== null && (lastSwitchAt.get(c.agent_id) ?? '') <= c.updated_at) {
@@ -1580,6 +1588,17 @@ export class PersistentAgentStore {
   /** Exactly the claim's predicates: would claimOutbound(agentId, now) return a row? */
   hasClaimable(agentId: string, nowIso: string): boolean {
     return this.stmt(CLAIM_INNER_SELECT).get(agentId, nowIso, nowIso) !== undefined;
+  }
+
+  /**
+   * The connection of the row claimOutbound(agentId, now) would claim next (null when none): a probe on a
+   * swap target is sent through that target, not through the current connection.
+   */
+  peekClaimableConnection(agentId: string, nowIso: string): string | null {
+    const r = this.stmt(
+      `SELECT connection_id FROM persistent_agent_messages WHERE id = (${CLAIM_INNER_SELECT})`,
+    ).get(agentId, nowIso, nowIso) as { connection_id: string | null } | undefined;
+    return r?.connection_id ?? null;
   }
 
   /** Ambiguous rows due for reconcile; `nowIso` null ignores their schedule (swap reconcile). */

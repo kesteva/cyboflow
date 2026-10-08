@@ -26,7 +26,7 @@ import {
   InvalidAgentInputError,
 } from './errors';
 
-export const UNDECRYPTABLE_COPY = 'Stored key cannot be decrypted on this machine';
+export const UNDECRYPTABLE_COPY = 'Stored key cannot be decrypted on this computer';
 
 export interface CredentialServiceDeps {
   store: PersistentAgentStore;
