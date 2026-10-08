@@ -63,8 +63,8 @@ export function ClaudeSignInCard({ onSignedIn, retryLabel, onRetry }: ClaudeSign
             <>
               <div className="font-semibold text-text-primary">Claude sign-in required</div>
               <p className="text-sm text-text-secondary">
-                Your Claude Code login has expired, so this session can&apos;t reach Claude. Sign in again to
-                continue — the conversation is kept.
+                Claude Code isn&apos;t signed in (or its login expired), so this conversation can&apos;t reach
+                Claude. Sign in to continue — the conversation is kept.
               </p>
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button size="sm" onClick={() => setDialogOpen(true)} data-testid="claude-sign-in-open">
