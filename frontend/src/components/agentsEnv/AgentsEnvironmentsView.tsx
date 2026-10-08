@@ -41,6 +41,8 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
 
   const selected = agentId !== null ? (agents.find((a) => a.id === agentId) ?? null) : null;
   const missing = agentId !== null && selected === null;
+  // An open thread owns the whole pane: its own header carries the way back, so the pane chrome hides.
+  const threadOpen = tab === 'agents' && agentId !== null && selected !== null;
 
   // An archived or deleted agent: drop the selection once the list is authoritative.
   useEffect(() => {
@@ -61,54 +63,58 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
 
   return (
     <div data-testid="agents-env-view" className="flex h-full w-full flex-col overflow-hidden bg-bg-primary">
-      <div className="flex items-center gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">
-        <div className="min-w-0">
-          <div className="eyebrow text-text-tertiary">Machines · persistent agents</div>
-          <h2 className="text-base font-bold text-text-primary">Agents &amp; Environments</h2>
-        </div>
-        <div className="ml-auto">
-          {tab === 'agents' && agentId === null && (
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Plus className="h-3 w-3" />}
-              data-testid="agents-connect-button"
-              onClick={() => setConnectOpen(true)}
-            >
-              Connect an agent
-            </Button>
-          )}
-        </div>
-      </div>
+      {!threadOpen && (
+        <>
+          <div className="flex items-center gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">
+            <div className="min-w-0">
+              <div className="eyebrow text-text-tertiary">Machines · persistent agents</div>
+              <h2 className="text-base font-bold text-text-primary">Agents &amp; Environments</h2>
+            </div>
+            <div className="ml-auto">
+              {tab === 'agents' && agentId === null && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Plus className="h-3 w-3" />}
+                  data-testid="agents-connect-button"
+                  onClick={() => setConnectOpen(true)}
+                >
+                  Connect an agent
+                </Button>
+              )}
+            </div>
+          </div>
 
-      <div
-        role="tablist"
-        aria-label="Agents & Environments"
-        onKeyDown={onTabKey}
-        className="flex gap-5 border-b border-border-primary px-7"
-      >
-        {TABS.map((t) => {
-          const active = tab === t.id;
-          return (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              tabIndex={active ? 0 : -1}
-              data-testid={`agents-env-tab-${t.id}`}
-              onClick={() => setTab(t.id)}
-              className={`py-2 font-mono text-[11px] transition-colors ${
-                active
-                  ? 'border-b-2 border-interactive text-text-primary'
-                  : 'border-b-2 border-transparent text-text-tertiary hover:text-text-primary'
-              }`}
-            >
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
+          <div
+            role="tablist"
+            aria-label="Agents & Environments"
+            onKeyDown={onTabKey}
+            className="flex gap-5 border-b border-border-primary px-7"
+          >
+            {TABS.map((t) => {
+              const active = tab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  tabIndex={active ? 0 : -1}
+                  data-testid={`agents-env-tab-${t.id}`}
+                  onClick={() => setTab(t.id)}
+                  className={`py-2 font-mono text-[11px] transition-colors ${
+                    active
+                      ? 'border-b-2 border-interactive text-text-primary'
+                      : 'border-b-2 border-transparent text-text-tertiary hover:text-text-primary'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden">
         {tab === 'environments' ? (

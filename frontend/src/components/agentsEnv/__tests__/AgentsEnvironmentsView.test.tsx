@@ -81,8 +81,12 @@ describe('AgentsEnvironmentsView', () => {
     teardown = usePersistentAgentsStore.getState().init();
     render(<AgentsEnvironmentsView />);
     expect(await screen.findByTestId('persistent-agent-thread')).toBeInTheDocument();
+    // The thread owns the pane: no pane title, no tab strip.
+    expect(screen.queryByText('Agents & Environments')).toBeNull();
+    expect(screen.queryByRole('tablist')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'All agents' }));
     expect(useNavigationStore.getState().agentsEnvAgentId).toBeNull();
+    expect(screen.getByRole('tablist')).toBeInTheDocument();
   });
 
   it('an unknown selected agent is cleared once the list is ready', async () => {
