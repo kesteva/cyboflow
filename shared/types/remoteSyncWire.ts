@@ -174,32 +174,5 @@ export type ChecksumResponse =
   | { status: 'stale'; maxSeq: number }
   | { status: 'match' | 'mismatch'; maxSeq: number; serverHash: string };
 
-/** `GET /v1/account`. */
-export type AccountResponse = { accountId: string; displayLogin: string | null; entitlements: string[] };
-
-/** `GET /v1/devices` → `{ devices: DeviceInfo[] }`. */
-export type DeviceInfo = {
-  id: string;
-  code: string;
-  name: string;
-  platform: string | null;
-  appVersion: string | null;
-  createdAt: number;
-  lastSeenAt: number | null;
-  revokedAt: number | null;
-  /** True for the calling device. */
-  current: boolean;
-};
-
-/** `POST /v1/devices/register` (201). `userId` is a deprecated alias of `accountId`. */
-export type DeviceRegistration = {
-  token: string;
-  deviceId: string;
-  deviceCode: string;
-  deviceName: string;
-  accountId: string;
-  scopes: string[];
-};
-
 /** Every non-2xx response body. */
 export type SyncErrorBody = { error: string; message?: string; details?: unknown };

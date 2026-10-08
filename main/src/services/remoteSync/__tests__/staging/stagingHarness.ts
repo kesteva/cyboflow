@@ -120,16 +120,7 @@ export class Machine {
     const adapter = dbAdapter(this.db);
     this.router = new TaskChangeRouter(adapter);
     this.store = new SyncStore(adapter);
-    this.store.putAccount({
-      origin: STAGING_ORIGIN,
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      deviceId: device.deviceId,
-      deviceName: device.name,
-      deviceCode: device.code,
-      tokenCiphertext: 'plaintext-in-tests',
-      lastHlc: null,
-    });
+    this.store.putDevice({ accountId: workspace.accountId, deviceId: device.deviceId, deviceCode: device.code, active: true });
     this.projectId = this.svc.createProject(`Project on ${device.name}`, join(this.dir, 'repo')).id;
     this.client = new SyncHttpClient({
       origin: STAGING_ORIGIN,

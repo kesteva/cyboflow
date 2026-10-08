@@ -13,19 +13,20 @@
 -- Every statement is IF NOT EXISTS: the ledger tracks by filename, so a
 -- renumbered copy re-applies wholesale.
 
--- This machine's sign-in. One row (singleton = 1) at most.
-CREATE TABLE IF NOT EXISTS remote_sync_account (
-  singleton         INTEGER PRIMARY KEY,
-  origin            TEXT NOT NULL,
-  account_id        TEXT NOT NULL,
-  workspace_id      TEXT,             -- not returned by registration; sync creates it lazily
-  device_id         TEXT NOT NULL,
-  device_name       TEXT NOT NULL,
-  device_code       TEXT NOT NULL,
-  token_ciphertext  TEXT NOT NULL,
-  last_hlc          TEXT,
-  created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
+-- This machine's sync identity, one row at most. The sign-in itself (token,
+-- account, device registration) belongs to the shared cyboflow cloud module
+-- (migration 150's cloud_account); sync mirrors the device it syncs as here, so
+-- TaskChangeRouter.mintRef can read the ref code synchronously. `active` = 1
+-- while sync is on for this machine AND a device is signed in (ruling D2: then
+-- EVERY project mints TASK-<CODE>-NNN). last_hlc survives sync being turned off.
+CREATE TABLE IF NOT EXISTS remote_sync_device (
+  singleton    INTEGER PRIMARY KEY,
+  account_id   TEXT NOT NULL,
+  device_id    TEXT NOT NULL,
+  device_code  TEXT NOT NULL,
+  active       INTEGER NOT NULL DEFAULT 0,
+  last_hlc     TEXT,
+  updated_at   TEXT NOT NULL
 );
 
 -- One row per local project that is opted in. Removing the local project

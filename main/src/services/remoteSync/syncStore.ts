@@ -79,14 +79,13 @@ export interface SyncProjectRow {
   lastSyncAt: string | null;
 }
 
-export interface SyncAccountRow {
-  origin: string;
+/** The device this machine syncs as (remote_sync_device). */
+export interface SyncDeviceRow {
   accountId: string;
-  workspaceId: string | null;
   deviceId: string;
-  deviceName: string;
   deviceCode: string;
-  tokenCiphertext: string;
+  /** Sync on AND signed in: every project mints device-prefixed refs. */
+  active: boolean;
   lastHlc: string | null;
 }
 
@@ -136,46 +135,43 @@ export class SyncStore {
     return (this.db.transaction(fn) as () => T)();
   }
 
-  // ---- account -------------------------------------------------------------
+  // ---- device --------------------------------------------------------------
 
-  getAccount(): SyncAccountRow | null {
-    const r = this.db.prepare('SELECT * FROM remote_sync_account WHERE singleton = 1').get() as
+  getDevice(): SyncDeviceRow | null {
+    const r = this.db.prepare('SELECT * FROM remote_sync_device WHERE singleton = 1').get() as
       | Record<string, unknown>
       | undefined;
     if (!r) return null;
     return {
-      origin: r.origin as string,
       accountId: r.account_id as string,
-      workspaceId: (r.workspace_id as string | null) ?? null,
       deviceId: r.device_id as string,
-      deviceName: r.device_name as string,
       deviceCode: r.device_code as string,
-      tokenCiphertext: r.token_ciphertext as string,
+      active: r.active === 1,
       lastHlc: (r.last_hlc as string | null) ?? null,
     };
   }
 
-  putAccount(a: SyncAccountRow): void {
-    const now = new Date().toISOString();
+  /** Record the device sync runs as. A different device keeps last_hlc (HLCs only move forward). */
+  putDevice(d: Omit<SyncDeviceRow, 'lastHlc'>): void {
     this.db
       .prepare(
-        `INSERT INTO remote_sync_account
-           (singleton, origin, account_id, workspace_id, device_id, device_name, device_code, token_ciphertext, last_hlc, created_at, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO remote_sync_device (singleton, account_id, device_id, device_code, active, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?)
          ON CONFLICT(singleton) DO UPDATE SET
-           origin = excluded.origin, account_id = excluded.account_id, workspace_id = excluded.workspace_id,
-           device_id = excluded.device_id, device_name = excluded.device_name, device_code = excluded.device_code,
-           token_ciphertext = excluded.token_ciphertext, last_hlc = excluded.last_hlc, updated_at = excluded.updated_at`,
+           account_id = excluded.account_id, device_id = excluded.device_id, device_code = excluded.device_code,
+           active = excluded.active, updated_at = excluded.updated_at`,
       )
-      .run(a.origin, a.accountId, a.workspaceId, a.deviceId, a.deviceName, a.deviceCode, a.tokenCiphertext, a.lastHlc, now, now);
+      .run(d.accountId, d.deviceId, d.deviceCode, d.active ? 1 : 0, new Date().toISOString());
   }
 
-  deleteAccount(): void {
-    this.db.prepare('DELETE FROM remote_sync_account').run();
+  setDeviceActive(active: boolean): void {
+    this.db
+      .prepare('UPDATE remote_sync_device SET active = ?, updated_at = ? WHERE singleton = 1')
+      .run(active ? 1 : 0, new Date().toISOString());
   }
 
   setLastHlc(hlc: string): void {
-    this.db.prepare('UPDATE remote_sync_account SET last_hlc = ? WHERE singleton = 1').run(hlc);
+    this.db.prepare('UPDATE remote_sync_device SET last_hlc = ? WHERE singleton = 1').run(hlc);
   }
 
   // ---- projects ------------------------------------------------------------

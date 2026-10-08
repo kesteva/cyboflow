@@ -10,10 +10,8 @@
 import {
   SYNC_EPOCH_HEADER,
   SYNC_PROTOCOL_HEADER,
-  type AccountResponse,
   type ChecksumResponse,
   type ConflictRecord,
-  type DeviceInfo,
   type FeedPage,
   type FileConflictRequest,
   type HeadResponse,
@@ -94,18 +92,6 @@ export class SyncHttpClient {
 
   head(): Promise<SyncResult<HeadResponse>> {
     return this.request<HeadResponse>('GET', '/v1/head');
-  }
-
-  account(): Promise<SyncResult<AccountResponse>> {
-    return this.request<AccountResponse>('GET', '/v1/account');
-  }
-
-  listDevices(): Promise<SyncResult<{ devices: DeviceInfo[] }>> {
-    return this.request('GET', '/v1/devices');
-  }
-
-  signOutSelf(): Promise<SyncResult<{ revoked: boolean }>> {
-    return this.request('DELETE', '/v1/devices/self');
   }
 
   async listProjects(): Promise<SyncResult<{ projects: RemoteProject[] }>> {

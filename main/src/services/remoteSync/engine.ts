@@ -74,7 +74,7 @@ export class RemoteSyncEngine {
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? (() => Date.now());
-    this.clock = new HlcClock(deps.deviceId, { now: this.now, last: deps.store.getAccount()?.lastHlc ?? null });
+    this.clock = new HlcClock(deps.deviceId, { now: this.now, last: deps.store.getDevice()?.lastHlc ?? null });
     this.applier = new RemoteApplier({
       db: deps.db,
       router: deps.router,
@@ -641,6 +641,6 @@ export class RemoteSyncEngine {
 
   private persistClock(): void {
     const last = this.clock.last;
-    if (last && this.deps.store.getAccount()) this.deps.store.setLastHlc(last);
+    if (last && this.deps.store.getDevice()) this.deps.store.setLastHlc(last);
   }
 }

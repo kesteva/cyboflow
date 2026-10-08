@@ -1910,7 +1910,7 @@ export class TaskChangeRouter {
       )
       .get(projectId, type) as { next_seq: number };
     const number = String(counter.next_seq).padStart(3, '0');
-    // Once this machine is signed in to sync, EVERY project mints
+    // Once sync is on for this machine (and it is signed in), EVERY project mints
     // device-prefixed refs (TASK-WRK-103), sharing the same counter, so refs
     // minted offline on two machines can never collide (overview, "Refs").
     const code = this.deviceRefCode();
@@ -1918,14 +1918,15 @@ export class TaskChangeRouter {
   }
 
   /**
-   * This device's sync ref code, or null when the machine is not signed in
-   * (no remote_sync_account row, or a pre-149 schema). Read per mint: mints
-   * are rare, and sign-in / sign-out must take effect without a restart.
+   * This device's sync ref code, or null unless sync is on and signed in
+   * (remote_sync_device.active, kept by RemoteSyncService; null on a pre-149
+   * schema). Read per mint: mints are rare, and turning sync on or off must
+   * take effect without a restart.
    */
   private deviceRefCode(): string | null {
     try {
       const row = this.db
-        .prepare('SELECT device_code AS code FROM remote_sync_account WHERE singleton = 1')
+        .prepare('SELECT device_code AS code FROM remote_sync_device WHERE singleton = 1 AND active = 1')
         .get() as { code?: unknown } | undefined;
       return typeof row?.code === 'string' && DEVICE_CODE_RE.test(row.code) ? row.code : null;
     } catch {

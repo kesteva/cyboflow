@@ -29,7 +29,7 @@ describe('migration 149 — remote sync tables', () => {
       .map((r) => r.name);
     expect(names).toEqual(
       expect.arrayContaining([
-        'remote_sync_account',
+        'remote_sync_device',
         'remote_sync_projects',
         'remote_sync_entities',
         'remote_sync_tombstones',

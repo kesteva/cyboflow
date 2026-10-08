@@ -343,10 +343,9 @@ describe('applyRemoteRefRenames', () => {
 describe('device-prefixed minting', () => {
   function signIn(codeValue: string): void {
     db.prepare(
-      `INSERT OR REPLACE INTO remote_sync_account
-         (singleton, origin, account_id, device_id, device_name, device_code, token_ciphertext, created_at, updated_at)
-       VALUES (1, 'https://x', 'acc', 'dev', 'Studio', ?, 'c', ?, ?)`,
-    ).run(codeValue, T0, T0);
+      `INSERT OR REPLACE INTO remote_sync_device (singleton, account_id, device_id, device_code, active, updated_at)
+       VALUES (1, 'acc', 'dev', ?, 1, ?)`,
+    ).run(codeValue, T0);
   }
 
   it('prefixes every project once signed in, sharing the existing counter', async () => {
@@ -359,13 +358,16 @@ describe('device-prefixed minting', () => {
     expect(row('ideas', b.taskId)!.ref).toBe('IDEA-WRK-001');
   });
 
-  it('ignores a malformed code and reverts to plain refs after sign-out', async () => {
+  it('ignores a malformed code and reverts to plain refs when sync goes inactive or the device is gone', async () => {
     signIn('wr1');
     const a = await router.applyChange(projectId, { actor: 'user', entityType: 'task', title: 'a' });
     expect(row('tasks', a.taskId)!.ref).toBe('TASK-001');
     signIn('HOM');
-    db.prepare(`DELETE FROM remote_sync_account`).run();
+    db.prepare(`UPDATE remote_sync_device SET active = 0`).run();
     const b = await router.applyChange(projectId, { actor: 'user', entityType: 'task', title: 'b' });
     expect(row('tasks', b.taskId)!.ref).toBe('TASK-002');
+    db.prepare(`DELETE FROM remote_sync_device`).run();
+    const c = await router.applyChange(projectId, { actor: 'user', entityType: 'task', title: 'c' });
+    expect(row('tasks', c.taskId)!.ref).toBe('TASK-003');
   });
 });

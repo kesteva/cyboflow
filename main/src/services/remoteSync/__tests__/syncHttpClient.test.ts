@@ -66,18 +66,12 @@ describe('SyncHttpClient requests', () => {
 
   it('hits the expected paths and methods for the other calls', async () => {
     const { client, fetchFn } = setup(() => json({}));
-    await client.account();
-    await client.listDevices();
-    await client.signOutSelf();
     await client.push('p', { batchId: 'b', ops: [] });
     await client.resolveConflict('p', 'c/1', 'keep');
     await client.trackerClaim({ key: 'k', label: 'l', action: 'claim' });
     await client.checksum('p', { atSeq: 1, hash: 'h' });
     const calls = fetchFn.mock.calls.map((c) => `${(c[1] as RequestInit).method} ${c[0] as string}`);
     expect(calls).toEqual([
-      'GET https://sync.example.com/v1/account',
-      'GET https://sync.example.com/v1/devices',
-      'DELETE https://sync.example.com/v1/devices/self',
       'POST https://sync.example.com/v1/projects/p/push',
       'POST https://sync.example.com/v1/projects/p/conflicts/c%2F1/resolve',
       'POST https://sync.example.com/v1/tracker-claims',
