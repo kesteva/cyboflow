@@ -1,11 +1,9 @@
 import { useState } from 'react';
 import { ArrowLeft, Square } from 'lucide-react';
 import { Button, IconButton } from '../ui/Button';
-import { ConfirmDialog } from '../ConfirmDialog';
 import { useNow } from '../../hooks/useNow';
-import { useNavigationStore } from '../../stores/navigationStore';
 import { usePersistentAgentsStore } from '../../stores/persistentAgentsStore';
-import { ARCHIVE_MESSAGE, canReconnect, hasPairingDetails, healthFor } from './AgentCard';
+import { canReconnect, hasPairingDetails, healthFor } from './AgentCard';
 import { CapabilityChips } from './CapabilityChips';
 import { HealthDot } from './HealthDot';
 import { VendorAvatar } from './VendorAvatar';
@@ -25,9 +23,7 @@ export function ThreadHeader({
 }): React.JSX.Element {
   const now = useNow(30_000);
   const control = usePersistentAgentsStore((s) => s.control);
-  const archiveAgent = usePersistentAgentsStore((s) => s.archiveAgent);
   const [error, setError] = useState<string | null>(null);
-  const [confirmArchive, setConfirmArchive] = useState(false);
 
   const c = agent.connection;
   const health = c !== null ? healthFor(agent, c, now) : null;
@@ -38,18 +34,6 @@ export function ThreadHeader({
     setError(null);
     const res = await control(agent.id, 'interrupt');
     if (!res.ok) setError(`Couldn't stop it: ${failureCopyAndUnlock(res).copy}`);
-  };
-
-  const archive = async (): Promise<void> => {
-    setError(null);
-    const res = await archiveAgent(agent.id);
-    if (!res.ok) {
-      setError(failureCopyAndUnlock(res).copy);
-      return;
-    }
-    if (useNavigationStore.getState().agentsEnvAgentId === agent.id) {
-      useNavigationStore.getState().selectPersistentAgent(null);
-    }
   };
 
   return (
@@ -81,9 +65,6 @@ export function ThreadHeader({
               Reconnect…
             </Button>
           )}
-          <Button variant="ghost" size="sm" data-testid="thread-archive" onClick={() => setConfirmArchive(true)}>
-            Archive…
-          </Button>
         </div>
       </div>
       <div data-testid="thread-connection-line" className="mt-1.5 flex items-start gap-2 text-[11px] text-text-secondary">
@@ -102,14 +83,6 @@ export function ThreadHeader({
           {error}
         </p>
       )}
-      <ConfirmDialog
-        isOpen={confirmArchive}
-        onClose={() => setConfirmArchive(false)}
-        onConfirm={() => void archive()}
-        title={`Archive ${agent.displayName}?`}
-        message={ARCHIVE_MESSAGE}
-        confirmText="Archive"
-      />
     </div>
   );
 }

@@ -89,7 +89,7 @@ export function hasPairingDetails(agent: AgentViewT): boolean {
 
 export const DISCONNECT_MESSAGE =
   "cyboflow revokes this agent's Bridge connection. Its thread stays here; use Reconnect to pair it again.";
-export const ARCHIVE_MESSAGE =
+const ARCHIVE_MESSAGE =
   'It leaves your agents list and the rail, and is disconnected first if it is still connected. Its thread is kept.';
 
 export function AgentCard({

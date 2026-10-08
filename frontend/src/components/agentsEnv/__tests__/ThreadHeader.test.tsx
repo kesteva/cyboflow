@@ -3,14 +3,12 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { cmaDescriptor, makeAgent, makeConnection } from './fixtures';
 
 let controlMutate: ReturnType<typeof vi.fn>;
-let archiveMutate: ReturnType<typeof vi.fn>;
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       persistentAgents: {
         control: { get mutate() { return controlMutate; } },
-        archiveAgent: { get mutate() { return archiveMutate; } },
         listAgents: { query: vi.fn().mockResolvedValue([]) },
       },
       cloud: { openDevicesPage: { mutate: vi.fn() } },
@@ -19,13 +17,11 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 import { ThreadHeader } from '../ThreadHeader';
-import { useNavigationStore } from '../../../stores/navigationStore';
 
 const props = () => ({ onBack: vi.fn(), onOpenPairing: vi.fn(), onReconnect: vi.fn() });
 
 beforeEach(() => {
   controlMutate = vi.fn().mockResolvedValue({ ok: true });
-  archiveMutate = vi.fn().mockResolvedValue({ ok: true });
 });
 
 describe('ThreadHeader', () => {
@@ -92,16 +88,12 @@ describe('ThreadHeader', () => {
     expect(screen.queryByTestId('thread-pairing-details')).toBeNull();
   });
 
-  it('Reconnect… for a revoked Bridge connection, and Archive… always', async () => {
+  it('Reconnect… for a revoked Bridge connection; archiving lives on the card, not the thread', () => {
     const p = props();
-    useNavigationStore.setState({ agentsEnvAgentId: 'a1' });
     render(<ThreadHeader agent={makeAgent({ connection: makeConnection({ state: 'revoked' }) })} {...p} />);
     fireEvent.click(screen.getByTestId('thread-reconnect'));
     expect(p.onReconnect).toHaveBeenCalledWith('a1');
-    fireEvent.click(screen.getByTestId('thread-archive'));
-    fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
-    await waitFor(() => expect(archiveMutate).toHaveBeenCalledWith({ agentId: 'a1' }));
-    await waitFor(() => expect(useNavigationStore.getState().agentsEnvAgentId).toBeNull());
+    expect(screen.queryByText(/Archive/)).toBeNull();
   });
 
   it('the back button reads All agents', () => {
