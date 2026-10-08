@@ -1,7 +1,10 @@
 /**
  * cyboflow.remoteSync sub-router — cross-machine backlog sync (dev builds only).
  *
- *   getStatus : query -> RemoteSyncStatus
+ *   getStatus         : query -> RemoteSyncStatus
+ *   syncNow           : mutation { projectId? } -> void
+ *   resumeAfterRewind : mutation { projectId } -> void
+ *   onChanged         : subscription -> RemoteSyncStatus
  *
  * A thin wrapper over the RemoteSyncFacade wired at boot. In a release build no
  * facade is wired, so every procedure answers as unavailable.
@@ -9,12 +12,35 @@
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*.
  */
+import { TRPCError } from '@trpc/server';
+import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
-import { getRemoteSyncFacade } from '../../remoteSyncBridge';
+import { eventToAsyncIterable } from './events';
+import { REMOTE_SYNC_CHANGED_CHANNEL, getRemoteSyncFacade, remoteSyncEvents } from '../../remoteSyncBridge';
+import type { RemoteSyncFacade } from '../../remoteSyncBridge';
 import type { RemoteSyncStatus } from '../../../../../shared/types/remoteSync';
+
+function requireFacade(): RemoteSyncFacade {
+  const facade = getRemoteSyncFacade();
+  if (!facade) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Remote sync is not available in this build' });
+  return facade;
+}
+
+const projectId = z.number().int().positive();
 
 export const remoteSyncRouter = router({
   getStatus: protectedProcedure.query((): RemoteSyncStatus => {
     return getRemoteSyncFacade()?.getStatus() ?? { available: false };
+  }),
+  syncNow: protectedProcedure.input(z.object({ projectId: projectId.optional() })).mutation(async ({ input }) => {
+    await requireFacade().syncNow(input.projectId);
+  }),
+  resumeAfterRewind: protectedProcedure.input(z.object({ projectId })).mutation(async ({ input }) => {
+    await requireFacade().resumeAfterRewind(input.projectId);
+  }),
+  onChanged: protectedProcedure.subscription(async function* ({ signal }): AsyncGenerator<RemoteSyncStatus> {
+    const abortSignal = signal ?? new AbortController().signal;
+    const source = eventToAsyncIterable<RemoteSyncStatus>(remoteSyncEvents, REMOTE_SYNC_CHANGED_CHANNEL, abortSignal);
+    for await (const status of source) yield status;
   }),
 });

@@ -67,7 +67,7 @@ export function RemoteSyncSection(): React.JSX.Element | null {
             <span
               data-testid="remote-sync-staging-badge"
               className="border border-interactive px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[.08em] text-interactive"
-              title={status.serverOrigin}
+              title={status.serverOrigin ?? undefined}
             >
               Staging
             </span>

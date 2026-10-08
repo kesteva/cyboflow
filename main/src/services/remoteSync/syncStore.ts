@@ -7,6 +7,7 @@
  * server), the dirty stamp D[f] (when the current local change was made) and
  * the inbox I[f] (a remote value not yet applied, with the reason it waits).
  */
+import type { RemoteSyncProjectState } from '../../../../shared/types/remoteSync';
 import type { DatabaseLike } from '../../orchestrator/types';
 import type { ConflictRecord } from '../../../../shared/types/remoteSyncWire';
 import type { SyncedEntityType } from './projection';
@@ -57,14 +58,7 @@ export interface SyncEntityState {
   pendingDelete: InboxDelete | null;
 }
 
-export type SyncProjectStatus =
-  | 'pending'
-  | 'active'
-  | 'paused'
-  | 'error'
-  | 'rewound'
-  | 'upgrade_required'
-  | 'storage_full';
+export type SyncProjectStatus = RemoteSyncProjectState;
 
 export interface SyncProjectRow {
   projectId: number;

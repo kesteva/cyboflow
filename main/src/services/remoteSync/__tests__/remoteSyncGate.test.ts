@@ -30,7 +30,9 @@ import {
 } from '../../../orchestrator/remoteSyncBridge';
 import { appRouter } from '../../../orchestrator/trpc/router';
 import { createContext } from '../../../orchestrator/trpc/context';
-import { REMOTE_SYNC_STAGING_ORIGIN } from '../../../../../shared/types/remoteSync';
+import { DatabaseService } from '../../../database/database';
+import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
+import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
 import type { AppConfig as MainAppConfig, UpdateConfigRequest } from '../../../types/config';
 import type { AppConfig as FrontendAppConfig } from '../../../../../frontend/src/types/config';
 
@@ -57,6 +59,14 @@ function configOpsFor(manager: ConfigManager): ConfigOpsLike {
     configManager: manager,
     claudeCodeManager: {} as unknown as AppServices['claudeCodeManager'],
   });
+}
+
+/** A service over a fresh database, with no cloud sign-in composed. */
+function serviceFor(manager: ConfigManager, dir: string): RemoteSyncService {
+  const svc = new DatabaseService(path.join(dir, 'sessions.db'));
+  svc.initialize();
+  const db = dbAdapter(svc.getDb());
+  return new RemoteSyncService({ db, router: new TaskChangeRouter(db), configManager: manager, cloud: null });
 }
 
 async function readPersisted(dir: string): Promise<{ remoteSync?: unknown }> {
@@ -125,7 +135,7 @@ describe('remote sync gate', () => {
 
     it('reports unavailable from the service even if a facade were wired', async () => {
       const manager = await managerWith({ remoteSync: { enabled: true } });
-      expect(new RemoteSyncService({ configManager: manager }).getStatus()).toEqual({ available: false });
+      expect(serviceFor(manager, tmpDir).getStatus()).toEqual({ available: false });
     });
 
     it('answers unavailable on the tRPC surface when no facade is wired', async () => {
@@ -137,16 +147,19 @@ describe('remote sync gate', () => {
   describe('dev build', () => {
     beforeEach(() => _setDevBuildForTesting(true));
 
-    it('is available, flag off by default, talking to staging', async () => {
+    it('is available, flag off by default, signed out', async () => {
       const manager = await managerWith(null);
       expect(manager.isRemoteSyncAvailable()).toBe(true);
       expect(manager.isRemoteSyncEnabled()).toBe(false);
-      expect(new RemoteSyncService({ configManager: manager }).getStatus()).toEqual({
+      expect(serviceFor(manager, tmpDir).getStatus()).toEqual({
         available: true,
         enabled: false,
-        serverOrigin: REMOTE_SYNC_STAGING_ORIGIN,
-        staging: true,
+        cloudState: 'signed_out',
+        device: null,
+        serverOrigin: null,
+        staging: false,
         signedIn: false,
+        projects: [],
       });
     });
 
@@ -177,7 +190,7 @@ describe('remote sync gate', () => {
 
     it('serves the wired facade on the tRPC surface', async () => {
       const manager = await managerWith({ remoteSync: { enabled: true } });
-      setRemoteSyncFacade(new RemoteSyncService({ configManager: manager }));
+      setRemoteSyncFacade(serviceFor(manager, tmpDir));
       const caller = appRouter.createCaller(createContext());
       expect(await caller.cyboflow.remoteSync.getStatus()).toMatchObject({ available: true, enabled: true });
     }, ROUTER_TIMEOUT_MS);

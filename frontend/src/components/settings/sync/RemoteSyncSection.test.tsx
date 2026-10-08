@@ -2,7 +2,7 @@ import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RemoteSyncStatus } from '../../../../../shared/types/remoteSync';
-import { REMOTE_SYNC_STAGING_ORIGIN } from '../../../../../shared/types/remoteSync';
+import { CLOUD_STAGING_ORIGIN } from '../../../../../shared/types/cloudOrigins';
 import { useConfigStore } from '../../../stores/configStore';
 
 const { getStatus } = vi.hoisted(() => ({ getStatus: vi.fn<() => Promise<RemoteSyncStatus>>() }));
@@ -17,9 +17,12 @@ function devStatus(overrides: Partial<Extract<RemoteSyncStatus, { available: tru
   return {
     available: true,
     enabled: false,
-    serverOrigin: REMOTE_SYNC_STAGING_ORIGIN,
+    cloudState: 'signed_out',
+    device: null,
+    serverOrigin: CLOUD_STAGING_ORIGIN,
     staging: true,
     signedIn: false,
+    projects: [],
     ...overrides,
   };
 }

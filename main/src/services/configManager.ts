@@ -4,7 +4,6 @@ import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
 import type { ResolvedWebViewerConfig } from '../../../shared/types/webViewer';
 import { WEB_VIEWER_DEFAULTS } from '../../../shared/types/webViewer';
-import { REMOTE_SYNC_STAGING_ORIGIN } from '../../../shared/types/remoteSync';
 import { isDevBuild } from '../utils/buildChannel';
 import {
   DEFAULT_RUN_TYPE_MODEL_FLOORS,
@@ -944,10 +943,5 @@ export class ConfigManager extends EventEmitter {
    */
   isRemoteSyncEnabled(): boolean {
     return this.isRemoteSyncAvailable() && this.config.remoteSync?.enabled === true;
-  }
-
-  /** The cyboflow-sync origin. Dev builds always talk to staging. */
-  getRemoteSyncServerOrigin(): string {
-    return REMOTE_SYNC_STAGING_ORIGIN;
   }
 }

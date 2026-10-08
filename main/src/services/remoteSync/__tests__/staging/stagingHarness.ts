@@ -18,14 +18,14 @@ import type Database from 'better-sqlite3';
 import { DatabaseService } from '../../../../database/database';
 import { TaskChangeRouter, type TaskChange } from '../../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
-import { REMOTE_SYNC_STAGING_ORIGIN } from '../../../../../../shared/types/remoteSync';
+import { CLOUD_STAGING_ORIGIN } from '../../../../../../shared/types/cloudOrigins';
 import { SYNC_PROTOCOL_HEADER } from '../../../../../../shared/types/remoteSyncWire';
 import { RemoteSyncEngine, type PassOutcome } from '../../engine';
 import { SyncHttpClient, type FetchLike } from '../../syncHttpClient';
 import { SyncStore } from '../../syncStore';
 
 export const STAGING_SECRET = process.env.CYBOFLOW_SYNC_STAGING_SECRET ?? '';
-export const STAGING_ORIGIN = (process.env.CYBOFLOW_SYNC_STAGING_ORIGIN ?? REMOTE_SYNC_STAGING_ORIGIN).replace(/\/$/, '');
+export const STAGING_ORIGIN = (process.env.CYBOFLOW_SYNC_STAGING_ORIGIN ?? CLOUD_STAGING_ORIGIN).replace(/\/$/, '');
 export const stagingEnabled = STAGING_SECRET.length > 0;
 
 interface ProvisionedDevice {

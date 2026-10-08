@@ -29,14 +29,28 @@ export interface RemoteSyncConfig {
 /** The complete set of storable keys; the config boundary iterates THIS. */
 export const REMOTE_SYNC_CONFIG_KEYS = ['enabled'] as const satisfies readonly (keyof RemoteSyncConfig)[];
 
-/**
- * The staging deployment: one origin, path-routed to the accounts Worker
- * (sign-in, device registry) and the sync Worker (`/v1/*`). Dev builds talk to it.
- */
-export const REMOTE_SYNC_STAGING_ORIGIN = 'https://cloud-staging.cyboflow.com';
+/** A synced project's row status (remote_sync_projects.status). */
+export type RemoteSyncProjectState =
+  | 'pending'
+  | 'active'
+  | 'paused'
+  | 'error'
+  | 'rewound'
+  | 'upgrade_required'
+  | 'storage_full';
 
-/** The wire protocol version every `/v1` call declares (`Cyboflow-Sync-Protocol`). */
-export const REMOTE_SYNC_PROTOCOL_VERSION = 1;
+export interface RemoteSyncProjectStatus {
+  projectId: number;
+  remoteProjectId: string | null;
+  status: RemoteSyncProjectState;
+  statusDetail: string | null;
+  lastSyncAt: string | null;
+  /** A pass is running right now. */
+  syncing: boolean;
+  /** Set while the project backs off after a failure (ISO). */
+  backoffUntil: string | null;
+  openConflicts: number;
+}
 
 /**
  * What the Settings → Integrations → Sync section renders from.
@@ -48,10 +62,14 @@ export type RemoteSyncStatus =
       available: true;
       /** The feature flag (`remoteSync.enabled`). */
       enabled: boolean;
-      /** The cyboflow-sync origin this build talks to. */
-      serverOrigin: string;
+      /** The shared cyboflow cloud sign-in's state (CloudHandleState). */
+      cloudState: string;
+      /** The signed-in device sync runs as. */
+      device: { name: string; code: string } | null;
+      /** The cloud origin the signed-in device talks to. */
+      serverOrigin: string | null;
       /** True when `serverOrigin` is the staging deployment (drives the "Staging" badge). */
       staging: boolean;
-      /** Whether this device holds a device token. Always false until sign-in lands. */
       signedIn: boolean;
+      projects: RemoteSyncProjectStatus[];
     };

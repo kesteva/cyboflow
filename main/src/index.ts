@@ -1731,9 +1731,6 @@ async function initializeServices(): Promise<boolean> {
   // the seam. See main/src/orchestrator/trackerSyncBridge.ts.
   setTrackerSyncFacade(trackerSyncService);
 
-  // Cross-machine backlog sync (dev builds only) — see remoteSyncWiring.ts.
-  wireRemoteSync(configManager);
-
   // Daily sessions.db backup (7-day retention) — see databaseBackupService.ts
   // for why hourly-tick + file-existence-guard rather than a 24h timer, and
   // why raw_events is archived once into <backups>/raw-events deltas instead
@@ -1922,6 +1919,8 @@ async function initializeServices(): Promise<boolean> {
   });
 
   const cloudAccount = composeCloudAccount({ db: cyboflowDb, configManager, logger: cyboflowLogger });
+  // Cross-machine backlog sync (dev builds only) — see remoteSyncWiring.ts.
+  wireRemoteSync({ db: cyboflowDb, router: taskChangeRouter, reviewRouter: reviewItemRouter, configManager, cloud: cloudAccount?.handle ?? null, logger: cyboflowLogger });
   persistentAgentsComposition = composePersistentAgents({ db: cyboflowDb, configManager, logger: cyboflowLogger, cloud: cloudAccount?.handle ?? null, wireConnectors: wireBridgeConnector });
   persistentAgentsComposition.start();
   // Native web viewer — the WebContentsView manager, its context menu and its
