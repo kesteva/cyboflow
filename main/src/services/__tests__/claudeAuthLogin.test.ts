@@ -3,9 +3,12 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import type { ChildProcess } from 'child_process';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import {
   ClaudeAuthLoginService,
   parseAuthStatus,
+  probeClaudeAuthStatus,
   resolveClaudeAuthBinary,
   resolveDevBundledClaudePath,
   type ClaudeAuthLoginDependencies,
@@ -276,5 +279,37 @@ describe('binary resolution', () => {
   it('names claude.exe on Windows', () => {
     expect(resolveDevBundledClaudePath(() => 'C:\\repo\\node_modules\\@anthropic-ai\\claude-agent-sdk-win32-x64\\package.json', 'win32', 'x64'))
       .toMatch(/claude\.exe$/);
+  });
+});
+
+describe('probeClaudeAuthStatus', () => {
+  // A real exec against a stub script: the bug was in how execFile's non-zero
+  // exit was handled, which a mocked probe cannot see.
+  const posixOnly = process.platform === 'win32' ? it.skip : it;
+
+  function stubCli(stdout: string, exitCode: number): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-auth-status-'));
+    const file = path.join(dir, 'claude');
+    fs.writeFileSync(file, `#!/bin/sh\ncat <<'JSON'\n${stdout}\nJSON\nexit ${exitCode}\n`, { mode: 0o755 });
+    return file;
+  }
+
+  posixOnly('reads loggedIn:false from a logged-out CLI that exits 1', async () => {
+    const binary = stubCli('{"loggedIn": false, "authMethod": "none"}', 1);
+    await expect(probeClaudeAuthStatus(binary)).resolves.toEqual({ loggedIn: false, email: null, subscriptionType: null });
+  });
+
+  posixOnly('reads a logged-in account from exit 0', async () => {
+    const binary = stubCli('{"loggedIn": true, "email": "me@example.com", "subscriptionType": "max"}', 0);
+    await expect(probeClaudeAuthStatus(binary)).resolves.toEqual({ loggedIn: true, email: 'me@example.com', subscriptionType: 'max' });
+  });
+
+  posixOnly('answers null (unknown) when the CLI prints no JSON', async () => {
+    const binary = stubCli("error: unknown command 'auth'", 1);
+    await expect(probeClaudeAuthStatus(binary)).resolves.toBeNull();
+  });
+
+  it('answers null when there is no binary', async () => {
+    await expect(probeClaudeAuthStatus(null)).resolves.toBeNull();
   });
 });

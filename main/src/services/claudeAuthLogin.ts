@@ -127,25 +127,44 @@ export function resolveDevBundledClaudePath(
   }
 }
 
-function defaultProbeStatus(binary: string): Promise<ClaudeAuthAccount> {
+/**
+ * `claude auth status --json` EXITS 1 WHEN LOGGED OUT — with the same JSON
+ * (`"loggedIn": false`) on stdout. So a non-zero exit is not a probe failure:
+ * parse whatever stdout carried, and only reject when there is no parseable
+ * answer (spawn failure, timeout, a CLI too old to know `auth status`).
+ */
+function defaultProbeStatus(binary: string, env?: NodeJS.ProcessEnv): Promise<ClaudeAuthAccount> {
   return new Promise<ClaudeAuthAccount>((resolve, reject) => {
     execFile(
       binary,
       ['auth', 'status', '--json'],
-      { timeout: STATUS_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 },
+      { timeout: STATUS_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024, env },
       (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
         try {
           resolve(parseAuthStatus(String(stdout)));
         } catch (parseError) {
-          reject(parseError);
+          reject(error ?? parseError);
         }
       },
     );
   });
+}
+
+/**
+ * Standalone `claude auth status` probe for callers outside a login attempt
+ * (the onboarding provider probe). Null when no binary is available or the CLI
+ * gave no parseable answer — "unknown", never "logged out".
+ */
+export async function probeClaudeAuthStatus(
+  binary: string | null,
+  env?: NodeJS.ProcessEnv,
+): Promise<ClaudeAuthAccount | null> {
+  if (!binary) return null;
+  try {
+    return await defaultProbeStatus(binary, env);
+  } catch {
+    return null;
+  }
 }
 
 export class ClaudeAuthLoginService {
@@ -164,7 +183,8 @@ export class ClaudeAuthLoginService {
   constructor(deps: Partial<ClaudeAuthLoginDependencies> & Pick<ClaudeAuthLoginDependencies, 'resolveBinary'>) {
     this.deps = {
       spawn,
-      probeStatus: defaultProbeStatus,
+      // Same env as the login child, so the status probe sees the same PATH.
+      probeStatus: (binary) => defaultProbeStatus(binary, this.deps.env()),
       env: () => ({ ...process.env }),
       setTimeout,
       clearTimeout,
