@@ -172,6 +172,21 @@ describe('CloudSignInPrompt', () => {
     ).toBeInTheDocument();
   });
 
+  it('Check again on the beta copy force-refreshes, and a granted entitlement clears it', async () => {
+    const notEntitled = makeCloudStatus('signed_in', { bridgeEntitled: false, displayLogin: 'octo' });
+    seedStatus(notEntitled);
+    refreshMutate = vi.fn().mockResolvedValue(notEntitled);
+    render(<CloudSignInPrompt />);
+    await screen.findByText(/private beta/);
+    await waitFor(() => expect(screen.getByTestId('cloud-prompt-check-again')).not.toBeDisabled());
+    refreshMutate.mockClear();
+    refreshMutate.mockResolvedValue(makeCloudStatus('signed_in', { bridgeEntitled: true, displayLogin: 'octo' }));
+    fireEvent.click(screen.getByTestId('cloud-prompt-check-again'));
+    await waitFor(() => expect(refreshMutate).toHaveBeenCalledWith({ force: true }));
+    expect(await screen.findByText('Signed in to cyboflow cloud.')).toBeInTheDocument();
+    expect(screen.queryByText(/private beta/)).toBeNull();
+  });
+
   it('shows the failure line for a failed sign-in but hides it for a cancellation', async () => {
     seedStatus(
       makeCloudStatus('signed_out', { lastSignInFailure: { code: 'timed_out', httpStatus: null, at: '2026-10-07T10:00:00.000Z' } }),

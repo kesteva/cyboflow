@@ -183,10 +183,23 @@ export function CloudSignInPrompt({
       }
       if (!account.bridgeEntitled) {
         const who = account.displayLogin !== null ? `@${account.displayLogin}` : 'your account';
+        // The operator grants access out of band: let the user re-check without waiting out the refresh gap.
         return wrap(
-          <p className={text}>
-            {`The cyboflow Bridge is in private beta and isn't enabled for ${who} yet.`}
-          </p>,
+          <>
+            <p className={text}>
+              {`The cyboflow Bridge is in private beta and isn't enabled for ${who} yet.`}
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="cloud-prompt-check-again"
+              loading={pending === 'refresh'}
+              onClick={() => void refresh(true)}
+            >
+              Check again
+            </Button>
+            {errorLine}
+          </>,
         );
       }
       return wrap(<p className={`${text} text-status-success`}>Signed in to cyboflow cloud.</p>);
