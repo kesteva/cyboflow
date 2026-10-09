@@ -217,6 +217,11 @@ export interface WorkflowRunRow {
    */
   agent_provider?: AgentProvider;
   agent_runtime?: WorkflowRunStorableRuntime;
+  /** Execution host stamp (migration 152). NULL = This Mac; immutable per run. */
+  host_id?: string | null;
+  /** M2 remote merge-back (migration 152, code-validated). */
+  merge_back_state?: string | null;
+  merge_back_sha?: string | null;
   /**
    * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
    * sibling immutable stamp to `substrate` (migration 032). Decides WHO walks the
@@ -355,6 +360,8 @@ export interface WorkflowRunListRow {
   /** Provider/runtime stamps surfaced additively for migrations 051-052. */
   agent_provider?: AgentProvider;
   agent_runtime?: WorkflowRunStorableRuntime;
+  /** Execution host stamp (migration 152). NULL/absent = This Mac. */
+  host_id?: string | null;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */

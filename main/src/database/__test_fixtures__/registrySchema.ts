@@ -11,6 +11,8 @@
  *       main/src/database/migrations/124_workflow_tuning_level.sql.
  *   - workflows.runtime_mix / workflow_runs.runtime_mix:
  *       main/src/database/migrations/128_workflow_runtime_mix.sql.
+ *   - workflow_runs.host_id / merge_back_state / merge_back_sha:
+ *       main/src/database/migrations/152_hosts.sql.
  * Any column added to those tables at the canonical site MUST be
  * mirrored here too — AND the migration that adds it listed in
  * __tests__/orchestratorTestDb.test.ts's `laterMigrations`, or the
@@ -83,6 +85,12 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   -- run, a non-built-in flow, or an omp/pi lane — never read as 'claude'.
   runtime_mix TEXT
     CHECK (runtime_mix IS NULL OR runtime_mix IN ('claude','claude-primary','codex-primary','codex')),
+  -- migration 152: the run's immutable execution-host stamp (NULL = This Mac) and
+  -- the M2 remote merge-back columns. host_id's FK to hosts(id) is omitted here:
+  -- this hermetic fixture has no hosts table.
+  host_id TEXT,
+  merge_back_state TEXT,
+  merge_back_sha TEXT,
   FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);

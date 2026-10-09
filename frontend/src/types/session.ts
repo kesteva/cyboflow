@@ -172,6 +172,8 @@ export interface Session {
    * this field. undefined/null → not a design session (or link broken).
    */
   design_idea_id?: string | null;
+  /** Execution host id (sessions.host_id, migration 152). null/undefined = This Mac. */
+  hostId?: string | null;
   /**
    * Idea this session is the persistent home for (sessions.home_idea_id,
    * migration 113; idea sessions feature). At most one live session per idea

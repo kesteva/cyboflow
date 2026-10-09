@@ -155,6 +155,8 @@ interface WorkflowRunRow {
   agent_provider: string | null;
   agent_runtime: string | null;
   execution_model: string | null;
+  /** Immutable per-run host stamp (migration 152). NULL = This Mac. Copied verbatim to the restart clone. */
+  host_id: string | null;
   /**
    * Task/batch links (migration 066). Read so the OLD run's tasks can revert off
    * 'In development' after it flips 'canceled'. Deliberately NOT copied to the
@@ -214,7 +216,7 @@ export async function cancelAndRestartHandler(
     const row = db.prepare(
       `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
               substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
-              runtime_mix, agent_provider, agent_runtime, execution_model,
+              runtime_mix, agent_provider, agent_runtime, execution_model, host_id,
               task_id, batch_id
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
@@ -292,9 +294,9 @@ export async function cancelAndRestartHandler(
         `INSERT INTO workflow_runs
            (id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
             substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
-            runtime_mix, agent_provider, agent_runtime, execution_model,
+            runtime_mix, agent_provider, agent_runtime, execution_model, host_id,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newRunId,
         row.workflow_id,
@@ -312,6 +314,7 @@ export async function cancelAndRestartHandler(
         row.agent_provider ?? DEFAULT_AGENT_PROVIDER,
         row.agent_runtime ?? DEFAULT_WORKFLOW_AGENT_RUNTIME,
         row.execution_model ?? DEFAULT_EXECUTION_MODEL,
+        row.host_id ?? null,
         now,
         now,
       );

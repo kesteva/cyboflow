@@ -368,6 +368,23 @@ describe('cancelAndRestartHandler', () => {
     });
   });
 
+  it('copies the immutable host_id stamp onto the restarted run (NULL stays NULL)', async () => {
+    const stamped = randomUUID();
+    seedWorkflowAndRun(db, stamped, 'stuck', '/tmp/wt-host');
+    db.prepare(`UPDATE workflow_runs SET host_id = 'host-1' WHERE id = ?`).run(stamped);
+    const r1 = await cancelAndRestartHandler(stamped, makeDeps(db, spy, runQueues));
+    if ('noOp' in r1) throw new Error('Expected a real result, got noOp');
+    const row1 = db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(r1.newRunId) as { host_id: string | null };
+    expect(row1.host_id).toBe('host-1');
+
+    const local = randomUUID();
+    seedWorkflowAndRun(db, local, 'stuck', '/tmp/wt-nohost');
+    const r2 = await cancelAndRestartHandler(local, makeDeps(db, spy, runQueues));
+    if ('noOp' in r2) throw new Error('Expected a real result, got noOp');
+    const row2 = db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(r2.newRunId) as { host_id: string | null };
+    expect(row2.host_id).toBeNull();
+  });
+
   it('leaves the replacement mix NULL for a run that carried none (never defaulted to claude)', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-nomix');
