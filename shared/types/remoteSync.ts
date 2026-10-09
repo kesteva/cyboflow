@@ -61,6 +61,8 @@ export interface RemoteSyncProjectStatus {
   /** Set while the project backs off after a failure (ISO). */
   backoffUntil: string | null;
   openConflicts: number;
+  /** Local deletes held back as a mass delete, waiting for the user to push or restore them. */
+  heldDeletes: number;
   trackerClaims: RemoteSyncTrackerClaim[];
 }
 

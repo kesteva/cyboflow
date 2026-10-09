@@ -40,9 +40,19 @@ import {
 } from './projection';
 import { RemoteApplier, type ApplyReport } from './remoteApply';
 import { SyncHttpError, type SyncHttpClient } from './syncHttpClient';
-import { hasKnownBase, type SyncEntityState, type SyncStore } from './syncStore';
+import { hasKnownBase, type DeleteHold, type SyncEntityState, type SyncStore } from './syncStore';
 
 const same = (a: unknown, b: unknown): boolean => canonicalJson(a) === canonicalJson(b);
+
+/**
+ * The outgoing mass-delete hold (desktop doc, "Mass delete"): more than
+ * max(25, 10% of the synced entities) tombstones from this device in a rolling
+ * hour wait for the user before they are pushed. The server's quota is the
+ * hard backstop against scripts and agents.
+ */
+export const MASS_DELETE_MIN = 25;
+export const MASS_DELETE_FRACTION = 0.1;
+export const MASS_DELETE_WINDOW_MS = 60 * 60 * 1000;
 
 export interface EngineDeps {
   db: DatabaseLike;
@@ -430,6 +440,8 @@ export class RemoteSyncEngine {
       if (row) store.deleteTombstone(row.entityType, row.entityId);
     }
     tombstones.sort((a, b) => APPLY_ORDER.indexOf(b.type) - APPLY_ORDER.indexOf(a.type));
+    const hold = this.applyDeleteHold(projectId, tombstones.length, states.size);
+    if (!hold.release) tombstones.length = 0;
 
     const all = [...creates, ...updates, ...tombstones.map((t) => t.op)].filter((op) => !skip.has(op.entityId));
     if (all.length === 0) {
@@ -446,11 +458,82 @@ export class RemoteSyncEngine {
     }
     const request: PushRequest = { batchId: randomUUID(), ops };
     const included = new Set(ops.map((o) => o.entityId));
+    const sentDeletes = ops.filter((o) => o.kind === 'tombstone').length;
     store.tx(() => {
       for (const st of touched) if (included.has(st.entityId) || states.has(st.entityId)) store.putEntity(st);
       store.putBatch(projectId, request.batchId, JSON.stringify(request));
+      if (sentDeletes > 0) {
+        const h = hold.next;
+        store.updateProject(projectId, {
+          // A confirmed hold stays confirmed until its last delete has gone out
+          // (more than one push's worth spans several batches).
+          deleteHold: { ...h, window: [...h.window, ...Array<number>(sentDeletes).fill(this.now())], approveNext: h.approveNext && sentDeletes < tombstones.length },
+        });
+      }
     });
     return { request };
+  }
+
+  /**
+   * Whether this pass may push its `pending` local deletes, and the hold state
+   * to persist. Over the limit they are all held (a partial push would still be
+   * a mass delete) until the user confirms or restores them.
+   */
+  private applyDeleteHold(projectId: number, pending: number, synced: number): { release: boolean; next: DeleteHold } {
+    const { store } = this.deps;
+    const current = store.getProject(projectId)?.deleteHold ?? { window: [], held: 0, approveNext: false };
+    const now = this.now();
+    const window = current.window.filter((t) => t > now - MASS_DELETE_WINDOW_MS);
+    const limit = Math.max(MASS_DELETE_MIN, Math.ceil(synced * MASS_DELETE_FRACTION));
+    const release = pending === 0 || current.approveNext || window.length + pending <= limit;
+    const held = release ? 0 : pending;
+    const next: DeleteHold = { window, held, approveNext: current.approveNext && pending === 0 ? false : current.approveNext };
+    if (held !== current.held || window.length !== current.window.length || next.approveNext !== current.approveNext) {
+      store.updateProject(projectId, { deleteHold: next });
+      if (held > 0 && current.held === 0) store.appendLog(projectId, `holding ${held} deletions for confirmation (limit ${limit} an hour)`);
+    }
+    return { release, next };
+  }
+
+  /** The user confirmed the held deletes: the next pass pushes them. */
+  approveHeldDeletes(projectId: number): void {
+    const hold = this.deps.store.getProject(projectId)?.deleteHold;
+    if (!hold || hold.held === 0) return;
+    this.deps.store.updateProject(projectId, { deleteHold: { ...hold, approveNext: true } });
+    this.deps.store.appendLog(projectId, `${hold.held} held deletions confirmed`);
+  }
+
+  /**
+   * The user chose to keep the held deletes: re-create each deleted entity from
+   * the values this machine last agreed with the server (its base), through the
+   * same create path a pulled entity takes. Returns how many were restored.
+   */
+  async restoreHeldDeletes(projectId: number): Promise<number> {
+    const { store, db } = this.deps;
+    const projection = readProjection(db, projectId);
+    let restored = 0;
+    store.tx(() => {
+      for (const st of store.listEntities(projectId)) {
+        if (projection.has(st.entityId) || st.pendingDelete) continue;
+        if (!hasKnownBase(st, SYNCED_FIELDS[st.entityType])) continue;
+        for (const f of SYNCED_FIELDS[st.entityType]) {
+          const b = st.base[f];
+          if (!b) continue;
+          st.inbox[f] = { value: b.value, v: b.v, hlc: b.hlc ?? this.clock.next(), reason: 'pending' };
+          delete st.base[f];
+        }
+        st.dirty = {};
+        store.putEntity(st);
+        store.deleteTombstone(st.entityType, st.entityId);
+        restored += 1;
+      }
+      const hold = store.getProject(projectId)?.deleteHold;
+      if (hold) store.updateProject(projectId, { deleteHold: { ...hold, held: 0, approveNext: false } });
+    });
+    this.persistClock();
+    await this.applier.applyInbox(projectId);
+    store.appendLog(projectId, `restored ${restored} held deletions`);
+    return restored;
   }
 
   /** The push op for one entity: all fields on a create, the dirty ones otherwise. Stamps D. */

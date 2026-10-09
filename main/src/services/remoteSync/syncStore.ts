@@ -60,6 +60,16 @@ export interface SyncEntityState {
 
 export type SyncProjectStatus = RemoteSyncProjectState;
 
+/** The outgoing mass-delete hold (desktop doc, "Mass delete"). */
+export interface DeleteHold {
+  /** When this device's recent tombstones were frozen into a push (ms), the rolling hour. */
+  window: number[];
+  /** Local deletes held back from the server, waiting for the user. */
+  held: number;
+  /** The user confirmed: the next push sends every held delete. */
+  approveNext: boolean;
+}
+
 export interface SyncProjectRow {
   projectId: number;
   remoteProjectId: string | null;
@@ -71,6 +81,7 @@ export interface SyncProjectRow {
   resetNextPull: boolean;
   epoch: number | null;
   lastSyncAt: string | null;
+  deleteHold: DeleteHold;
 }
 
 /** The device this machine syncs as (remote_sync_device). */
@@ -192,6 +203,7 @@ export class SyncStore {
       resetNextPull: r.reset_next_pull === 1,
       epoch: (r.epoch as number | null) ?? null,
       lastSyncAt: (r.last_sync_at as string | null) ?? null,
+      deleteHold: parseDeleteHold(r.delete_hold_json),
     };
   }
 
@@ -231,7 +243,7 @@ export class SyncStore {
   updateProject(
     projectId: number,
     patch: Partial<
-      Pick<SyncProjectRow, 'remoteProjectId' | 'status' | 'statusDetail' | 'cursor' | 'resetNextPull' | 'epoch' | 'lastSyncAt'>
+      Pick<SyncProjectRow, 'remoteProjectId' | 'status' | 'statusDetail' | 'cursor' | 'resetNextPull' | 'epoch' | 'lastSyncAt' | 'deleteHold'>
     >,
   ): void {
     const cols: Record<string, string> = {
@@ -242,6 +254,7 @@ export class SyncStore {
       resetNextPull: 'reset_next_pull',
       epoch: 'epoch',
       lastSyncAt: 'last_sync_at',
+      deleteHold: 'delete_hold_json',
     };
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -249,7 +262,7 @@ export class SyncStore {
       const value = (patch as Record<string, unknown>)[key];
       if (value === undefined) continue;
       sets.push(`${col} = ?`);
-      params.push(typeof value === 'boolean' ? (value ? 1 : 0) : value);
+      params.push(typeof value === 'boolean' ? (value ? 1 : 0) : key === 'deleteHold' ? JSON.stringify(value) : value);
     }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
@@ -500,6 +513,19 @@ export class SyncStore {
   deleteClaim(key: string): void {
     this.db.prepare('DELETE FROM remote_sync_tracker_claims WHERE claim_key = ?').run(key);
   }
+}
+
+function parseDeleteHold(json: unknown): DeleteHold {
+  const hold: DeleteHold = { window: [], held: 0, approveNext: false };
+  try {
+    const p = JSON.parse(typeof json === 'string' ? json : '{}') as Partial<DeleteHold>;
+    if (Array.isArray(p.window)) hold.window = p.window.filter((t): t is number => typeof t === 'number');
+    if (typeof p.held === 'number') hold.held = p.held;
+    hold.approveNext = p.approveNext === true;
+  } catch {
+    // A corrupt hold starts empty; the window refills from new pushes.
+  }
+  return hold;
 }
 
 function toClaim(r: Record<string, unknown>): StoredTrackerClaim {

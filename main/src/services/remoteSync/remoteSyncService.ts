@@ -392,6 +392,26 @@ export class RemoteSyncService extends EventEmitter {
     }
   }
 
+  /** The user confirmed a held mass delete: push it now. */
+  async confirmHeldDeletes(projectId: number): Promise<void> {
+    const engine = this.getEngine();
+    if (!engine) throw new Error('Sync is not ready');
+    await this.runtimes.get(projectId)?.running;
+    engine.approveHeldDeletes(projectId);
+    this.emitChanged();
+    await this.syncNow(projectId);
+  }
+
+  /** The user kept the items of a held mass delete: re-create them here. */
+  async restoreHeldDeletes(projectId: number): Promise<number> {
+    const engine = this.getEngine();
+    if (!engine) throw new Error('Sync is not ready');
+    await this.runtimes.get(projectId)?.running;
+    const restored = await engine.restoreHeldDeletes(projectId);
+    this.emitChanged();
+    return restored;
+  }
+
   /** The user resumed after the "sync state went backwards" banner. */
   resumeAfterRewind(projectId: number): Promise<void> {
     this.engine?.resumeAfterRewind(projectId);
@@ -583,6 +603,7 @@ export class RemoteSyncService extends EventEmitter {
         syncing: rt?.running !== null && rt?.running !== undefined,
         backoffUntil: rt && rt.backoffUntil > this.now() ? new Date(rt.backoffUntil).toISOString() : null,
         openConflicts: p ? this.store.listOpenConflicts(id).length : 0,
+        heldDeletes: p?.deleteHold.held ?? 0,
         trackerClaims: p
           ? this.store
               .listClaims(id)

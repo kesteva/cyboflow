@@ -31,6 +31,10 @@ export interface RemoteSyncFacade {
   enableProject(req: RemoteSyncEnableRequest): Promise<RemoteSyncEnableResult>;
   /** Stop syncing a project on this machine; local data stays. */
   disableProject(projectId: number): Promise<void>;
+  /** Push a held mass delete. */
+  confirmHeldDeletes(projectId: number): Promise<void>;
+  /** Re-create the items of a held mass delete; resolves how many. */
+  restoreHeldDeletes(projectId: number): Promise<number>;
   /** The project's sync log, oldest first. */
   getLog(projectId: number): string[];
 }

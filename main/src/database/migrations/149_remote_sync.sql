@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS remote_sync_projects (
   epoch              INTEGER,
   last_sync_at       TEXT,
   log_json           TEXT NOT NULL DEFAULT '[]',
+  -- The outgoing mass-delete hold: {window: [push ms], held, approveNext}.
+  delete_hold_json   TEXT NOT NULL DEFAULT '{}',
   created_at         TEXT NOT NULL,
   updated_at         TEXT NOT NULL,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE

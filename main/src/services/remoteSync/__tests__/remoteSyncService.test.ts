@@ -455,3 +455,71 @@ describe('status for the Sync section', () => {
     expect(service.getLog(other)).toEqual([]);
   });
 });
+
+describe('mass-delete hold', () => {
+  /** N tasks this machine has already agreed with the server on. */
+  async function syncedTasks(n: number): Promise<string[]> {
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const ids: string[] = [];
+    for (let i = 0; i < n; i += 1) {
+      const r = await router.applyChange(projectId, { actor: 'user', entityType: 'task', title: `t${i}` });
+      ids.push(r.taskId);
+      const ref = (db.prepare('SELECT ref FROM tasks WHERE id = ?').get(r.taskId) as { ref: string }).ref;
+      service.store.putEntity({
+        entityType: 'task', entityId: r.taskId, projectId, ref, version: 1,
+        base: { title: { value: `t${i}`, v: 1, hlc: '1700000000000:00000:dev-0' } },
+        dirty: {}, inbox: {}, pendingDelete: null,
+      });
+    }
+    return ids;
+  }
+  const tombstonesPushed = () => pushes.flatMap((p) => p.ops).filter((o) => o.kind === 'tombstone').length;
+  const held = () => {
+    const s = service.getStatus();
+    return s.available ? s.projects.find((p) => p.projectId === projectId)?.heldDeletes : undefined;
+  };
+
+  beforeEach(() => {
+    service.store.optIn(projectId, 'rp', 'fp');
+    service.start();
+  });
+
+  it('pushes up to 25 deletes an hour without asking', async () => {
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    for (const id of (await syncedTasks(30)).slice(0, 25)) await router.applyDelete(projectId, { actor: 'user', taskId: id });
+    await service.syncNow(projectId);
+    expect(tombstonesPushed()).toBe(25);
+    expect(held()).toBe(0);
+  });
+
+  it('holds more than that until confirmed, counting the rolling hour', async () => {
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const ids = await syncedTasks(40);
+    for (const id of ids.slice(0, 20)) await router.applyDelete(projectId, { actor: 'user', taskId: id });
+    await service.syncNow(projectId);
+    expect(tombstonesPushed()).toBe(20);
+    for (const id of ids.slice(20, 30)) await router.applyDelete(projectId, { actor: 'user', taskId: id });
+    await service.syncNow(projectId);
+    expect(tombstonesPushed()).toBe(20);
+    expect(held()).toBe(10);
+    await service.confirmHeldDeletes(projectId);
+    expect(tombstonesPushed()).toBe(30);
+    expect(held()).toBe(0);
+  });
+
+  it('restores held deletes from the values last agreed with the server', async () => {
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const ids = await syncedTasks(30);
+    for (const id of ids) await router.applyDelete(projectId, { actor: 'user', taskId: id });
+    await service.syncNow(projectId);
+    expect(held()).toBe(30);
+    expect(await service.restoreHeldDeletes(projectId)).toBe(30);
+    const titles = (db.prepare('SELECT title FROM tasks WHERE project_id = ? ORDER BY title').all(projectId) as Array<{ title: string }>).map((r) => r.title);
+    expect(titles).toHaveLength(30);
+    expect(titles).toContain('t7');
+    expect(held()).toBe(0);
+    expect(service.store.listTombstones(projectId)).toEqual([]);
+    await service.syncNow(projectId);
+    expect(tombstonesPushed()).toBe(0);
+  });
+});

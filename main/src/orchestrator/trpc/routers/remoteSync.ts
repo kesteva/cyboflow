@@ -8,6 +8,8 @@
  *   enableProject     : mutation RemoteSyncEnableRequest -> RemoteSyncEnableResult
  *   disableProject    : mutation { projectId } -> void
  *   getLog            : query { projectId } -> string[]
+ *   confirmHeldDeletes: mutation { projectId } -> void
+ *   restoreHeldDeletes: mutation { projectId } -> number
  *   onChanged         : subscription -> RemoteSyncStatus
  *
  * A thin wrapper over the RemoteSyncFacade wired at boot. In a release build no
@@ -61,6 +63,12 @@ export const remoteSyncRouter = router({
     await requireFacade().disableProject(input.projectId);
   }),
   getLog: protectedProcedure.input(z.object({ projectId })).query(({ input }): string[] => requireFacade().getLog(input.projectId)),
+  confirmHeldDeletes: protectedProcedure.input(z.object({ projectId })).mutation(async ({ input }) => {
+    await requireFacade().confirmHeldDeletes(input.projectId);
+  }),
+  restoreHeldDeletes: protectedProcedure
+    .input(z.object({ projectId }))
+    .mutation(({ input }): Promise<number> => requireFacade().restoreHeldDeletes(input.projectId)),
   onChanged: protectedProcedure.subscription(async function* ({ signal }): AsyncGenerator<RemoteSyncStatus> {
     const abortSignal = signal ?? new AbortController().signal;
     const source = eventToAsyncIterable<RemoteSyncStatus>(remoteSyncEvents, REMOTE_SYNC_CHANGED_CHANNEL, abortSignal);
