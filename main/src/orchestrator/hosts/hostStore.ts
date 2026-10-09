@@ -114,7 +114,10 @@ function parsePreflight(json: string | null): PreflightResult | null {
   if (json === null) return null;
   try {
     const v: unknown = JSON.parse(json);
-    return typeof v === 'object' && v !== null ? (v as PreflightResult) : null;
+    if (typeof v !== 'object' || v === null) return null;
+    const r = v as PreflightResult;
+    // Rows written before `probeComplete` existed were only ever persisted for a finished probe.
+    return { ...r, probeComplete: r.probeComplete !== false };
   } catch {
     return null;
   }
@@ -308,7 +311,12 @@ export class HostStore {
     return this.write(() => {
       this.requireLive(id);
       const at = this.iso();
-      if (result.reachable) {
+      if (result.reachable && result.probeComplete === false) {
+        // Reachable, but the probe did not finish: the machine is up, yet nothing about it was learned. Keep the
+        // last complete result (preflight_json / tier / arch / OS / preflight_at) instead of overwriting it.
+        this.stmt(`UPDATE hosts SET lifecycle_state = 'online', last_seen_at = ?, updated_at = ? WHERE id = ?`)
+          .run(at, at, id);
+      } else if (result.reachable) {
         this.stmt(
           `UPDATE hosts SET preflight_json = ?, preflight_at = ?, preflight_app_version = ?, detected_tier = ?,
              arch = ?, os_version = ?, toolchain_hash = ?, lifecycle_state = 'online', last_seen_at = ?, updated_at = ?

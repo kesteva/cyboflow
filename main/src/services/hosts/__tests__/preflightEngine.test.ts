@@ -4,6 +4,7 @@ import type { ExecResult } from '../../../orchestrator/trpc/contracts/executionH
 import {
   CANCELLED_DETAIL,
   PREFLIGHT_ERROR_DETAIL,
+  PROBE_INCOMPLETE_DETAIL,
   runSshPreflight,
   type SshPreflightContext,
 } from '../preflight/preflightEngine';
@@ -45,7 +46,7 @@ describe('runSshPreflight', () => {
     expect(seen.map((c) => c.id)).toEqual([...PREFLIGHT_CHECK_IDS]);
     expect(r.results.map((c) => c.id)).toEqual([...PREFLIGHT_CHECK_IDS]);
     expect(r).toMatchObject({
-      hostId: 'h1', mode: 'full', reachable: true, detectedTier: 'cli', arch: 'arm64', osVersion: 'macOS 15.1',
+      hostId: 'h1', mode: 'full', reachable: true, probeComplete: true, detectedTier: 'cli', arch: 'arm64', osVersion: 'macOS 15.1',
       toolchainHash: null, appVersion: '9.9.9', startedAt: '2026-10-09T12:00:00.000Z',
       runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: true },
     });
@@ -122,7 +123,9 @@ describe('runSshPreflight', () => {
     expect(r.results.map((c) => c.status).slice(0, 3)).toEqual(['pass', 'fail', 'skipped']);
     expect(r.results[1].id).toBe('arch');
     expect(r.reachable).toBe(true);
-    expect(r.detectedTier).toBe('cli');
+    // The probe never finished: nothing about the machine was learned.
+    expect(r.probeComplete).toBe(false);
+    expect(r.detectedTier).toBeNull();
   });
 
   it('a throwing onCheck listener does not break the run', async () => {
@@ -131,13 +134,23 @@ describe('runSshPreflight', () => {
     expect(r.reachable).toBe(true);
   });
 
-  it('garbage / truncated probe output degrades to failed checks, not an exception', async () => {
+  it('a truncated probe (no probe_done) skips every post-reach check instead of failing them', async () => {
     const tr = fakeTransport({ runScript: async () => ok({ code: null, timedOut: true, stdout: 'uname_s=Linux\n\u0000junk' }) });
+    const seen: PreflightCheckResult[] = [];
+    const r = await runSshPreflight(ctx(tr), 'full', (c) => seen.push(c));
+    expect(r.results[0]).toMatchObject({ id: 'ssh-reachable', status: 'pass' });
+    for (const c of r.results.slice(1)) expect(c).toMatchObject({ status: 'skipped', detail: PROBE_INCOMPLETE_DETAIL });
+    expect(seen).toHaveLength(PREFLIGHT_CHECK_IDS.length);
+    expect(r).toMatchObject({ reachable: true, probeComplete: false, detectedTier: null, arch: null, osVersion: null });
+    expect(r.results.some((c) => c.status === 'fail')).toBe(false);
+  });
+
+  it('a dropped connection mid-probe (partial output, exit 255) is incomplete, not a column of fails', async () => {
+    const partial = HEALTHY.split('\n').slice(0, 6).join('\n');
+    const tr = fakeTransport({ runScript: async () => ok({ code: 255, stdout: partial, stderr: 'Connection reset' }) });
     const r = await runSshPreflight(ctx(tr), 'full');
-    const byId = new Map(r.results.map((c) => [c.id, c.status]));
-    expect(byId.get('arch')).toBe('fail');
-    expect(byId.get('sleep-settings')).toBe('na');
-    expect(r.detectedTier).toBe('cli');
+    expect(r.probeComplete).toBe(false);
+    expect(r.results.filter((c) => c.status === 'fail')).toEqual([]);
   });
 
   it('runs the probe against the configured remote root', async () => {

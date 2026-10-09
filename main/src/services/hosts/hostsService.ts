@@ -83,6 +83,7 @@ export function summarizePreflight(result: PreflightResult): string {
     const reach = result.results.find((r) => r.id === 'ssh-reachable');
     return `Not reachable${reach && reach.status === 'fail' ? `: ${reach.detail}` : ''}`;
   }
+  if (result.probeComplete === false) return 'Reachable, but the check did not finish (connection dropped or timed out)';
   const count = (s: string): number => result.results.filter((r) => r.status === s).length;
   const parts = [
     [count('pass'), 'passed'],
@@ -190,12 +191,20 @@ export class HostsService implements HostsFacade {
     const before = this.deps.store.get(id);
     if (before?.kind === 'ssh') this.guardRemote();
     await this.deps.store.update(id, patch);
-    this.deps.registry.invalidate(id);
-    if (before && patch.sshTarget !== undefined && patch.sshTarget !== before.sshTarget) {
-      // A new destination invalidates everything learned about the old one: re-check it.
-      this.lastAttempts.delete(id);
-      this.kickPreflight(id);
+    // A label-only edit needs no teardown: the registry's cache key includes the label, so the next get() builds
+    // a fresh SshHost, and the shared master (keyed by target) keeps serving any probe that is running now.
+    if (!before || patch.sshTarget === undefined || patch.sshTarget === before.sshTarget) return;
+    // A new destination invalidates everything learned about the old one. Cancel a preflight still talking to
+    // the OLD machine and drop it from the coalescing map FIRST, so the re-check below starts a fresh run
+    // instead of coalescing onto (and recording) the old one.
+    const running = this.inflight.get(id);
+    if (running) {
+      running.controller.abort();
+      this.inflight.delete(id);
     }
+    this.deps.registry.invalidate(id);
+    this.lastAttempts.delete(id);
+    this.kickPreflight(id);
   }
 
   async setUserCap(id: string, cap: CapabilityTier | null): Promise<void> {
@@ -232,6 +241,8 @@ export class HostsService implements HostsFacade {
 
     const controller = new AbortController();
     const promise = this.executePreflight(row, controller.signal).finally(() => {
+      // Superseded by a target change: the replacement run owns the map entry and the done/changed events.
+      if (this.inflight.get(id)?.controller !== controller) return;
       this.inflight.delete(id);
       emitPreflightProgress({ hostId: id, check: null, done: true });
       emitHostsChanged({ kind: 'hosts', hostId: id });
@@ -245,10 +256,17 @@ export class HostsService implements HostsFacade {
     const host = this.deps.registry.get(row.id);
     const result = await host.preflight(
       'full',
-      (check) => emitPreflightProgress({ hostId: row.id, check, done: false }),
+      // A cancelled run's "Cancelled" rows must not leak into a replacement run's live checklist.
+      (check) => {
+        if (!signal.aborted) emitPreflightProgress({ hostId: row.id, check, done: false });
+      },
       signal,
     );
-    if (signal.aborted) return result; // cancelled (archive / shutdown): nothing to record
+    if (signal.aborted) return result; // cancelled (archive / target change / shutdown): nothing to record
+    if (row.kind === 'ssh' && this.deps.store.get(row.id)?.sshTarget !== row.sshTarget) {
+      // Defensive: the destination changed under this run; its answer describes a machine the row no longer names.
+      return result;
+    }
     this.lastAttempts.set(row.id, {
       at: result.finishedAt,
       reachable: result.reachable,

@@ -280,6 +280,7 @@ export class LocalHost implements ExecutionHost {
       finishedAt: now().toISOString(),
       results,
       reachable: true,
+      probeComplete: true,
       detectedTier: 'full',
       runtimes: { claudeSdk: true, codexSdk, claudeCli, codexCli: false },
       arch: localArch(),

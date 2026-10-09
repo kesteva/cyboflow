@@ -28,7 +28,7 @@ function result(hostId: string, over: Partial<PreflightResult> = {}): PreflightR
   return {
     hostId, mode: 'full', startedAt: '2026-10-09T12:00:00.000Z', finishedAt: '2026-10-09T12:00:05.000Z',
     results: PREFLIGHT_CHECK_IDS.map((id) => check(id, id === 'sdk-binary-hash' ? 'skipped' : 'pass')),
-    reachable: true, detectedTier: 'cli',
+    reachable: true, probeComplete: true, detectedTier: 'cli',
     runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false },
     arch: 'arm64', osVersion: 'macOS 15.1', toolchainHash: null, appVersion: '1.0.0', ...over,
   };
@@ -260,6 +260,22 @@ describe('runPreflight', () => {
     expect(v.lastAttempt).toEqual({ at: '2026-10-10T00:00:00.000Z', reachable: false, summary: 'Not reachable: Connection refused' });
   });
 
+  it('a reachable-but-incomplete run keeps the last good result and says the check did not finish', async () => {
+    const id = await addSettled();
+    const p = service.runPreflight(id);
+    await flush();
+    hostFor(id).runs[1].d.resolve(result(id, {
+      probeComplete: false, detectedTier: null, arch: null, finishedAt: '2026-10-10T00:00:00.000Z',
+      results: [check('ssh-reachable', 'pass'), ...PREFLIGHT_CHECK_IDS.slice(1).map((c) => check(c, 'skipped'))],
+    }));
+    await p;
+    await store._queue().onIdle();
+    const v = service.get(id);
+    expect(v).toMatchObject({ lifecycleState: 'online', detectedTier: 'cli', arch: 'arm64', preflightAt: '2026-10-09T12:00:05.000Z' });
+    expect(v.preflight?.results.filter((c) => c.status === 'pass')).toHaveLength(11);
+    expect(v.lastAttempt?.summary).toMatch(/did not finish/);
+  });
+
   it('unknown and archived hosts are not found', async () => {
     await expect(service.runPreflight('nope')).rejects.toMatchObject({ name: HOSTS_ERROR_NAMES.notFound });
     const id = await addSettled();
@@ -323,6 +339,63 @@ describe('update / archive / terminals / shutdown', () => {
     expect(hostFor(id).host.preflight).toHaveBeenCalledTimes(2);
   });
 
+  it('a label-only edit neither invalidates the connection nor cancels a running preflight', async () => {
+    const id = await addSettled();
+    const p = service.runPreflight(id);
+    await flush();
+    await service.update(id, { label: 'Renamed' });
+    expect(registry.invalidate).not.toHaveBeenCalled();
+    expect(hostFor(id).runs[1].signal?.aborted).toBe(false);
+    hostFor(id).runs[1].d.resolve(result(id, { finishedAt: '2026-10-11T00:00:00.000Z' }));
+    await p;
+    await store._queue().onIdle();
+    expect(service.get(id)).toMatchObject({ label: 'Renamed', preflightAt: '2026-10-11T00:00:00.000Z' });
+  });
+
+  it('a target change mid-preflight cancels the old run and records only the new machine', async () => {
+    const id = await addSettled();
+    const old = service.runPreflight(id);
+    await flush();
+    const progress: PreflightProgressEvent[] = [];
+    const onProgress = (e: PreflightProgressEvent): void => { progress.push(e); };
+    hostEvents.on(hostPreflightChannel(id), onProgress);
+    try {
+      await service.update(id, { sshTarget: 'box2' });
+      await flush();
+      expect(hostFor(id).runs[1].signal?.aborted).toBe(true);
+      // A fresh run, not a coalesce onto the old one.
+      expect(hostFor(id).host.preflight).toHaveBeenCalledTimes(3);
+      const again = service.runPreflight(id);
+      expect(hostFor(id).host.preflight).toHaveBeenCalledTimes(3);
+      // The old machine answers late (with cancelled rows): nothing is recorded or broadcast for it.
+      hostFor(id).runs[1].onCheck?.(check('arch', 'skipped'));
+      hostFor(id).runs[1].d.resolve(result(id, { arch: 'x86_64', finishedAt: '2030-01-01T00:00:00.000Z' }));
+      await old;
+      await store._queue().onIdle();
+      expect(service.get(id)).toMatchObject({ preflightRunning: true, preflight: null, arch: null, lastAttempt: null });
+      expect(progress).toEqual([]);
+      hostFor(id).runs[2].d.resolve(result(id, { arch: 'arm64', finishedAt: '2026-10-12T00:00:00.000Z' }));
+      await again;
+      await store._queue().onIdle();
+      expect(service.get(id)).toMatchObject({ preflightRunning: false, arch: 'arm64', preflightAt: '2026-10-12T00:00:00.000Z' });
+      expect(progress.filter((e) => e.done)).toHaveLength(1);
+    } finally {
+      hostEvents.off(hostPreflightChannel(id), onProgress);
+    }
+  });
+
+  it('defensively skips recording when the row no longer names the target the run started with', async () => {
+    const id = await addSettled();
+    const p = service.runPreflight(id);
+    await flush();
+    await store.update(id, { sshTarget: 'elsewhere' }); // bypasses the service: no abort
+    hostFor(id).runs[1].d.resolve(result(id, { arch: 'x86_64', finishedAt: '2030-01-01T00:00:00.000Z' }));
+    await p;
+    await store._queue().onIdle();
+    expect(service.get(id)).toMatchObject({ preflight: null, arch: null });
+    expect(service.get(id).lastAttempt?.at).toBe('2026-10-09T12:00:05.000Z');
+  });
+
   it('archive closes the host terminals and invalidates its connection', async () => {
     const id = await addSettled();
     await service.archive(id);
@@ -372,5 +445,10 @@ describe('summarizePreflight', () => {
   it('counts statuses, singularises one warning', () => {
     const r = result('h', { results: [check('arch', 'pass'), check('git', 'warn'), check('node22', 'fail')] });
     expect(summarizePreflight(r)).toBe('1 passed · 1 warning · 1 failed');
+  });
+
+  it('a reachable run whose probe did not finish says so instead of counting skipped rows', () => {
+    const r = result('h', { probeComplete: false, results: [check('ssh-reachable', 'pass'), check('arch', 'skipped')] });
+    expect(summarizePreflight(r)).toBe('Reachable, but the check did not finish (connection dropped or timed out)');
   });
 });

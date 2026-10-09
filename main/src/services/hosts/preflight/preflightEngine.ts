@@ -9,6 +9,9 @@
  *  - ssh-reachable failing skips every other check ("Skipped: machine not reachable"); the result is
  *    `reachable: false` with a null detected tier (unreachability is lifecycle, not capability).
  *  - An aborted signal stops at the next step boundary; undecided checks are `skipped` ("Cancelled").
+ *  - A probe that never printed `probe_done` (connection dropped / timed out mid-probe) or threw: every
+ *    post-reach check is `skipped` (PROBE_INCOMPLETE_DETAIL), `probeComplete: false`, and the tier / arch / OS
+ *    are null — HostStore then keeps the last complete preflight and only marks the machine online.
  *  - In M1 the SDK runtimes are never present remotely (sdk-binary-hash / mcp-roundtrip are skipped), so a
  *    healthy machine detects as `cli`.
  */
@@ -46,6 +49,7 @@ import {
 
 export const CANCELLED_DETAIL = 'Cancelled';
 export const PREFLIGHT_ERROR_DETAIL = 'Skipped: preflight error';
+export const PROBE_INCOMPLETE_DETAIL = 'Check did not finish (connection dropped or timed out)';
 export const REACH_TIMEOUT_MS = 20_000;
 export const PROBE_TIMEOUT_MS = 60_000;
 
@@ -95,6 +99,7 @@ export async function runSshPreflight(
   const startedAt = now().toISOString();
   const results: PreflightCheckResult[] = [];
   let probe: ProbeRecord | null = null;
+  let probeComplete = false;
   let current: PreflightCheckId = 'ssh-reachable';
 
   const emit = (o: CheckOutcome, startMs: number): void => {
@@ -143,28 +148,33 @@ export async function runSshPreflight(
               code: out.code,
               stderr: redactSecrets(out.stderr).slice(0, 300),
             });
+            // No probe_done: the null fields mean "never reported", not "missing". Judging them would turn a
+            // dropped connection into a column of fails, so every post-reach check is skipped instead.
+            fillRemaining(PROBE_INCOMPLETE_DETAIL);
+          } else {
+            probeComplete = true;
+            const expandedRoot = expandRemoteRoot(ctx.remoteRoot, p.home) ?? ctx.remoteRoot;
+            const steps: ReadonlyArray<readonly [PreflightCheckId, () => CheckOutcome]> = [
+              ['arch', () => checkArch(p)],
+              ['os-version', () => checkOsVersion(p)],
+              ['git', () => checkGit(p)],
+              ['node22', () => checkNode22(p)],
+              ['sdk-binary-hash', () => checkSdkBinaryHash()],
+              ['mcp-roundtrip', () => checkMcpRoundtrip()],
+              ['claude-auth', () => checkClaudeAuth(p, ctx.remoteRoot)],
+              ['codex-auth', () => checkCodexAuth(p)],
+              ['sleep-settings', () => checkSleepSettings(p)],
+              ['repo-root-tcc', () => checkRepoRootTcc(expandedRoot, p.home)],
+              ['disk-free', () => checkDiskFree(p)],
+            ];
+            for (const [id, fn] of steps) {
+              if (signal?.aborted) break;
+              current = id;
+              const s = clock();
+              emit(fn(), s);
+            }
+            if (signal?.aborted) fillRemaining(CANCELLED_DETAIL);
           }
-          const expandedRoot = expandRemoteRoot(ctx.remoteRoot, p.home) ?? ctx.remoteRoot;
-          const steps: ReadonlyArray<readonly [PreflightCheckId, () => CheckOutcome]> = [
-            ['arch', () => checkArch(p)],
-            ['os-version', () => checkOsVersion(p)],
-            ['git', () => checkGit(p)],
-            ['node22', () => checkNode22(p)],
-            ['sdk-binary-hash', () => checkSdkBinaryHash()],
-            ['mcp-roundtrip', () => checkMcpRoundtrip()],
-            ['claude-auth', () => checkClaudeAuth(p, ctx.remoteRoot)],
-            ['codex-auth', () => checkCodexAuth(p)],
-            ['sleep-settings', () => checkSleepSettings(p)],
-            ['repo-root-tcc', () => checkRepoRootTcc(expandedRoot, p.home)],
-            ['disk-free', () => checkDiskFree(p)],
-          ];
-          for (const [id, fn] of steps) {
-            if (signal?.aborted) break;
-            current = id;
-            const s = clock();
-            emit(fn(), s);
-          }
-          if (signal?.aborted) fillRemaining(CANCELLED_DETAIL);
         }
       }
     }
@@ -192,8 +202,10 @@ export async function runSshPreflight(
 
   const order = (id: PreflightCheckId): number => PREFLIGHT_CHECK_IDS.indexOf(id);
   results.sort((a, b) => order(a.id) - order(b.id));
-  const runtimes = runtimesFrom(probe);
   const reachable = results.some((r) => r.id === 'ssh-reachable' && r.status === 'pass');
+  // Only a finished probe (probe_done) whose checks all ran describes the machine; anything less is not recorded.
+  const complete = reachable && probeComplete && !signal?.aborted;
+  const runtimes = runtimesFrom(complete ? probe : null);
   return {
     hostId: ctx.hostId,
     mode,
@@ -201,10 +213,11 @@ export async function runSshPreflight(
     finishedAt: now().toISOString(),
     results,
     reachable,
-    detectedTier: reachable ? computeDetectedTier(results, runtimes) : null,
+    probeComplete: complete,
+    detectedTier: complete ? computeDetectedTier(results, runtimes) : null,
     runtimes,
-    arch: probe?.unameM ?? null,
-    osVersion: osVersionFrom(probe),
+    arch: complete ? probe?.unameM ?? null : null,
+    osVersion: complete ? osVersionFrom(probe) : null,
     toolchainHash: null,
     appVersion: ctx.appVersion,
   };

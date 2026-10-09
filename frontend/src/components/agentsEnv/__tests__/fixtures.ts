@@ -218,6 +218,7 @@ export function makePreflight(over: Partial<PreflightResult> = {}): PreflightRes
       makeCheck({ id: 'mcp-roundtrip', label: 'MCP round trip', status: 'skipped', detail: 'Arrives with remote flows' }),
     ],
     reachable: true,
+    probeComplete: true,
     detectedTier: 'cli',
     runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false },
     arch: 'arm64',

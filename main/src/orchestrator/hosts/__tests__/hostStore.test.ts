@@ -24,7 +24,7 @@ const onEvent = (e: HostsChangedEvent): void => { events.push(e); };
 function preflight(over: Partial<PreflightResult> = {}): PreflightResult {
   return {
     hostId: 'x', mode: 'full', startedAt: '2026-10-09T10:00:00.000Z', finishedAt: '2026-10-09T10:00:01.000Z',
-    results: [], reachable: true, detectedTier: 'cli',
+    results: [], reachable: true, probeComplete: true, detectedTier: 'cli',
     runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false },
     arch: 'arm64', osVersion: '15.0', toolchainHash: 'abc', appVersion: '1.2.3', ...over,
   };
@@ -146,6 +146,33 @@ describe('HostStore writes', () => {
     row = store.get(id);
     expect(row).toMatchObject({ lifecycleState: 'unreachable', detectedTier: 'cli', arch: 'arm64' });
     expect(row?.preflight).not.toBeNull();
+  });
+
+  it('recordPreflight: reachable but incomplete marks online and keeps the last complete result', async () => {
+    const id = await store.addSsh({ label: 'Box', sshTarget: 'box' });
+    await store.recordPreflight(id, preflight({ hostId: id }));
+    await store.recordPreflight(id, preflight({ hostId: id, reachable: false, detectedTier: null }));
+    expect(store.get(id)?.lifecycleState).toBe('unreachable');
+    const lastSeen = store.get(id)?.lastSeenAt;
+    await store.recordPreflight(id, preflight({
+      hostId: id, probeComplete: false, detectedTier: null, arch: null, osVersion: null,
+      finishedAt: '2026-10-09T11:00:00.000Z', toolchainHash: null, appVersion: '9.9.9',
+    }));
+    const row = store.get(id);
+    expect(row).toMatchObject({
+      lifecycleState: 'online', detectedTier: 'cli', arch: 'arm64', osVersion: '15.0',
+      preflightAt: '2026-10-09T10:00:01.000Z', preflightAppVersion: '1.2.3',
+    });
+    expect(row?.preflight).toMatchObject({ probeComplete: true, toolchainHash: 'abc' });
+    expect(row?.lastSeenAt).not.toBe(lastSeen);
+  });
+
+  it('a persisted preflight written before probeComplete existed reads as complete', async () => {
+    const id = await store.addSsh({ label: 'Box', sshTarget: 'box' });
+    const legacy: Record<string, unknown> = { ...preflight({ hostId: id }) };
+    delete legacy.probeComplete;
+    raw.prepare('UPDATE hosts SET preflight_json = ? WHERE id = ?').run(JSON.stringify(legacy), id);
+    expect(store.get(id)?.preflight?.probeComplete).toBe(true);
   });
 
   it('archive refuses local, active work, and clears project defaults', async () => {

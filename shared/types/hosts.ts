@@ -47,7 +47,13 @@ export interface PreflightResult {
   finishedAt: string;
   results: PreflightCheckResult[];
   reachable: boolean;
-  /** null when unreachable: lifecycle, not capability. */
+  /**
+   * false when the machine answered but the remote probe did not finish (connection dropped / timed out): the
+   * post-reach checks are `skipped`, and the last complete result stays the persisted one. Always true for This
+   * Mac. A result persisted before this field existed reads as true.
+   */
+  probeComplete: boolean;
+  /** null when unreachable or when the probe did not finish: lifecycle, not capability. */
   detectedTier: CapabilityTier | null;
   runtimes: PreflightRuntimes;
   arch: string | null;
