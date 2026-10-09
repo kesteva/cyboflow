@@ -115,6 +115,7 @@ export const HOSTS_ERROR_NAMES = {
   killed: 'RemoteHostsDisabledError',
   terminalUnavailable: 'HostTerminalUnavailableError',
   invalidLabel: 'InvalidHostLabelError',
+  disabled: 'HostsDisabledError',
 } as const;
 
 export type HostsFailureCode =

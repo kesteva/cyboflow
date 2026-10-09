@@ -61,10 +61,18 @@ export class HostTerminalUnavailableError extends Error {
   }
 }
 
-/** Label empty, too long, or containing control characters. Not in HOSTS_ERROR_NAMES: the router maps it to 'unknown' with this message. */
+/** Label empty, too long, or containing control characters. */
 export class InvalidHostLabelError extends Error {
   constructor() {
     super('That environment name is not valid.');
     this.name = HOSTS_ERROR_NAMES.invalidLabel;
+  }
+}
+
+/** Any gated operation while the Environments feature is not running (toggle off or release build). */
+export class HostsDisabledError extends Error {
+  constructor() {
+    super('Environments are turned off.');
+    this.name = HOSTS_ERROR_NAMES.disabled;
   }
 }
