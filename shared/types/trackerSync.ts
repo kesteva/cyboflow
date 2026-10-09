@@ -621,6 +621,12 @@ export interface TrackerConnectionSummary {
   /** Active (non-orphaned) entity links on this connection. */
   linkedCount: number;
   openConflictCount: number;
+  /**
+   * Why this paused connection is held: another device runs it under
+   * cross-machine backlog sync (e.g. "Runs on Studio"); null/absent when it is
+   * not held.
+   */
+  claimHold?: string | null;
 }
 
 /** `tracker_conflicts.kind` (mirrors TrackerConflictRow). */

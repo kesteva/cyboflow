@@ -198,6 +198,12 @@ import { provenanceMarker } from './provenance';
 import { isPriority, resolveEffectivePriorityMapping, seedDefaultPriorityMapping } from './priorityMapping';
 import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping } from './categoryMapping';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
+import type {
+  TrackerClaimConnection,
+  TrackerClaimDecision,
+  TrackerClaimGate,
+  TrackerClaimSubject,
+} from './claimGate';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
   backfillContentWrites,
@@ -777,6 +783,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      to ten minutes, after which no actor can spend the ruling either.
    */
   private readonly stagedRulings = new Map<string, StagedUnlinkRuling>();
+
+  /**
+   * Cross-machine backlog sync's tracker-claim gate (see claimGate.ts), wired
+   * after construction by {@link setClaimGate}. Null = every connection runs,
+   * exactly as before backlog sync existed.
+   */
+  private claimGate: TrackerClaimGate | null = null;
 
   constructor(deps: TrackerSyncServiceDeps) {
     this.db = deps.db;
@@ -1994,6 +2007,16 @@ export class TrackerSyncService implements TrackerSyncFacade {
       connectionId: payload.sourceConnectionId,
     });
     const identity = await this.adapterForCredentials(credentials).validateCredentials();
+    // THE TRACKER CLAIM, asked once the identity is known and before either
+    // branch below makes the mapping run. Denied = connected but paused, and no
+    // pass is kicked: another device runs this tracker for the synced backlog.
+    const claim = await this.acquireClaim({
+      projectId: payload.projectId,
+      provider: credentials.provider,
+      workspaceId: identity.workspaceId,
+      baseUrl: credentials.baseUrl ?? null,
+      workspaceName: identity.workspaceName,
+    });
 
     // IDEMPOTENT RE-SUBMIT. The multi-mapping wizard calls connect once per
     // mapping, sequentially, and offers a retry when one of them fails — so the
@@ -2046,16 +2069,18 @@ export class TrackerSyncService implements TrackerSyncFacade {
       }
       if (existing.status === 'paused') {
         updateConnectionSettings(this.db, existing.id, {
-          status: 'active',
+          ...(claim.allowed ? { status: 'active' as const } : {}),
           workspace_name: identity.workspaceName,
           actor_label: identity.actorLabel,
         });
-        void this.syncNow(existing.id).catch((err: unknown) => {
-          this.logger?.error('[trackerSync] sync after a paused mapping was re-connected failed', {
-            connectionId: existing.id,
-            error: describeError(err),
+        if (claim.allowed) {
+          void this.syncNow(existing.id).catch((err: unknown) => {
+            this.logger?.error('[trackerSync] sync after a paused mapping was re-connected failed', {
+              connectionId: existing.id,
+              error: describeError(err),
+            });
           });
-        });
+        }
       }
       this.emitTrackerChange(payload.projectId, existing.id, 'connection');
       return { connectionId: existing.id };
@@ -2167,8 +2192,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       incomingScope,
     );
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
-    if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
-    else reactivateConnection(this.db, connectionId, row);
+    const gatedRow: Omit<NewConnectionRow, 'id'> = claim.allowed ? row : { ...row, status: 'paused' };
+    if (revivable === null) insertConnection(this.db, { id: connectionId, ...gatedRow });
+    else reactivateConnection(this.db, connectionId, gatedRow);
     if (cipher !== null) storeSecret(this.db, connectionId, cipher);
     // Enforce the one-pusher-per-(project, provider) invariant across WIZARD
     // RUNS: a later run mapping a second group into an already-mapped project
@@ -2271,12 +2297,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
     this.emitTrackerChange(payload.projectId, connectionId, 'connection');
 
-    void this.syncNow(connectionId).catch((err: unknown) => {
-      this.logger?.error('[trackerSync] initial sync after connect failed', {
-        connectionId,
-        error: describeError(err),
+    if (claim.allowed) {
+      void this.syncNow(connectionId).catch((err: unknown) => {
+        this.logger?.error('[trackerSync] initial sync after connect failed', {
+          connectionId,
+          error: describeError(err),
+        });
       });
-    });
+    }
 
     return { connectionId };
   }
@@ -2450,10 +2478,18 @@ export class TrackerSyncService implements TrackerSyncFacade {
       connection.base_url,
     );
     const rotating = [connection, ...siblings.filter((row) => row.id !== connection.id)];
+    // Each sibling asks for its OWN tracker claim — they can sit in different
+    // projects, synced or not. Asked up front so the rotation writes below stay
+    // one uninterrupted run; a denied sibling takes the key but stays paused.
+    const claims = new Map<string, TrackerClaimDecision>();
     for (const sibling of rotating) {
+      claims.set(sibling.id, await this.acquireClaim(this.claimSubject(sibling)));
+    }
+    for (const sibling of rotating) {
+      const allowed = claims.get(sibling.id)?.allowed === true;
       if (cipher !== null) storeSecret(this.db, sibling.id, cipher);
       updateConnectionSettings(this.db, sibling.id, {
-        status: 'active',
+        status: allowed ? 'active' : 'paused',
         // The authorizing user can legitimately change with the key; the
         // workspace cannot (step 2 just proved it).
         workspace_name: identity.workspaceName,
@@ -2461,6 +2497,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       });
       this.emitTrackerChange(sibling.project_id, sibling.id, 'connection');
 
+      if (!allowed) continue;
       void this.syncNow(sibling.id).catch((err: unknown) => {
         this.logger?.error('[trackerSync] sync after a credential rotation failed', {
           connectionId: sibling.id,
@@ -2625,6 +2662,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
       workspaceName: newPrefix,
       unmatchedExternalIds: [],
     };
+    // The remap itself always lands (the ids must stay addressable); only the
+    // resume is gated on the tracker claim.
+    const claim = await this.acquireClaim(
+      this.claimSubject({ ...connection, workspace_name: newPrefix }),
+    );
 
     this.db.transaction(() => {
       // ALL links, orphaned ones included: an orphaned link's id has to stay
@@ -2662,7 +2704,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
       updateConnectionSettings(this.db, connectionId, {
         workspace_name: newPrefix,
-        status: 'active',
+        status: claim.allowed ? 'active' : 'paused',
       });
     })();
 
@@ -2685,12 +2727,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
 
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
-    void this.syncNow(connectionId).catch((err: unknown) => {
-      this.logger?.error('[trackerSync] sync after a prefix remap failed', {
-        connectionId,
-        error: describeError(err),
+    if (claim.allowed) {
+      void this.syncNow(connectionId).catch((err: unknown) => {
+        this.logger?.error('[trackerSync] sync after a prefix remap failed', {
+          connectionId,
+          error: describeError(err),
+        });
       });
-    });
+    }
     return result;
   }
 
@@ -2768,9 +2812,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // re-submit matcher — none of which has anything to answer here (the probe
     // just ran, there are no wizard decisions, and the matcher would be looking
     // for a row that by definition does not exist yet at the NEW instance id).
+    // The fresh row is a NEW tracker identity, so it asks for its own claim;
+    // denied = minted paused, and no first pass below.
     const newConnectionId = `trk_${randomUUID()}`;
+    const adoptedRow = adoptedConnectionRow(old, probe);
+    const claim = await this.acquireClaim(this.claimSubject(adoptedRow));
     const created = insertConnection(this.db, {
-      ...adoptedConnectionRow(old, probe),
+      ...adoptedRow,
+      ...(claim.allowed ? {} : { status: 'paused' as const }),
       id: newConnectionId,
       push_target: wasPushTarget ? 1 : 0,
     });
@@ -2782,12 +2831,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // ── 5 · first pass ─────────────────────────────────────────────────────
     this.emitTrackerChange(projectId, connectionId, 'connection');
     this.emitTrackerChange(projectId, newConnectionId, 'connection');
-    void this.syncNow(newConnectionId).catch((err: unknown) => {
-      this.logger?.error('[trackerSync] first pass after adopting a new workspace failed', {
-        connectionId: newConnectionId,
-        error: describeError(err),
+    if (claim.allowed) {
+      void this.syncNow(newConnectionId).catch((err: unknown) => {
+        this.logger?.error('[trackerSync] first pass after adopting a new workspace failed', {
+          connectionId: newConnectionId,
+          error: describeError(err),
+        });
       });
-    });
+    }
 
     return {
       newConnectionId,
@@ -3219,6 +3270,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       lastSyncLog: parseLogEntries(row.last_sync_log_json),
       linkedCount: listLinks(this.db, row.id, { activeOnly: true }).length,
       openConflictCount: listOpenConflicts(this.db, row.id).length,
+      claimHold: row.status === 'paused' ? this.claimHoldReason(row) : null,
     };
   }
 
@@ -3391,6 +3443,134 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
 
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
+
+    // After the retirement, so the gate sees this row gone when it checks
+    // whether a live connection here still shares the claim.
+    try {
+      this.claimGate?.release(this.claimSubject(connection));
+    } catch (err) {
+      this.logger?.error('[trackerSync] releasing the tracker claim on disconnect failed', {
+        connectionId,
+        error: describeError(err),
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Tracker claims (cross-machine backlog sync)
+  //
+  // claimGate.ts. With backlog sync on, a connection runs on the one device
+  // holding its claim; every path that sets a row 'active' asks
+  // {@link acquireClaim} first and writes 'paused' when denied. The three
+  // public methods below are the {@link TrackerClaimConnections} surface
+  // backlog sync drives from the other side.
+  // -------------------------------------------------------------------------
+
+  /** Wire (or clear) backlog sync's tracker-claim gate. Null = no gate. */
+  setClaimGate(gate: TrackerClaimGate | null): void {
+    this.claimGate = gate;
+  }
+
+  /** What a connection's claim is keyed on. */
+  private claimSubject(
+    row: Pick<TrackerConnectionRow, 'project_id' | 'provider' | 'workspace_id' | 'base_url' | 'workspace_name'>,
+  ): TrackerClaimSubject {
+    return {
+      projectId: row.project_id,
+      provider: row.provider,
+      workspaceId: row.workspace_id,
+      baseUrl: row.base_url,
+      workspaceName: row.workspace_name,
+    };
+  }
+
+  /**
+   * Ask the gate whether this connection may run here. No gate = allowed. A
+   * gate that throws despite its contract FAILS CLOSED, like the gate itself
+   * does when the claim cannot be checked.
+   */
+  private async acquireClaim(subject: TrackerClaimSubject): Promise<TrackerClaimDecision> {
+    if (this.claimGate === null) return { allowed: true };
+    try {
+      return await this.claimGate.acquire(subject);
+    } catch (err) {
+      this.logger?.error('[trackerSync] tracker claim check failed', {
+        projectId: subject.projectId,
+        provider: subject.provider,
+        error: describeError(err),
+      });
+      return { allowed: false, reason: 'Could not check which device runs this tracker' };
+    }
+  }
+
+  /** The gate's hold reason for a paused row, or null (no gate, not held, or the gate threw). */
+  private claimHoldReason(row: TrackerConnectionRow): string | null {
+    if (this.claimGate === null) return null;
+    try {
+      return this.claimGate.holdReason(this.claimSubject(row));
+    } catch {
+      return null;
+    }
+  }
+
+  /** The project's live (active or paused) connections, as backlog sync sees them. */
+  listLive(projectId: number): TrackerClaimConnection[] {
+    const live: TrackerClaimConnection[] = [];
+    for (const row of listConnections(this.db, projectId)) {
+      if (row.status !== 'active' && row.status !== 'paused') continue;
+      live.push({ ...this.claimSubject(row), id: row.id, status: row.status });
+    }
+    return live;
+  }
+
+  /**
+   * Pause an ACTIVE connection whose claim another device holds. Never
+   * reactivates, and a no-op on a paused, retired or unknown row. A pass in
+   * flight abandons at its next phase boundary (see {@link runPass}).
+   */
+  pause(connectionId: string): void {
+    const row = getConnection(this.db, connectionId);
+    if (row === null || row.status !== 'active') return;
+    updateConnectionSettings(this.db, connectionId, { status: 'paused' });
+    const timer = this.drainTimers.get(connectionId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.drainTimers.delete(connectionId);
+    }
+    this.emitTrackerChange(row.project_id, connectionId, 'connection');
+  }
+
+  /**
+   * Resume a PAUSED connection through the gate. Allowed = active plus a kicked
+   * pass; denied = still paused, but the change is still broadcast so the card
+   * picks up the new hold reason.
+   */
+  async resume(connectionId: string): Promise<TrackerClaimDecision> {
+    const row = getConnection(this.db, connectionId);
+    if (row === null || row.status === 'disconnected') return { allowed: false, reason: 'Not paused' };
+    if (row.status === 'active') return { allowed: true };
+
+    const decision = await this.acquireClaim(this.claimSubject(row));
+    // Re-read across the await: a disconnect (or another resume) may have
+    // landed meanwhile, and neither may be overwritten.
+    const current = getConnection(this.db, connectionId);
+    if (current === null || current.status === 'disconnected') {
+      return { allowed: false, reason: 'Not paused' };
+    }
+    if (current.status === 'active') return { allowed: true };
+    if (decision.allowed) {
+      updateConnectionSettings(this.db, connectionId, { status: 'active' });
+    }
+    this.emitTrackerChange(current.project_id, connectionId, 'connection');
+    if (decision.allowed) {
+      void this.syncNow(connectionId).catch((err: unknown) => {
+        this.logger?.error('[trackerSync] sync after a tracker claim resumed a connection failed', {
+          connectionId,
+          error: describeError(err),
+        });
+      });
+    }
+    return decision;
   }
 
   // -------------------------------------------------------------------------
