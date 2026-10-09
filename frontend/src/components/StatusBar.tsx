@@ -12,6 +12,7 @@
  */
 import { McpHealthIndicator } from './McpHealthIndicator';
 import { OmpFleetIndicator } from './OmpFleetIndicator';
+import { SyncConflictsHost } from './sync/SyncConflictsHost';
 
 export function StatusBar() {
   return (
@@ -24,6 +25,7 @@ export function StatusBar() {
 
       {/* Right side: status indicators */}
       <div className="flex items-center gap-2">
+        <SyncConflictsHost />
         <McpHealthIndicator />
         <OmpFleetIndicator />
       </div>

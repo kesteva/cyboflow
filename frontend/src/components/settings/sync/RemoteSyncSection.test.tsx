@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RemoteSyncProjectStatus, RemoteSyncStatus } from '../../../../../shared/types/remoteSync';
 import { CLOUD_STAGING_ORIGIN } from '../../../../../shared/types/cloudOrigins';
 import { useConfigStore } from '../../../stores/configStore';
+import { useRemoteSyncConflictsStore } from '../../../stores/remoteSyncConflictsStore';
 
 const m = vi.hoisted(() => ({
   getStatus: vi.fn<() => Promise<RemoteSyncStatus>>(),
@@ -348,6 +349,14 @@ describe('RemoteSyncSection', () => {
       expect(screen.getByText('boom')).toBeInTheDocument();
       unmount();
       expect(m.unsubscribe).toHaveBeenCalled();
+    });
+
+    it('offers Review conflicts next to the open count and opens the view', async () => {
+      getStatus.mockResolvedValue(signedIn([project({ remoteProjectId: 'r1', status: 'active', openConflicts: 2 })]));
+      render(<RemoteSyncSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Review conflicts' }));
+      expect(useRemoteSyncConflictsStore.getState().viewOpen).toBe(true);
+      useRemoteSyncConflictsStore.setState({ viewOpen: false });
     });
 
     it('shows held deletions with confirm/restore, and the upgrade/storage lines', async () => {

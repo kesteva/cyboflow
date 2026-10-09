@@ -23,6 +23,7 @@ import { useConfigStore } from '../../../stores/configStore';
 import { Button } from '../../ui/Button';
 import { SettingsSection } from '../../ui/SettingsSection';
 import { Toggle } from '../../ui/Toggle';
+import { useRemoteSyncConflictsStore } from '../../../stores/remoteSyncConflictsStore';
 import { cn } from '../../../utils/cn';
 import { formatDistanceToNow } from '../../../utils/timestampUtils';
 
@@ -74,6 +75,7 @@ interface ProjectRowProps {
 
 function ProjectRow({ project, onError }: ProjectRowProps): React.JSX.Element {
   const [panel, setPanel] = useState<Panel | null>(null);
+  const openConflictsView = useRemoteSyncConflictsStore((s) => s.openView);
   const [busy, setBusy] = useState(false);
   const [otherId, setOtherId] = useState('');
   const [logOpen, setLogOpen] = useState(false);
@@ -180,6 +182,11 @@ function ProjectRow({ project, onError }: ProjectRowProps): React.JSX.Element {
               }
             >
               Resume
+            </Button>
+          )}
+          {linked && project.openConflicts > 0 && (
+            <Button type="button" variant="secondary" size="sm" onClick={openConflictsView}>
+              Review conflicts
             </Button>
           )}
           {linked && (
