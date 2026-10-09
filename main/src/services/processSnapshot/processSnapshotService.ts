@@ -25,7 +25,9 @@ import { classifyProcessType, type OwnedHandles, type ProcessType } from './proc
 /** Who owns a matched row. `null` on a {@link SnapshottedProcess} when unmatched. */
 export type ProcessOwner =
   | { kind: 'cli'; panelId: string; sessionId: string }
-  | { kind: 'run-shell'; runId: string; terminalId: string };
+  | { kind: 'run-shell'; runId: string; terminalId: string }
+  /** An Environments interactive `ssh` terminal: no run, no worktree. */
+  | { kind: 'host-terminal'; hostId: string; terminalId: string };
 
 /** A `ps` row plus what cyboflow knows about it. */
 export interface SnapshottedProcess extends ProcessSnapshotRow {
@@ -45,12 +47,26 @@ export interface ShellOwnedSource {
   listOwnedShells(): OwnedRunShell[];
 }
 
+/** One live Environments host-terminal PTY (HostTerminalManager.listOwnedShells()). */
+export interface OwnedHostTerminal {
+  pid: number;
+  terminalId: string;
+  hostId: string;
+}
+
+/** Structural view of `HostTerminalManager` — only the read-only accessor. */
+export interface HostTerminalOwnedSource {
+  listOwnedShells(): OwnedHostTerminal[];
+}
+
 export interface ProcessSnapshotServiceOptions {
   /** The single `ps` scan. Defaults to the real six-column scan ({@link defaultListProcesses}). */
   listProcesses?: () => Promise<ProcessSnapshotRow[]>;
   /** One CLI manager, or one per provider (Claude, Codex, pi, OMP). */
   cliManager: CliOwnedSource | readonly CliOwnedSource[];
   runShellManager: ShellOwnedSource;
+  /** Environments host terminals (owner kind `host-terminal`). None when omitted. */
+  hostTerminals?: HostTerminalOwnedSource;
   /**
    * Broker predicate override. Only consulted for rows the standard classifier
    * left `'unknown'`, so it can add brokers but never demote an owned handle.
@@ -86,6 +102,7 @@ export class ProcessSnapshotService {
   private readonly listProcesses: () => Promise<ProcessSnapshotRow[]>;
   private readonly cliManagers: readonly CliOwnedSource[];
   private readonly runShellManager: ShellOwnedSource;
+  private readonly hostTerminals: HostTerminalOwnedSource | undefined;
   private readonly isBrokerOverride?: (row: Pick<ProcessSnapshotRow, 'command'>) => boolean;
 
   constructor(opts: ProcessSnapshotServiceOptions) {
@@ -94,6 +111,7 @@ export class ProcessSnapshotService {
       ? (opts.cliManager as readonly CliOwnedSource[])
       : [opts.cliManager as CliOwnedSource];
     this.runShellManager = opts.runShellManager;
+    this.hostTerminals = opts.hostTerminals;
     this.isBrokerOverride = opts.isBrokerProcess;
   }
 
@@ -102,10 +120,12 @@ export class ProcessSnapshotService {
     const rows = await this.listProcesses();
     const cli = this.cliManagers.flatMap((m) => m.listOwnedProcesses());
     const shells = this.runShellManager.listOwnedShells();
-    const owned: OwnedHandles = { cli, shells };
+    const hostShells = this.hostTerminals?.listOwnedShells() ?? [];
+    const owned: OwnedHandles = { cli, shells, hostShells };
 
     const cliByPid = new Map(cli.map((h) => [h.pid, h] as const));
     const shellByPid = new Map(shells.map((h) => [h.pid, h] as const));
+    const hostShellByPid = new Map(hostShells.map((h) => [h.pid, h] as const));
 
     return rows.map((row): SnapshottedProcess => {
       let processType = classifyProcessType(row, owned);
@@ -127,6 +147,15 @@ export class ProcessSnapshotService {
           processType,
           worktreePath: shellHandle.worktreePath,
           owner: { kind: 'run-shell', runId: shellHandle.runId, terminalId: shellHandle.terminalId },
+        };
+      }
+      const hostShell = hostShellByPid.get(row.pid);
+      if (hostShell) {
+        return {
+          ...row,
+          processType,
+          worktreePath: null,
+          owner: { kind: 'host-terminal', hostId: hostShell.hostId, terminalId: hostShell.terminalId },
         };
       }
       return {

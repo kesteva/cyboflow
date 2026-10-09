@@ -337,7 +337,14 @@ export type ReapIdentityFingerprint = ReapIdentityEntry[];
 function ownerKey(p: KillableProcess): string[] | null {
   const o = p.owner;
   if (!o) return null;
-  return o.kind === 'cli' ? ['cli', o.panelId, o.sessionId] : ['run-shell', o.runId, o.terminalId];
+  switch (o.kind) {
+    case 'cli':
+      return ['cli', o.panelId, o.sessionId];
+    case 'run-shell':
+      return ['run-shell', o.runId, o.terminalId];
+    case 'host-terminal':
+      return ['host-terminal', o.hostId, o.terminalId];
+  }
 }
 
 /**

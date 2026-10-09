@@ -399,6 +399,13 @@ describe('reapIdentityFingerprint owner identity', () => {
     expect(reapFingerprintsMatch(a, b)).toBe(false);
   });
 
+  it('a host-terminal owner is its own identity, distinct from a run-shell with the same ids', () => {
+    const host = fp({ kind: 'host-terminal', hostId: 'h1', terminalId: 't1' });
+    const shell = fp({ kind: 'run-shell', runId: 'h1', terminalId: 't1' });
+    expect(reapFingerprintsMatch(host, shell)).toBe(false);
+    expect(reapFingerprintsMatch(host, fp({ kind: 'host-terminal', hostId: 'h1', terminalId: 't1' }))).toBe(true);
+  });
+
   it('identical owners still match (negative control for the two cases above)', () => {
     const owner: SystemProcessOwner = { kind: 'cli', panelId: 'a:b', sessionId: 'c' };
     expect(reapFingerprintsMatch(fp(owner), fp({ ...owner }))).toBe(true);

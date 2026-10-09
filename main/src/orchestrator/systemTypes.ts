@@ -51,7 +51,8 @@ export type SystemProcessType =
 /** Structural mirror of processSnapshotService.ts `ProcessOwner`. */
 export type SystemProcessOwner =
   | { kind: 'cli'; panelId: string; sessionId: string }
-  | { kind: 'run-shell'; runId: string; terminalId: string };
+  | { kind: 'run-shell'; runId: string; terminalId: string }
+  | { kind: 'host-terminal'; hostId: string; terminalId: string };
 
 interface SystemProcessCommon {
   processType: SystemProcessType;

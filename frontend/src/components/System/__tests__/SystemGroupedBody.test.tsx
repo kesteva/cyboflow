@@ -283,6 +283,23 @@ describe('Open session / Open run', () => {
     fireEvent.click(screen.getByTestId('open-run-proc-2'));
     expect(calls).toEqual(['setActiveRun(run-2)', 'setActiveProjectId(7)', 'goToSession()']);
   });
+
+  it('a host-terminal row (Environments ssh) offers no Open run / Open session', () => {
+    const s = snap(
+      [wt('/wt/a')],
+      [proc(5, {
+        owner: { kind: 'host-terminal', hostId: 'h1', terminalId: 'host::h1::t1' },
+        processType: 'shell-pty',
+        command: 'ssh -tt -- box',
+        worktreePath: null,
+      })],
+    );
+    render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy="cpu" {...handlers} />);
+    const row = screen.getByTestId('proc-row');
+    expect(within(row).getByTestId('proc-owning-worktree')).toHaveTextContent('none');
+    expect(screen.queryByTestId('open-run-proc-5')).toBeNull();
+    expect(screen.queryByTestId('open-session-proc-5')).toBeNull();
+  });
 });
 
 describe('formatting', () => {

@@ -397,7 +397,8 @@ const ROW_GRID = 'grid grid-cols-[76px_minmax(0,1.4fr)_minmax(0,1.6fr)_56px_56px
 
 function OpenButton({ process, projectId }: { process: SystemActionableProcess; projectId: number }): ReactElement | null {
   const owner = process.owner;
-  if (owner === null) return null;
+  // A host terminal (Environments ssh) has no run or session to open.
+  if (owner === null || owner.kind === 'host-terminal') return null;
   if (owner.kind === 'cli') {
     return (
       <button type="button" data-testid={`open-session-proc-${process.pid}`} className={BUTTON} onClick={() => openSystemSession(owner.sessionId, projectId)}>
