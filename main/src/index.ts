@@ -243,6 +243,7 @@ import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
 import { composeCloudAccount } from './cloudAccountComposition';
 import { composePersistentAgents } from './persistentAgentsComposition';
+import { composeHosts } from './hostsComposition';
 import { wireBridgeConnector } from './services/persistentAgents/connectors/bridge';
 import { armRelaunchIfRequested, cancelRelaunchOnQuit } from './utils/relaunchIntent';
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
@@ -795,6 +796,7 @@ let sessionOps: SessionOpsLike | undefined;
  */
 let webViewerComposition: ReturnType<typeof composeWebViewer> | undefined;
 let persistentAgentsComposition: ReturnType<typeof composePersistentAgents> | undefined;
+let hostsComposition: ReturnType<typeof composeHosts> | undefined;
 
 /**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
@@ -1924,6 +1926,8 @@ async function initializeServices(): Promise<boolean> {
   wireRemoteSync({ db: cyboflowDb, router: taskChangeRouter, reviewRouter: reviewItemRouter, configManager, cloud: cloudAccount?.handle ?? null, trackers: trackerSyncService, logger: cyboflowLogger });
   persistentAgentsComposition = composePersistentAgents({ db: cyboflowDb, configManager, logger: cyboflowLogger, cloud: cloudAccount?.handle ?? null, wireConnectors: wireBridgeConnector });
   persistentAgentsComposition.start();
+  hostsComposition = composeHosts({ db: cyboflowDb, configManager, logger: cyboflowLogger, appVersion: app.getVersion(), getMainWindow: () => mainWindow });
+  hostsComposition.start();
   // Native web viewer — the WebContentsView manager, its context menu and its
   // teardown hooks (docs/proposals/native-web-viewer.md). Composed in
   // webViewerComposition.ts (a sibling, like verifyComposition above: it imports
@@ -2099,6 +2103,7 @@ async function initializeServices(): Promise<boolean> {
     orchSocketServer,
     ptyCliManagers: laneManagers.filter(({ lane }) => isPtyLane(lane)).map(({ manager }) => manager),
     getRunShellManager: () => runShellManager,
+    getHostTerminalShells: () => hostsComposition?.terminalShells() ?? [],
     configManager,
     isDevelopment,
   });
@@ -3327,6 +3332,7 @@ async function drainOnQuit(): Promise<void> {
     trackerSyncService.stop();
   }
   persistentAgentsComposition?.stop();
+  hostsComposition?.stop();
 
   // Kill every live OMP fleet worker. Unlike the other managers' children these
   // are REMOTE processes: nothing about this app exiting stops them, so without

@@ -121,7 +121,7 @@ export const HOSTS_ERROR_NAMES = {
 export type HostsFailureCode =
   | 'not_found' | 'label_taken' | 'invalid_target'
   | 'invalid_label' | 'cap_above_detected' | 'local_immutable'
-  | 'has_active_work' | 'feature_disabled' | 'remote_hosts_disabled' | 'unknown';
+  | 'has_active_work' | 'terminal_unavailable' | 'feature_disabled' | 'remote_hosts_disabled' | 'unknown';
 
 export type HostsResult<T> = ({ ok: true } & T) | { ok: false; error: HostsFailureCode; message: string };
 
