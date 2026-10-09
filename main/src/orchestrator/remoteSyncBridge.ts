@@ -10,7 +10,12 @@
  * so the router answers `{ available: false }` and the renderer renders nothing.
  */
 import { EventEmitter } from 'node:events';
-import type { RemoteSyncStatus } from '../../../shared/types/remoteSync';
+import type {
+  RemoteSyncEnableRequest,
+  RemoteSyncEnableResult,
+  RemoteSyncProjectChoices,
+  RemoteSyncStatus,
+} from '../../../shared/types/remoteSync';
 
 /** Everything the remoteSync tRPC surface can ask of the service. */
 export interface RemoteSyncFacade {
@@ -20,6 +25,12 @@ export interface RemoteSyncFacade {
   syncNow(projectId?: number): Promise<void>;
   /** Resume a project paused because this machine's sync state went backwards. */
   resumeAfterRewind(projectId: number): Promise<void>;
+  /** Turning sync on for a project: its fingerprint and the remote projects it could join. */
+  getProjectChoices(projectId: number): Promise<RemoteSyncProjectChoices>;
+  /** Create the project's remote project, or join an existing one. */
+  enableProject(req: RemoteSyncEnableRequest): Promise<RemoteSyncEnableResult>;
+  /** Stop syncing a project on this machine; local data stays. */
+  disableProject(projectId: number): Promise<void>;
 }
 
 let facade: RemoteSyncFacade | null = null;

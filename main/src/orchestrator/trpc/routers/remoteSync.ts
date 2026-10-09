@@ -4,6 +4,9 @@
  *   getStatus         : query -> RemoteSyncStatus
  *   syncNow           : mutation { projectId? } -> void
  *   resumeAfterRewind : mutation { projectId } -> void
+ *   getProjectChoices : query { projectId } -> RemoteSyncProjectChoices
+ *   enableProject     : mutation RemoteSyncEnableRequest -> RemoteSyncEnableResult
+ *   disableProject    : mutation { projectId } -> void
  *   onChanged         : subscription -> RemoteSyncStatus
  *
  * A thin wrapper over the RemoteSyncFacade wired at boot. In a release build no
@@ -18,7 +21,11 @@ import { router, protectedProcedure } from '../trpc';
 import { eventToAsyncIterable } from './events';
 import { REMOTE_SYNC_CHANGED_CHANNEL, getRemoteSyncFacade, remoteSyncEvents } from '../../remoteSyncBridge';
 import type { RemoteSyncFacade } from '../../remoteSyncBridge';
-import type { RemoteSyncStatus } from '../../../../../shared/types/remoteSync';
+import type {
+  RemoteSyncEnableResult,
+  RemoteSyncProjectChoices,
+  RemoteSyncStatus,
+} from '../../../../../shared/types/remoteSync';
 
 function requireFacade(): RemoteSyncFacade {
   const facade = getRemoteSyncFacade();
@@ -27,6 +34,11 @@ function requireFacade(): RemoteSyncFacade {
 }
 
 const projectId = z.number().int().positive();
+
+const enableRequest = z.discriminatedUnion('mode', [
+  z.object({ projectId, mode: z.literal('create') }),
+  z.object({ projectId, mode: z.literal('join'), remoteProjectId: z.string().min(1).max(200) }),
+]);
 
 export const remoteSyncRouter = router({
   getStatus: protectedProcedure.query((): RemoteSyncStatus => {
@@ -37,6 +49,15 @@ export const remoteSyncRouter = router({
   }),
   resumeAfterRewind: protectedProcedure.input(z.object({ projectId })).mutation(async ({ input }) => {
     await requireFacade().resumeAfterRewind(input.projectId);
+  }),
+  getProjectChoices: protectedProcedure
+    .input(z.object({ projectId }))
+    .query(({ input }): Promise<RemoteSyncProjectChoices> => requireFacade().getProjectChoices(input.projectId)),
+  enableProject: protectedProcedure
+    .input(enableRequest)
+    .mutation(({ input }): Promise<RemoteSyncEnableResult> => requireFacade().enableProject(input)),
+  disableProject: protectedProcedure.input(z.object({ projectId })).mutation(async ({ input }) => {
+    await requireFacade().disableProject(input.projectId);
   }),
   onChanged: protectedProcedure.subscription(async function* ({ signal }): AsyncGenerator<RemoteSyncStatus> {
     const abortSignal = signal ?? new AbortController().signal;

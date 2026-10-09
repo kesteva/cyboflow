@@ -66,6 +66,9 @@ export function wireRemoteSync(deps: RemoteSyncWiringDeps): RemoteSyncService | 
     getStatus: () => service.getStatus(),
     syncNow: (projectId) => service.syncNow(projectId),
     resumeAfterRewind: (projectId) => service.resumeAfterRewind(projectId),
+    getProjectChoices: (projectId) => service.getProjectChoices(projectId),
+    enableProject: (req) => service.enableProject(req),
+    disableProject: (projectId) => service.disableProject(projectId),
   });
   service.start();
   app.on('before-quit', () => service.stop());

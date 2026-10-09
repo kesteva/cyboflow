@@ -14,7 +14,8 @@ import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
 import type { CloudAccountEventMap, CloudAccountHandle, CloudBeforeSignOutHook, CloudDevice, CloudHandleState } from '../../cloud/cloudAccountHandle';
 import type { CloudRevokeReason } from '../../../../../shared/types/cloudAccountWire';
-import type { PushRequest } from '../../../../../shared/types/remoteSyncWire';
+import type { PushRequest, RemoteProject } from '../../../../../shared/types/remoteSyncWire';
+import type { GitRunner } from '../fingerprint';
 import { RemoteSyncService, SYNC_DEBOUNCE_MS } from '../remoteSyncService';
 import { SyncHttpClient, type FetchLike } from '../syncHttpClient';
 
@@ -84,6 +85,17 @@ let pushes: PushRequest[];
 let failNext: Response | null;
 let service: RemoteSyncService;
 let findings: string[];
+let remoteProjects: RemoteProject[];
+let created: Array<{ name: string; fingerprint: string }>;
+let originUrl: string | null;
+
+const fakeGit: GitRunner = async (_cwd, args) => {
+  if (args[0] === 'remote') {
+    if (originUrl === null) throw new Error('error: No such remote');
+    return `${originUrl}\n`;
+  }
+  return '\n';
+};
 
 const fakeFetch: FetchLike = (async (input: Parameters<FetchLike>[0], init?: Parameters<FetchLike>[1]) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
@@ -94,6 +106,16 @@ const fakeFetch: FetchLike = (async (input: Parameters<FetchLike>[0], init?: Par
     return r;
   }
   if (url.pathname === '/v1/head') return json({ now: Date.now(), projects: { rp: 0 }, claims: [] });
+  if (url.pathname === '/v1/projects' && init?.method === 'GET') return json({ projects: remoteProjects });
+  if (url.pathname === '/v1/projects' && init?.method === 'POST') {
+    const req = JSON.parse(String(init.body)) as { name: string; fingerprint: string };
+    const taken = remoteProjects.find((p) => p.fingerprint === req.fingerprint);
+    if (taken) return json({ error: 'project_exists', details: { project: taken } }, 409);
+    created.push(req);
+    const project = { id: 'rp', name: req.name, fingerprint: req.fingerprint, createdByDevice: 'dev-1', createdAt: 1 };
+    remoteProjects.push(project);
+    return json({ project });
+  }
   if (url.pathname === '/v1/projects/rp/push') {
     const req = JSON.parse(String(init?.body)) as PushRequest;
     pushes.push(req);
@@ -115,6 +137,7 @@ function makeService(): RemoteSyncService {
     configManager: config,
     cloud,
     fileFinding: (_p, title) => findings.push(title),
+    git: fakeGit,
     createClient: (device, c) => new SyncHttpClient({ origin: device.origin, fetch: fakeFetch, getToken: () => c.getToken(), appVersion: 't' }),
   });
 }
@@ -131,6 +154,9 @@ beforeEach(() => {
   pushes = [];
   failNext = null;
   findings = [];
+  remoteProjects = [];
+  created = [];
+  originUrl = 'https://me:ghp_secret@github.com/o/r.git';
   service = makeService();
 });
 
@@ -267,5 +293,114 @@ describe('failures', () => {
     failNext = json({ error: 'device_revoked' }, 401);
     await service.syncProject(projectId, 'tick');
     expect(cloud.revoked).toEqual(['device_revoked']);
+  });
+});
+
+describe('linking a project', () => {
+  const remote = (id: string, fingerprint: string, name = id): RemoteProject => ({ id, name, fingerprint, createdByDevice: 'dev-0', createdAt: 5 });
+  const addTask = (title: string, pid = projectId) =>
+    TaskChangeRouter.initialize(dbAdapter(db)).applyChange(pid, { actor: 'user', entityType: 'task', title });
+
+  beforeEach(() => service.start());
+
+  it('offers fingerprint matches first, then every remote project not linked here', async () => {
+    const other = svc.createProject('Q', join(dir, 'q')).id;
+    service.store.optIn(other, 'taken', 'x');
+    remoteProjects = [remote('m', 'github.com/o/r', 'Mine'), remote('o', 'gitlab.com/x/y'), remote('taken', 'z')];
+    await addTask('existing');
+    expect(await service.getProjectChoices(projectId)).toEqual({
+      projectId,
+      fingerprint: 'github.com/o/r',
+      localItemCount: 1,
+      matches: [{ id: 'm', name: 'Mine', createdAt: 5 }],
+      others: [{ id: 'o', name: 'o', createdAt: 5 }],
+    });
+  });
+
+  it('a project with no git remote matches nothing, not even a local fingerprint', async () => {
+    originUrl = null;
+    remoteProjects = [remote('l', 'local:1b4e28ba-2fa1-11d2-883f-0016d3cca427')];
+    expect(await service.getProjectChoices(projectId)).toMatchObject({ fingerprint: null, matches: [], others: [{ id: 'l' }] });
+  });
+
+  it('the first machine creates the remote project (credentials stripped) and pushes its whole backlog', async () => {
+    await addTask('one');
+    await addTask('two');
+    expect(await service.enableProject({ projectId, mode: 'create' })).toEqual({ ok: true, remoteProjectId: 'rp' });
+    expect(created).toEqual([{ name: 'P', fingerprint: 'github.com/o/r' }]);
+    expect(service.store.getProject(projectId)).toMatchObject({ remoteProjectId: 'rp', fingerprint: 'github.com/o/r' });
+    await service.idle();
+    expect(pushes.flatMap((p) => p.ops).map((o) => o.fields?.title?.value)).toEqual(['one', 'two']);
+    expect(service.store.getProject(projectId)?.status).toBe('active');
+  });
+
+  it('a project with no remote is created under a fresh local fingerprint', async () => {
+    originUrl = null;
+    expect(await service.enableProject({ projectId, mode: 'create' })).toMatchObject({ ok: true });
+    expect(created[0].fingerprint).toMatch(/^local:[0-9a-f-]{36}$/);
+    expect(service.store.getProject(projectId)?.fingerprint).toBe(created[0].fingerprint);
+  });
+
+  it('creating a repo that already syncs offers the existing project instead', async () => {
+    remoteProjects = [remote('m', 'github.com/o/r', 'Mine')];
+    expect(await service.enableProject({ projectId, mode: 'create' })).toMatchObject({
+      ok: false,
+      reason: 'exists',
+      project: { id: 'm', name: 'Mine', createdAt: 5 },
+    });
+    expect(service.store.getProject(projectId)).toBeNull();
+  });
+
+  it('joining needs an empty local backlog', async () => {
+    remoteProjects = [remote('rp', 'github.com/o/r')];
+    await addTask('local work');
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'rp' })).toMatchObject({ ok: false, reason: 'not_empty' });
+    expect(service.store.getProject(projectId)).toBeNull();
+    expect(requests).toEqual([]);
+  });
+
+  it('joins an empty project under the remote fingerprint and runs the first pass', async () => {
+    remoteProjects = [remote('rp', 'github.com/o/r')];
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'rp' })).toEqual({ ok: true, remoteProjectId: 'rp' });
+    expect(service.store.getProject(projectId)).toMatchObject({ remoteProjectId: 'rp', fingerprint: 'github.com/o/r' });
+    await service.idle();
+    expect(requests).toContain('GET /v1/head');
+    expect(service.store.getProject(projectId)?.status).toBe('active');
+  });
+
+  it('refuses a remote project another local project already syncs, and a vanished one', async () => {
+    const other = svc.createProject('Q', join(dir, 'q')).id;
+    service.store.optIn(other, 'rp', 'x');
+    remoteProjects = [remote('rp', 'github.com/o/r')];
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'rp' })).toMatchObject({ ok: false, reason: 'conflict' });
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'gone' })).toMatchObject({ ok: false, reason: 'not_found' });
+  });
+
+  it('is idempotent for a linked project and refuses re-linking it elsewhere', async () => {
+    service.store.optIn(projectId, 'rp', 'fp');
+    expect(await service.enableProject({ projectId, mode: 'create' })).toEqual({ ok: true, remoteProjectId: 'rp' });
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'other' })).toMatchObject({ ok: false, reason: 'conflict' });
+    expect(created).toEqual([]);
+  });
+
+  it('is not ready while sync is off', async () => {
+    config.set(false);
+    expect(await service.enableProject({ projectId, mode: 'create' })).toMatchObject({ ok: false, reason: 'not_ready' });
+    await expect(service.getProjectChoices(projectId)).rejects.toThrow(/not ready/);
+  });
+
+  it('hands a 401 while listing back to the cloud sign-in', async () => {
+    failNext = json({ error: 'unauthorized' }, 401);
+    await expect(service.getProjectChoices(projectId)).rejects.toThrow();
+    expect(cloud.revoked).toEqual(['unauthorized']);
+  });
+
+  it('turning sync off for a project unlinks it and keeps its backlog', async () => {
+    await addTask('keep me');
+    await service.enableProject({ projectId, mode: 'create' });
+    await service.disableProject(projectId);
+    expect(service.store.getProject(projectId)).toBeNull();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?').get(projectId)).toEqual({ n: 1 });
+    expect(service.getStatus()).toMatchObject({ projects: [] });
   });
 });

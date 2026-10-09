@@ -52,6 +52,48 @@ export interface RemoteSyncProjectStatus {
   openConflicts: number;
 }
 
+/** A project on the sync service, as offered for joining. */
+export interface RemoteSyncRemoteProject {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  createdAt: number;
+}
+
+/** What turning sync on for a project can offer (Settings → Sync, per project). */
+export interface RemoteSyncProjectChoices {
+  projectId: number;
+  /** The repo fingerprint sent to the service (credentials stripped); null when the project has no usable git remote. */
+  fingerprint: string | null;
+  /** Ideas, epics and tasks in the local backlog. Joining needs 0 in this version. */
+  localItemCount: number;
+  /** Remote projects with this project's fingerprint: the proposed join. */
+  matches: RemoteSyncRemoteProject[];
+  /** Every other remote project not already linked here, for an explicit pick. */
+  others: RemoteSyncRemoteProject[];
+}
+
+export type RemoteSyncEnableRequest =
+  | { projectId: number; mode: 'create' }
+  | { projectId: number; mode: 'join'; remoteProjectId: string };
+
+export type RemoteSyncEnableFailure =
+  /** Sync is off, signed out, or the token is locked. */
+  | 'not_ready'
+  /** Joining needs an empty local backlog in this version. */
+  | 'not_empty'
+  /** A remote project with this fingerprint already exists: offer to join it. */
+  | 'exists'
+  /** The remote project is gone. */
+  | 'not_found'
+  /** Another project here already syncs with that remote project, or this one syncs with another. */
+  | 'conflict'
+  | 'failed';
+
+export type RemoteSyncEnableResult =
+  | { ok: true; remoteProjectId: string }
+  | { ok: false; reason: RemoteSyncEnableFailure; message: string; project?: RemoteSyncRemoteProject };
+
 /**
  * What the Settings → Integrations → Sync section renders from.
  * `available: false` is the release-build answer: the section renders nothing.

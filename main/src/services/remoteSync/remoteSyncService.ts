@@ -10,6 +10,10 @@
  *   - Failures back off per project (network/5xx/429, honouring Retry-After,
  *     capped at 2 min). 401 hands the dead token back to the cloud module.
  *   - Every 12th successful pass of a project runs the convergence checksum.
+ *   - Linking (desktop doc, "Joining a second machine", M1a): the first machine
+ *     creates the remote project and pushes its whole backlog; another machine
+ *     joins it only with an empty local backlog, matched by repo fingerprint or
+ *     picked explicitly.
  *
  * Constructed only in a dev build; does nothing unless sync is enabled
  * (ConfigManager.isRemoteSyncEnabled) and a device is signed in.
@@ -19,11 +23,20 @@ import type { TaskChangeRouter } from '../../orchestrator/taskChangeRouter';
 import { TASK_ALL_CHANNEL, taskChangeEvents } from '../../orchestrator/taskChangeRouter';
 import type { DatabaseLike } from '../../orchestrator/types';
 import type { TaskChangedEvent } from '../../../../shared/types/tasks';
-import type { RemoteSyncStatus } from '../../../../shared/types/remoteSync';
+import type {
+  RemoteSyncEnableRequest,
+  RemoteSyncEnableResult,
+  RemoteSyncProjectChoices,
+  RemoteSyncRemoteProject,
+  RemoteSyncStatus,
+} from '../../../../shared/types/remoteSync';
+import type { RemoteProject } from '../../../../shared/types/remoteSyncWire';
+import { runGitCapture } from '../../utils/runGit';
 import { isStagingOrigin } from '../../../../shared/types/cloudOrigins';
 import type { CloudAccountHandle, CloudDevice } from '../cloud/cloudAccountHandle';
 import { computeBackoffMs } from '../cloud/backoff';
 import { RemoteSyncEngine, type PassOutcome } from './engine';
+import { fingerprintProject, localFingerprint, type GitRunner } from './fingerprint';
 import { isSyncedEntityType } from './projection';
 import { SyncHttpClient, SyncHttpError } from './syncHttpClient';
 import { SyncStore } from './syncStore';
@@ -33,6 +46,8 @@ export const SYNC_DEBOUNCE_MS = 2_000;
 export const SYNC_BACKOFF_BASE_MS = 5_000;
 export const SYNC_BACKOFF_CAP_MS = 120_000;
 export const CHECKSUM_EVERY_PASSES = 12;
+/** The service's limit on a project name. */
+const MAX_PROJECT_NAME = 200;
 
 export interface RemoteSyncServiceDeps {
   db: DatabaseLike;
@@ -50,6 +65,8 @@ export interface RemoteSyncServiceDeps {
   subscribeWake?: (cb: () => void) => () => void;
   logger?: { info(msg: string, meta?: unknown): void; warn(msg: string, meta?: unknown): void; error(msg: string, meta?: unknown): void };
   now?: () => number;
+  /** Run git for the project fingerprint; defaults to the app's git. */
+  git?: GitRunner;
   /** Test seam: build the HTTP client. */
   createClient?: (device: CloudDevice, cloud: CloudAccountHandle) => SyncHttpClient;
 }
@@ -67,6 +84,8 @@ interface ProjectRuntime {
 export class RemoteSyncService extends EventEmitter {
   readonly store: SyncStore;
   private engine: RemoteSyncEngine | null = null;
+  private client: SyncHttpClient | null = null;
+  private readonly linking = new Set<number>();
   private engineDeviceId: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly runtimes = new Map<number, ProjectRuntime>();
@@ -173,6 +192,7 @@ export class RemoteSyncService extends EventEmitter {
     if (!device) {
       if (row?.active) this.store.setDeviceActive(false);
       this.engine = null;
+      this.client = null;
       this.engineDeviceId = null;
       this.emitChanged();
       return;
@@ -196,6 +216,7 @@ export class RemoteSyncService extends EventEmitter {
       const client = this.deps.createClient
         ? this.deps.createClient(device, cloud)
         : new SyncHttpClient({ origin: device.origin, fetch: cloud.fetch, getToken: () => cloud.getToken(), appVersion: cloud.appVersion });
+      this.client = client;
       this.engine = new RemoteSyncEngine({
         db: this.deps.db,
         router: this.deps.router,
@@ -210,6 +231,7 @@ export class RemoteSyncService extends EventEmitter {
       this.engineDeviceId = device.deviceId;
     } else if (!enabled) {
       this.engine = null;
+      this.client = null;
       this.engineDeviceId = null;
     }
     this.emitChanged();
@@ -353,6 +375,149 @@ export class RemoteSyncService extends EventEmitter {
     return this.syncNow(projectId);
   }
 
+  // ---- linking -------------------------------------------------------------
+
+  /** What turning sync on for `projectId` can offer: its fingerprint and the remote projects to join. */
+  async getProjectChoices(projectId: number): Promise<RemoteSyncProjectChoices> {
+    const client = this.readyClient();
+    if (!client) throw new Error('Sync is not ready: turn it on and sign in to cyboflow cloud first');
+    const project = this.localProject(projectId);
+    if (!project) throw new Error(`Project ${projectId} not found`);
+    const fingerprint = await fingerprintProject(project.path, this.git());
+    const available = this.unlinkedRemoteProjects(await this.listRemoteProjects(client), projectId);
+    const matches = fingerprint ? available.filter((p) => p.fingerprint === fingerprint.wire) : [];
+    return {
+      projectId,
+      fingerprint: fingerprint?.canonical ?? null,
+      localItemCount: this.localItemCount(projectId),
+      matches: matches.map(toChoice),
+      others: available.filter((p) => !matches.includes(p)).map(toChoice),
+    };
+  }
+
+  /**
+   * Turn sync on for a project: create its remote project (the first machine;
+   * the whole backlog pushes as creates) or join an existing one (local
+   * backlog must be empty; the first pass pulls everything). The first pass
+   * starts in the background; the status shows it.
+   */
+  async enableProject(req: RemoteSyncEnableRequest): Promise<RemoteSyncEnableResult> {
+    const { projectId } = req;
+    const client = this.readyClient();
+    if (!client) return fail('not_ready', 'Sync is not ready: turn it on and sign in to cyboflow cloud first');
+    const project = this.localProject(projectId);
+    if (!project) return fail('not_found', `Project ${projectId} not found`);
+    if (this.linking.has(projectId)) return fail('conflict', 'This project is already being linked');
+    const existing = this.store.getProject(projectId)?.remoteProjectId ?? null;
+    if (existing) {
+      if (req.mode === 'join' && req.remoteProjectId !== existing) {
+        return fail('conflict', 'This project already syncs with another remote project. Turn sync off for it first.');
+      }
+      return { ok: true, remoteProjectId: existing };
+    }
+    this.linking.add(projectId);
+    try {
+      let remoteProjectId: string;
+      let fingerprint: string;
+      if (req.mode === 'create') {
+        fingerprint = (await fingerprintProject(project.path, this.git()))?.wire ?? localFingerprint();
+        try {
+          const created = await client.createProject({ name: project.name.slice(0, MAX_PROJECT_NAME), fingerprint });
+          remoteProjectId = created.body.project.id;
+        } catch (err) {
+          const taken = existingProjectOf(err);
+          if (taken) {
+            return fail('exists', `“${taken.name}” already syncs this repository. Join it instead.`, toChoice(taken));
+          }
+          throw err;
+        }
+      } else {
+        const count = this.localItemCount(projectId);
+        if (count > 0) {
+          return fail('not_empty', `This project already has ${count} backlog item${count === 1 ? '' : 's'}. For now, only a project with an empty backlog can join.`);
+        }
+        const remote = (await this.listRemoteProjects(client)).find((p) => p.id === req.remoteProjectId);
+        if (!remote) return fail('not_found', 'That remote project no longer exists');
+        if (this.linkedLocally(remote.id, projectId)) return fail('conflict', 'Another project on this computer already syncs with that remote project');
+        remoteProjectId = remote.id;
+        fingerprint = remote.fingerprint;
+      }
+      this.store.optIn(projectId, remoteProjectId, fingerprint);
+      this.store.appendLog(projectId, req.mode === 'create' ? `created remote project ${remoteProjectId}` : `joined remote project ${remoteProjectId}`);
+      this.emitChanged();
+      void this.syncProject(projectId, req.mode === 'create' ? 'created' : 'joined', { force: true });
+      return { ok: true, remoteProjectId };
+    } catch (err) {
+      this.handOffAuthFailure(err);
+      return fail('failed', err instanceof SyncHttpError ? `${err.code}: ${err.message}` : describe(err));
+    } finally {
+      this.linking.delete(projectId);
+    }
+  }
+
+  /**
+   * Stop syncing a project on this machine. Its local backlog and the remote
+   * project stay; only this machine's link and sync state go.
+   */
+  async disableProject(projectId: number): Promise<void> {
+    const rt = this.runtimes.get(projectId);
+    if (rt?.debounce) clearTimeout(rt.debounce);
+    if (rt?.running) await rt.running;
+    this.store.optOut(projectId);
+    this.runtimes.delete(projectId);
+    this.emitChanged();
+  }
+
+  private readyClient(): SyncHttpClient | null {
+    return this.canSync() ? this.client : null;
+  }
+
+  private git(): GitRunner {
+    return this.deps.git ?? (async (cwd, args) => (await runGitCapture(cwd, args)).stdout);
+  }
+
+  private async listRemoteProjects(client: SyncHttpClient): Promise<RemoteProject[]> {
+    try {
+      return (await client.listProjects()).body.projects;
+    } catch (err) {
+      this.handOffAuthFailure(err);
+      throw err;
+    }
+  }
+
+  private unlinkedRemoteProjects(remote: RemoteProject[], projectId: number): RemoteProject[] {
+    return remote.filter((p) => !this.linkedLocally(p.id, projectId));
+  }
+
+  /** Another local project already syncs with `remoteProjectId`. */
+  private linkedLocally(remoteProjectId: string, exceptProjectId: number): boolean {
+    return this.store.listProjects().some((p) => p.remoteProjectId === remoteProjectId && p.projectId !== exceptProjectId);
+  }
+
+  private localProject(projectId: number): { name: string; path: string } | null {
+    return (this.deps.db.prepare('SELECT name, path FROM projects WHERE id = ?').get(projectId) as { name: string; path: string } | undefined) ?? null;
+  }
+
+  /** Synced backlog rows (experiment arms never sync). */
+  private localItemCount(projectId: number): number {
+    const row = this.deps.db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM ideas WHERE project_id = ? AND experiment_id IS NULL)
+              + (SELECT COUNT(*) FROM epics WHERE project_id = ? AND experiment_id IS NULL)
+              + (SELECT COUNT(*) FROM tasks WHERE project_id = ? AND experiment_id IS NULL) AS n`,
+      )
+      .get(projectId, projectId, projectId) as { n: number };
+    return row.n;
+  }
+
+  /** A dead token found outside a pass goes back to the cloud sign-in, like one found in a pass. */
+  private handOffAuthFailure(err: unknown): void {
+    if (!(err instanceof SyncHttpError)) return;
+    if (err.kind === 'auth') this.deps.cloud?.markRevoked('unauthorized');
+    else if (err.kind === 'revoked') this.deps.cloud?.markRevoked('device_revoked');
+    else if (err.kind === 'not_entitled') this.deps.cloud?.requestAccountRefresh();
+  }
+
   // ---- status --------------------------------------------------------------
 
   getStatus(): RemoteSyncStatus {
@@ -396,6 +561,21 @@ export class RemoteSyncService extends EventEmitter {
     }
     return rt;
   }
+}
+
+function toChoice(p: RemoteProject): RemoteSyncRemoteProject {
+  return { id: p.id, name: p.name, createdAt: p.createdAt };
+}
+
+function fail(reason: Exclude<RemoteSyncEnableResult, { ok: true }>['reason'], message: string, project?: RemoteSyncRemoteProject): RemoteSyncEnableResult {
+  return project ? { ok: false, reason, message, project } : { ok: false, reason, message };
+}
+
+/** The remote project a `409 project_exists` names (the fingerprint is taken). */
+function existingProjectOf(err: unknown): RemoteProject | null {
+  if (!(err instanceof SyncHttpError) || err.status !== 409 || err.code !== 'project_exists') return null;
+  const details = err.details as { project?: RemoteProject } | undefined;
+  return details?.project && typeof details.project.id === 'string' ? details.project : null;
 }
 
 function describe(err: unknown): string {

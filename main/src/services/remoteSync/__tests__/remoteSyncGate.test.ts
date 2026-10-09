@@ -194,5 +194,16 @@ describe('remote sync gate', () => {
       const caller = appRouter.createCaller(createContext());
       expect(await caller.cyboflow.remoteSync.getStatus()).toMatchObject({ available: true, enabled: true });
     }, ROUTER_TIMEOUT_MS);
+
+    it('validates the project-linking inputs and answers not ready while signed out', async () => {
+      const manager = await managerWith({ remoteSync: { enabled: true } });
+      setRemoteSyncFacade(serviceFor(manager, tmpDir));
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.remoteSync.enableProject({ projectId: 1, mode: 'join' } as unknown as { projectId: number; mode: 'create' }),
+      ).rejects.toThrow();
+      await expect(caller.cyboflow.remoteSync.enableProject({ projectId: 0, mode: 'create' })).rejects.toThrow();
+      expect(await caller.cyboflow.remoteSync.enableProject({ projectId: 1, mode: 'create' })).toMatchObject({ ok: false, reason: 'not_ready' });
+    }, ROUTER_TIMEOUT_MS);
   });
 });
