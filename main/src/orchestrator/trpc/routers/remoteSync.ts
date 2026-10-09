@@ -49,6 +49,7 @@ const conflictAction = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('recreate') }),
   z.object({ kind: z.literal('move'), parentId: z.string().min(1).max(200) }),
   z.object({ kind: z.literal('delete_children') }),
+  z.object({ kind: z.literal('swap') }),
 ]);
 
 const enableRequest = z.discriminatedUnion('mode', [

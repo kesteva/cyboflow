@@ -25,6 +25,7 @@ const ACTION_LABEL: Record<RemoteSyncConflictAction['kind'], (c: RemoteSyncConfl
   recreate: () => 'Recreate as a new item',
   move: () => 'Move…',
   delete_children: () => 'Delete children',
+  swap: () => 'Swap (restore this edge, remove the other)',
 };
 
 interface OrphanChild {
@@ -137,6 +138,7 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
       case 'keep':
       case 'use_other':
       case 'recreate':
+      case 'swap':
         void resolve({ kind });
         return;
     }

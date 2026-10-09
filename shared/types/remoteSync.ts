@@ -132,7 +132,9 @@ export type RemoteSyncConflictAction =
   /** orphaned: move the children under another parent. */
   | { kind: 'move'; parentId: string }
   /** orphaned: delete the children. */
-  | { kind: 'delete_children' };
+  | { kind: 'delete_children' }
+  /** dependency_edge: restore the removed edge and remove the one that was kept. */
+  | { kind: 'swap' };
 
 /**
  * A sync conflict: an edit that was thrown away, or a delete that changed
@@ -153,7 +155,10 @@ export interface RemoteSyncConflict {
   current: RemoteSyncConflictSide;
   /** The value that lost. For delete_vs_edit, every lost field as an object. */
   other: RemoteSyncConflictSide;
-  /** orphaned: `{ children: [{ id, ref, type }] }`; dependency_edge: the removed edge. */
+  /**
+   * orphaned: `{ children: [{ id, ref, type }] }`; dependency_edge:
+   * `{ removedEdge, keptEdge? }`, each `{ taskId, dependsOnId }`.
+   */
   extra: unknown;
   createdAt: number;
   resolvedAt: number | null;

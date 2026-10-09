@@ -531,14 +531,14 @@ export class RemoteApplier {
         const ownerState = store.getEntity('task', competing.taskId);
         if (ownerState) {
           report.filedConflicts.push(
-            this.fileDependencyEdgeConflict(projectId, ownerState, competing.dependsOnId, incoming.entry.hlc),
+            this.fileDependencyEdgeConflict(projectId, ownerState, competing.dependsOnId, incoming.entry.hlc, refusedEdge),
           );
         }
       } else {
         const st = store.getEntity('task', incoming.st.entityId);
         if (st) {
           report.filedConflicts.push(
-            this.fileDependencyEdgeConflict(projectId, st, refusedEdge.dependsOnId, competing?.hlc ?? ''),
+            this.fileDependencyEdgeConflict(projectId, st, refusedEdge.dependsOnId, competing?.hlc ?? '', competing),
           );
         }
       }
@@ -586,8 +586,17 @@ export class RemoteApplier {
     return best;
   }
 
-  /** File the record for a dropped edge `st` → `depId`; `winningHlc` is the kept edge's edit time. */
-  private fileDependencyEdgeConflict(projectId: number, st: SyncEntityState, depId: string, winningHlc: string): string {
+  /**
+   * File the record for a dropped edge `st` → `depId`; `winningHlc` is the kept
+   * edge's edit time, and `kept` that edge, which "Swap" removes.
+   */
+  private fileDependencyEdgeConflict(
+    projectId: number,
+    st: SyncEntityState,
+    depId: string,
+    winningHlc: string,
+    kept: { taskId: string; dependsOnId: string } | null,
+  ): string {
     const id = clientConflictId('dependency_edge', st.entityId, [st.entityId, depId], winningHlc);
     this.deps.store.putClientConflict(projectId, {
       id,
@@ -599,7 +608,10 @@ export class RemoteApplier {
       field: 'depends_on',
       current: { value: null, device: this.deps.deviceId, hlc: null },
       other: { value: { id: depId }, device: null, hlc: winningHlc },
-      extra: { removedEdge: { taskId: st.entityId, dependsOnId: depId } },
+      extra: {
+        removedEdge: { taskId: st.entityId, dependsOnId: depId },
+        ...(kept ? { keptEdge: { taskId: kept.taskId, dependsOnId: kept.dependsOnId } } : {}),
+      },
       createdAt: this.now(),
     });
     return id;

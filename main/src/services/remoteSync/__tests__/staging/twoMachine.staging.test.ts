@@ -9,6 +9,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TwoMachines, stagingEnabled, type Machine } from './stagingHarness';
 import { projectionHash } from '../../canonical';
+import { resolveConflict } from '../../conflicts';
+import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 
 const TIMEOUT = 120_000;
 
@@ -170,6 +172,16 @@ describe.skipIf(!stagingEnabled)('remote sync against staging: two machines', ()
     expect(records(t.a)).toHaveLength(1);
     expect(records(t.b).map((c) => c.id)).toEqual(records(t.a).map((c) => c.id));
     expect(records(t.a)[0].entityId).toBe(y);
+    expect(records(t.a)[0].extra).toEqual({ removedEdge: { taskId: y, dependsOnId: x }, keptEdge: { taskId: x, dependsOnId: y } });
+
+    // "Swap" on A: user edits drop the kept edge and restore the other, everywhere.
+    const deps = { db: dbAdapter(t.a.db), router: t.a.router, store: t.a.store, deviceId: t.a.device.deviceId, now: () => Date.now() };
+    expect(await resolveConflict(deps, records(t.a)[0].id, { kind: 'swap' })).toMatchObject({ ok: true });
+    await expectConverged(t);
+    expect(edges(t.a)).toEqual([`${y}>${x}`]);
+    expect(edges(t.b)).toEqual(edges(t.a));
+    expect(records(t.a)).toEqual([]);
+    expect(records(t.b)).toEqual([]);
   }, TIMEOUT);
 
   it('removing a project locally records no tombstones', async () => {

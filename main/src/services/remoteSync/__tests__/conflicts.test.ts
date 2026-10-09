@@ -146,6 +146,51 @@ describe('delete vs edit', () => {
   });
 });
 
+describe('dependency edge', () => {
+  const edges = () =>
+    db.prepare(`SELECT task_id AS t, depends_on_task_id AS d FROM task_dependencies ORDER BY task_id`).all() as Array<{ t: string; d: string }>;
+
+  it('swap restores the removed edge and removes the kept one, as the user', async () => {
+    const a = await task('a');
+    const b = await task('b');
+    await router.applyChange(projectId, { actor: 'user', taskId: b, dependsOnTaskId: a });
+    file({
+      id: 'e1', entityId: a, kind: 'dependency_edge', field: 'depends_on',
+      extra: { removedEdge: { taskId: a, dependsOnId: b }, keptEdge: { taskId: b, dependsOnId: a } },
+    });
+    expect(open()[0].actions).toEqual(['keep', 'swap']);
+    expect(await resolveConflict(deps, 'e1', { kind: 'swap' })).toMatchObject({ ok: true });
+    expect(edges()).toEqual([{ t: a, d: b }]);
+    expect(store.listPendingResolutions(projectId)).toEqual([{ id: 'e1', resolution: 'swapped' }]);
+  });
+
+  it('offers only keep when the record does not name the kept edge', async () => {
+    const a = await task('a');
+    const b = await task('b');
+    file({ id: 'e2', entityId: a, kind: 'dependency_edge', extra: { removedEdge: { taskId: a, dependsOnId: b } } });
+    expect(open()[0].actions).toEqual(['keep']);
+    expect(await resolveConflict(deps, 'e2', { kind: 'swap' })).toMatchObject({ ok: false });
+  });
+
+  it('puts the kept edge back when restoring would close another cycle', async () => {
+    const a = await task('a');
+    const b = await task('b');
+    const c = await task('c');
+    // Kept b → a, plus a second path b → c → a: removing b → a leaves a cycle for a → b to close.
+    await router.applyChange(projectId, { actor: 'user', taskId: b, dependsOnTaskId: a });
+    await router.applyChange(projectId, { actor: 'user', taskId: b, dependsOnTaskId: c });
+    await router.applyChange(projectId, { actor: 'user', taskId: c, dependsOnTaskId: a });
+    file({
+      id: 'e3', entityId: a, kind: 'dependency_edge',
+      extra: { removedEdge: { taskId: a, dependsOnId: b }, keptEdge: { taskId: b, dependsOnId: a } },
+    });
+    const before = edges();
+    expect(await resolveConflict(deps, 'e3', { kind: 'swap' })).toMatchObject({ ok: false });
+    expect(edges()).toEqual(before);
+    expect(store.listPendingResolutions(projectId)).toEqual([]);
+  });
+});
+
 describe('orphaned children', () => {
   let a: string;
   let b: string;

@@ -41,7 +41,7 @@ const MERGEABLE_FIELDS = new Set(['title', 'summary', 'body']);
 const RESOLUTION: Record<string, Partial<Record<RemoteSyncConflictAction['kind'], string>>> = {
   field: { keep: 'keep_current', use_other: 'use_other', merge: 'merged' },
   delete_vs_edit: { keep: 'keep_deleted', recreate: 'recreated' },
-  dependency_edge: { keep: 'keep_removed' },
+  dependency_edge: { keep: 'keep_removed', swap: 'swapped' },
   orphaned: { keep: 'keep', move: 'moved', delete_children: 'deleted_children' },
 };
 
@@ -145,6 +145,11 @@ function actionsFor(db: DatabaseLike, projectId: number, r: ConflictRecord, type
       return ['keep', 'recreate'];
     case 'orphaned':
       return childrenOf(r).length > 0 ? ['keep', 'move', 'delete_children'] : ['keep'];
+    case 'dependency_edge': {
+      const edges = edgesOf(r);
+      const here = (e: Edge) => localTypeOf(db, e.taskId) === 'task' && localTypeOf(db, e.dependsOnId) === 'task';
+      return edges && here(edges.removed) && here(edges.kept) ? ['keep', 'swap'] : ['keep'];
+    }
     default:
       return ['keep'];
   }
@@ -202,6 +207,26 @@ async function applyAction(deps: ConflictDeps, projectId: number, c: RemoteSyncC
         else if (parentType === 'idea' && child.type !== 'idea') change.originatingIdeaId = action.parentId;
         else throw new Error(`A ${child.type} cannot move under a ${parentType}`);
         await router.applyChange(projectId, change);
+      }
+      return;
+    }
+    case 'swap': {
+      const edges = edgesOf(c);
+      if (!edges) throw new Error('This conflict does not say which edge was kept');
+      const edit = (e: Edge, removeDependency: boolean): TaskChange => ({
+        actor: 'user',
+        entityType: 'task',
+        taskId: e.taskId,
+        dependsOnTaskId: e.dependsOnId,
+        removeDependency,
+      });
+      await router.applyChange(projectId, edit(edges.kept, true));
+      try {
+        await router.applyChange(projectId, edit(edges.removed, false));
+      } catch (err) {
+        // Restoring would close another cycle: put the kept edge back.
+        await router.applyChange(projectId, edit(edges.kept, false));
+        throw err;
       }
       return;
     }
@@ -265,6 +290,21 @@ function fieldIntoChange(
     default:
       throw new Error(`“${field}” cannot be set from a conflict`);
   }
+}
+
+interface Edge {
+  taskId: string;
+  dependsOnId: string;
+}
+
+/** A dependency_edge record's removed and kept edges; null when either is missing. */
+function edgesOf(c: Pick<ConflictRecord, 'extra'>): { removed: Edge; kept: Edge } | null {
+  const extra = c.extra as { removedEdge?: Partial<Edge>; keptEdge?: Partial<Edge> } | null | undefined;
+  const edge = (e: Partial<Edge> | undefined): Edge | null =>
+    typeof e?.taskId === 'string' && typeof e.dependsOnId === 'string' ? { taskId: e.taskId, dependsOnId: e.dependsOnId } : null;
+  const removed = edge(extra?.removedEdge);
+  const kept = edge(extra?.keptEdge);
+  return removed && kept ? { removed, kept } : null;
 }
 
 function childrenOf(c: Pick<ConflictRecord, 'extra'>): Array<{ id: string; type: SyncedEntityType }> {
