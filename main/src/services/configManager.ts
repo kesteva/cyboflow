@@ -878,6 +878,16 @@ export class ConfigManager extends EventEmitter {
     return this.isAgentsAvailable() && this.config.agents?.enabled === true;
   }
 
+  /** Environments (SSH machines) exists in this build at all: dev builds only. */
+  isEnvironmentsAvailable(): boolean {
+    return isDevBuild();
+  }
+
+  /** THE environments gate: isDevBuild() && environments.enabled === true. Live per call. */
+  isEnvironmentsEnabled(): boolean {
+    return this.isEnvironmentsAvailable() && this.config.environments?.enabled === true;
+  }
+
   /**
    * The cyboflow cloud origin (shared/types/cloudOrigins.ts). Release builds: production, any override
    * ignored. Dev builds: the `cloud.origin` override when it is acceptable, else staging. A present but

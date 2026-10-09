@@ -21,6 +21,7 @@ import {
 } from '../../../shared/types/webViewer';
 import { normalizeSystemWatchedPorts } from '../../../shared/types/systemWatchedPorts';
 import { AGENTS_CONFIG_KEYS, type AgentsConfig } from '../../../shared/types/persistentAgents';
+import { HOSTS_CONFIG_KEYS, type HostsConfig } from '../../../shared/types/hosts';
 import { REMOTE_SYNC_CONFIG_KEYS, type RemoteSyncConfig } from '../../../shared/types/remoteSync';
 
 /**
@@ -226,6 +227,41 @@ export function createConfigOps(
           normalized = {
             ...normalized,
             agents: Object.keys(merged).length === 0 ? undefined : merged,
+          };
+        }
+
+        // Environments: dev builds only. A release build rejects the write outright, so the
+        // feature has no reachable surface there. Same rules as agents above.
+        if (updates.environments !== undefined) {
+          if (!configManager.isEnvironmentsAvailable()) {
+            return { success: false, error: 'Environments is not available in this build' };
+          }
+          const patch: unknown = updates.environments;
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            return { success: false, error: 'Invalid environments payload' };
+          }
+          const raw = patch as Record<string, unknown>;
+          for (const key of Object.keys(raw)) {
+            if (!(HOSTS_CONFIG_KEYS as readonly string[]).includes(key)) {
+              return { success: false, error: `Unknown environments key: ${key}` };
+            }
+          }
+          const merged: HostsConfig = { ...(oldConfig.environments ?? {}) };
+          for (const key of HOSTS_CONFIG_KEYS) {
+            if (!(key in raw)) continue;
+            const value = raw[key];
+            if (value === undefined || value === null) {
+              delete merged[key];
+              continue;
+            }
+            if (typeof value !== 'boolean') {
+              return { success: false, error: `Invalid environments.${key}: expected a boolean` };
+            }
+            merged[key] = value;
+          }
+          normalized = {
+            ...normalized,
+            environments: Object.keys(merged).length === 0 ? undefined : merged,
           };
         }
 
