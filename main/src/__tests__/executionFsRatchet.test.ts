@@ -8,7 +8,11 @@
  * The same list feeds the `no-restricted-imports` block in eslint.config.js.
  * This test additionally catches `require()` / dynamic `import()`, which no
  * eslint import rule sees (e.g. the inline require('fs') in taskQueue.ts).
- * Type-only imports are erased by tsc and are not violations.
+ *
+ * Type-only imports COUNT as violations, exactly like the eslint gate: the core
+ * `no-restricted-imports` rule (no `allowTypeImports`) flags `import type`
+ * from these modules too, and the two gates must agree on what a violation is.
+ * (A type you need from fs belongs behind the ExecutionHost contract anyway.)
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -55,15 +59,6 @@ const MODULE_REFS = [
   /\b(?:require|import)\s*\(\s*['"](?<spec>[^'"]+)['"]\s*\)/g,
 ] as const;
 
-function isTypeOnly(clause: string | undefined): boolean {
-  if (clause === undefined) return false;
-  if (/^\s*type\s/.test(clause)) return true;
-  const braces = clause.match(/\{([\s\S]*)\}/);
-  if (!braces) return false;
-  const bindings = braces[1].split(',').map(s => s.trim()).filter(s => s.length > 0);
-  return bindings.length > 0 && bindings.every(b => /^type\s/.test(b));
-}
-
 function isProductionFile(relPath: string): boolean {
   if (!relPath.endsWith('.ts')) return false;
   if (relPath.endsWith('.test.ts') || relPath.endsWith('.itest.ts')) return false;
@@ -94,9 +89,8 @@ function findViolationsInSource(text: string): Violation[] {
   const byLine = new Map<string, Violation>();
   for (const re of MODULE_REFS) {
     for (const match of text.matchAll(re)) {
-      const { spec, clause } = match.groups ?? {};
+      const { spec } = match.groups ?? {};
       if (spec === undefined || !FORBIDDEN_SPECS.has(spec)) continue;
-      if (isTypeOnly(clause)) continue;
       const line = text.slice(0, match.index).split('\n').length;
       byLine.set(`${line}:${spec}`, { line, spec });
     }
@@ -164,6 +158,10 @@ describe('execution-path fs / child_process ratchet', () => {
       ["import 'fs';", 'fs'],
       ["const fs = require('fs');", 'fs'],
       ["const cp = await import('node:child_process');", 'node:child_process'],
+      // Type-only imports are violations too (the eslint rule flags them; the gates agree).
+      ["import type { Stats } from 'fs';", 'fs'],
+      ["import { type Stats, type Dirent } from 'node:fs';", 'node:fs'],
+      ["export type { Stats } from 'node:fs';", 'node:fs'],
     ];
     for (const [src, spec] of flagged) {
       it(`flags ${src}`, () => {
@@ -172,8 +170,6 @@ describe('execution-path fs / child_process ratchet', () => {
     }
 
     const clean = [
-      "import type { Stats } from 'fs';",
-      "import { type Stats, type Dirent } from 'node:fs';",
       "import path from 'path';",
       "import { x } from './fs';",
       "import fse from 'fs-extra';",
