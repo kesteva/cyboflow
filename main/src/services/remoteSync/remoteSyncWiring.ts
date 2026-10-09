@@ -72,6 +72,7 @@ export function wireRemoteSync(deps: RemoteSyncWiringDeps): RemoteSyncService | 
     getProjectChoices: (projectId) => service.getProjectChoices(projectId),
     enableProject: (req) => service.enableProject(req),
     disableProject: (projectId) => service.disableProject(projectId),
+    getLog: (projectId) => service.getLog(projectId),
   });
   if (deps.trackers) {
     service.trackerClaims.setConnections(deps.trackers);

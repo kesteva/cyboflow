@@ -406,7 +406,7 @@ describe('linking a project', () => {
     await service.disableProject(projectId);
     expect(service.store.getProject(projectId)).toBeNull();
     expect(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?').get(projectId)).toEqual({ n: 1 });
-    expect(service.getStatus()).toMatchObject({ projects: [] });
+    expect(service.getStatus()).toMatchObject({ projects: [{ projectId, remoteProjectId: null, status: null, trackerClaims: [] }] });
   });
 });
 
@@ -435,5 +435,23 @@ describe('tracker connections on join', () => {
     expect(statusDuringPass).toEqual(['paused']);
     expect(rows[0].status).toBe('active');
     expect(requests).toContain('POST /v1/tracker-claims');
+  });
+});
+
+describe('status for the Sync section', () => {
+  it('lists every local project, with claims and a log for the synced ones', async () => {
+    const other = svc.createProject('Q', join(dir, 'q')).id;
+    service.start();
+    await service.enableProject({ projectId, mode: 'create' });
+    await service.idle();
+    service.store.putClaim({ key: 'rp|linear|w|', projectId, state: 'held_by_other', holderDevice: 'dev-2', holderLabel: 'Linear (acme) runs on Laptop', checkedAt: 'x' });
+    service.store.putClaim({ key: 'rp|plane|p|', projectId, state: 'free', holderDevice: null, holderLabel: null, checkedAt: 'x' });
+    const status = service.getStatus();
+    expect(status.available && status.projects).toEqual([
+      expect.objectContaining({ projectId, name: 'P', remoteProjectId: 'rp', status: 'active', trackerClaims: [{ label: 'Linear (acme) runs on Laptop', mine: false }] }),
+      expect.objectContaining({ projectId: other, name: 'Q', remoteProjectId: null, status: null, trackerClaims: [] }),
+    ]);
+    expect(service.getLog(projectId).some((l) => l.endsWith('created remote project rp'))).toBe(true);
+    expect(service.getLog(other)).toEqual([]);
   });
 });

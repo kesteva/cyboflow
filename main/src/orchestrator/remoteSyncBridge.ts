@@ -31,6 +31,8 @@ export interface RemoteSyncFacade {
   enableProject(req: RemoteSyncEnableRequest): Promise<RemoteSyncEnableResult>;
   /** Stop syncing a project on this machine; local data stays. */
   disableProject(projectId: number): Promise<void>;
+  /** The project's sync log, oldest first. */
+  getLog(projectId: number): string[];
 }
 
 let facade: RemoteSyncFacade | null = null;

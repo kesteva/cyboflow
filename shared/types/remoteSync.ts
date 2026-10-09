@@ -39,10 +39,21 @@ export type RemoteSyncProjectState =
   | 'upgrade_required'
   | 'storage_full';
 
+/** A tracker claim on a synced project: which machine runs that tracker connection. */
+export interface RemoteSyncTrackerClaim {
+  /** "Linear (acme) runs on Studio". */
+  label: string;
+  /** This machine holds it. */
+  mine: boolean;
+}
+
+/** One local project in the Sync section; every project is listed, synced or not. */
 export interface RemoteSyncProjectStatus {
   projectId: number;
+  name: string;
+  /** Null while sync is off for this project (then `status` is null too). */
   remoteProjectId: string | null;
-  status: RemoteSyncProjectState;
+  status: RemoteSyncProjectState | null;
   statusDetail: string | null;
   lastSyncAt: string | null;
   /** A pass is running right now. */
@@ -50,6 +61,7 @@ export interface RemoteSyncProjectStatus {
   /** Set while the project backs off after a failure (ISO). */
   backoffUntil: string | null;
   openConflicts: number;
+  trackerClaims: RemoteSyncTrackerClaim[];
 }
 
 /** A project on the sync service, as offered for joining. */

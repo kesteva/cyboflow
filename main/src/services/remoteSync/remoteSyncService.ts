@@ -28,6 +28,7 @@ import type {
   RemoteSyncEnableRequest,
   RemoteSyncEnableResult,
   RemoteSyncProjectChoices,
+  RemoteSyncProjectStatus,
   RemoteSyncRemoteProject,
   RemoteSyncStatus,
 } from '../../../../shared/types/remoteSync';
@@ -546,21 +547,48 @@ export class RemoteSyncService extends EventEmitter {
 
   // ---- status --------------------------------------------------------------
 
+  /** The project's sync log, oldest first (the store keeps the last 200 lines). */
+  getLog(projectId: number): string[] {
+    const row = this.deps.db.prepare('SELECT log_json FROM remote_sync_projects WHERE project_id = ?').get(projectId) as
+      | { log_json: string }
+      | undefined;
+    if (!row) return [];
+    try {
+      const parsed: unknown = JSON.parse(row.log_json);
+      return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
   getStatus(): RemoteSyncStatus {
     const { configManager, cloud } = this.deps;
     if (!configManager.isRemoteSyncAvailable()) return { available: false };
     const device = cloud?.getDevice() ?? null;
-    const projects = this.store.listProjects().map((p) => {
-      const rt = this.runtimes.get(p.projectId);
+    const linked = new Map(this.store.listProjects().map((p) => [p.projectId, p]));
+    const locals = this.deps.db.prepare('SELECT id, name FROM projects ORDER BY COALESCE(display_order, id), id').all() as Array<{
+      id: number;
+      name: string;
+    }>;
+    const projects: RemoteSyncProjectStatus[] = locals.map(({ id, name }) => {
+      const p = linked.get(id);
+      const rt = this.runtimes.get(id);
       return {
-        projectId: p.projectId,
-        remoteProjectId: p.remoteProjectId,
-        status: p.status,
-        statusDetail: p.statusDetail,
-        lastSyncAt: p.lastSyncAt,
+        projectId: id,
+        name,
+        remoteProjectId: p?.remoteProjectId ?? null,
+        status: p?.status ?? null,
+        statusDetail: p?.statusDetail ?? null,
+        lastSyncAt: p?.lastSyncAt ?? null,
         syncing: rt?.running !== null && rt?.running !== undefined,
         backoffUntil: rt && rt.backoffUntil > this.now() ? new Date(rt.backoffUntil).toISOString() : null,
-        openConflicts: this.store.listOpenConflicts(p.projectId).length,
+        openConflicts: p ? this.store.listOpenConflicts(id).length : 0,
+        trackerClaims: p
+          ? this.store
+              .listClaims(id)
+              .filter((c) => (c.state === 'held_by_you' || c.state === 'held_by_other') && c.holderLabel)
+              .map((c) => ({ label: c.holderLabel as string, mine: c.state === 'held_by_you' }))
+          : [],
       };
     });
     return {
