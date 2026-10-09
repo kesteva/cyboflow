@@ -61,10 +61,14 @@ function configOpsFor(manager: ConfigManager): ConfigOpsLike {
   });
 }
 
+// Closed in afterEach: Windows refuses to unlink an open sessions.db (EBUSY).
+const openDatabases: DatabaseService[] = [];
+
 /** A service over a fresh database, with no cloud sign-in composed. */
 function serviceFor(manager: ConfigManager, dir: string): RemoteSyncService {
   const svc = new DatabaseService(path.join(dir, 'sessions.db'));
   svc.initialize();
+  openDatabases.push(svc);
   const db = dbAdapter(svc.getDb());
   return new RemoteSyncService({ db, router: new TaskChangeRouter(db), configManager: manager, cloud: null });
 }
@@ -107,6 +111,7 @@ describe('remote sync gate', () => {
   afterEach(async () => {
     _setDevBuildForTesting(undefined);
     _resetRemoteSyncFacadeForTesting();
+    for (const svc of openDatabases.splice(0)) svc.close();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

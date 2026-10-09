@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { EventEmitter } from 'node:events';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 const electronMock = vi.hoisted(() => ({
   app: { on: vi.fn(), getVersion: vi.fn(() => '9.9.9') },
@@ -259,7 +259,7 @@ describe('composeCloudAccount', () => {
     };
     walk(root);
     const writes = /(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+cloud_account\b/i;
-    const writers = files.filter((f) => writes.test(readFileSync(f, 'utf-8'))).map((f) => relative(root, f));
+    const writers = files.filter((f) => writes.test(readFileSync(f, 'utf-8'))).map((f) => relative(root, f).split(sep).join('/'));
     expect(writers).toEqual(['services/cloud/cloudAccountStore.ts']);
   });
 });
