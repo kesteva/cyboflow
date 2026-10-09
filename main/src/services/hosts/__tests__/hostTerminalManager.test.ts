@@ -33,7 +33,7 @@ function makeFakePty(): FakePty {
   return pty;
 }
 
-function harness(maxOpen?: number) {
+function harness(maxOpen?: number, onExit?: (id: string, code: number | null) => void) {
   const spawns: Array<{ file: string; args: string[] | string; options: { cwd?: string; env?: Record<string, string | undefined> }; pty: FakePty }> = [];
   const emits: Array<{ id: string; chunk: string }> = [];
   const spawner: ShellSpawner = (file, args, options) => {
@@ -44,6 +44,7 @@ function harness(maxOpen?: number) {
   const mgr = new HostTerminalManager((id, chunk) => emits.push({ id, chunk }), spawner, {
     homedir: () => '/home/test',
     maxOpen,
+    onExit,
   });
   return { mgr, spawns, emits };
 }
@@ -104,6 +105,25 @@ describe('HostTerminalManager.open', () => {
     expect(() => mgr.open('h', 'box')).not.toThrow();
   });
 
+  it('exited terminals do not hold a slot: the oldest exited entry is evicted, live ones never are', () => {
+    const { mgr, spawns } = harness(3);
+    const a = mgr.open('h', 'box');
+    const b = mgr.open('h', 'box');
+    const c = mgr.open('h', 'box');
+    spawns[1].pty.emitExit(0); // b exits first
+    spawns[0].pty.emitExit(1); // then a (older entry)
+    const d = mgr.open('h', 'box');
+    // a is the oldest EXITED entry by open order, so it is evicted; b stays readable.
+    expect(mgr.getBacklog(a)).toEqual({ backlog: '', exited: true, exitCode: null });
+    expect(mgr.getBacklog(b)).toMatchObject({ exited: true, exitCode: 0 });
+    const e = mgr.open('h', 'box');
+    expect(mgr.getBacklog(b)).toEqual({ backlog: '', exited: true, exitCode: null });
+    expect([c, d, e].every((id) => mgr.getBacklog(id).exited === false)).toBe(true);
+    // All three slots live: only now is the cap a refusal.
+    expect(() => mgr.open('h', 'box')).toThrow(expect.objectContaining({ name: 'HostTerminalUnavailableError' }));
+    expect(spawns.every((sp) => sp.pty.killed === 0)).toBe(true);
+  });
+
   it('defaults the cap to 8', () => {
     const { mgr } = harness();
     for (let i = 0; i < 8; i++) mgr.open('h', 'box');
@@ -134,6 +154,18 @@ describe('bytes, backlog, exit', () => {
     expect(spawns[0].pty.written).toEqual([]);
     mgr.closeOne(id);
     expect(mgr.getBacklog(id)).toEqual({ backlog: '', exited: true, exitCode: null });
+  });
+
+  it('pushes the exit through onExit, and a throwing listener is contained', () => {
+    const exits: Array<[string, number | null]> = [];
+    const { mgr, spawns } = harness(undefined, (id, code) => {
+      exits.push([id, code]);
+      throw new Error('listener');
+    });
+    const id = mgr.open('h', 'box');
+    expect(() => spawns[0].pty.emitExit(255)).not.toThrow();
+    expect(exits).toEqual([[id, 255]]);
+    expect(mgr.getBacklog(id)).toMatchObject({ exited: true, exitCode: 255 });
   });
 
   it('unknown ids are inert', () => {

@@ -5,7 +5,9 @@
  * unit-testable without the native module, and bytes leave through `emitBytes` (the caller sends
  * them on `cyboflow:shell:<terminalId>`). Differences: the spawned command is `ssh -tt … -- <target>`
  * (no BatchMode: the user may need to answer a prompt), the cwd is the home directory, and an
- * exited terminal is KEPT (backlog readable, exited/exitCode set) until `closeOne`.
+ * exited terminal is KEPT (backlog readable, exited/exitCode set) until `closeOne` — or until a new open needs
+ * its slot: the open-terminal cap counts LIVE terminals only, and the oldest exited entry is evicted first.
+ * `onExit` pushes the exit to the renderer (the view reads `exited` only once, at mount).
  */
 import * as os from 'os';
 import { getShellPath } from '../../utils/shellPath';
@@ -38,21 +40,39 @@ export class HostTerminalManager {
   private nextN = 1;
   private readonly homedir: () => string;
   private readonly maxOpen: number;
+  private readonly onExit: ((terminalId: string, exitCode: number | null) => void) | undefined;
 
   constructor(
     /** Push a raw PTY chunk to the renderer (wired to `cyboflow:shell:<terminalId>`). */
     private readonly emitBytes: (terminalId: string, chunk: string) => void,
     /** node-pty spawner (production: `pty.spawn`; tests: a fake). */
     private readonly spawn: ShellSpawner,
-    opts?: { homedir?: () => string; maxOpen?: number },
+    opts?: {
+      homedir?: () => string;
+      maxOpen?: number;
+      /** The ssh process exited (on its own, or killed by a close). Never throws back into the PTY callback. */
+      onExit?: (terminalId: string, exitCode: number | null) => void;
+    },
   ) {
     this.homedir = opts?.homedir ?? os.homedir;
     this.maxOpen = opts?.maxOpen ?? DEFAULT_MAX_OPEN;
+    this.onExit = opts?.onExit;
+  }
+
+  /** Make room for one more terminal: evict the oldest EXITED entry; throw only when every slot is live. */
+  private reserveSlot(): void {
+    if (this.terminals.size < this.maxOpen) return;
+    for (const [terminalId, term] of this.terminals) {
+      if (!term.exited) continue;
+      this.terminals.delete(terminalId); // Map order = open order, so this is the oldest exited one
+      return;
+    }
+    throw new HostTerminalUnavailableError();
   }
 
   open(hostId: string, sshTarget: string): string {
     if (!SSH_TARGET_RE.test(sshTarget)) throw new InvalidSshTargetError();
-    if (this.terminals.size >= this.maxOpen) throw new HostTerminalUnavailableError();
+    this.reserveSlot();
 
     const cwd = this.homedir();
     const env: Record<string, string | undefined> = {
@@ -86,6 +106,12 @@ export class HostTerminalManager {
     ptyProcess.onExit((event) => {
       term.exited = true;
       term.exitCode = event.exitCode;
+      try {
+        this.onExit?.(terminalId, event.exitCode);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[HostTerminalManager] exit listener threw for ${terminalId}:`, redactSecrets(msg));
+      }
     });
     return terminalId;
   }

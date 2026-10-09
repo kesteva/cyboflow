@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { makeHost, makeHostsStatus, makeLocalHost } from './fixtures';
+import type { ShellTerminalApi } from '../../cyboflow/RunShellTerminalView';
 
 let terminalOpen: ReturnType<typeof vi.fn>;
 let terminalClose: ReturnType<typeof vi.fn>;
@@ -8,6 +9,8 @@ let archiveMutate: ReturnType<typeof vi.fn>;
 let runPreflightMutate: ReturnType<typeof vi.fn>;
 let setUserCapMutate: ReturnType<typeof vi.fn>;
 let listQuery: ReturnType<typeof vi.fn>;
+let terminalExitSubscribe: ReturnType<typeof vi.fn>;
+let capturedApi: ShellTerminalApi | undefined;
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -19,13 +22,20 @@ vi.mock('../../../trpc/client', () => ({
         setUserCap: { get mutate() { return setUserCapMutate; } },
         terminalOpen: { get mutate() { return terminalOpen; } },
         terminalClose: { get mutate() { return terminalClose; } },
+        onTerminalExit: { get subscribe() { return terminalExitSubscribe; } },
         onPreflightProgress: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
     },
   },
 }));
 vi.mock('../../cyboflow/RunShellTerminalView', () => ({
-  RunShellTerminalView: ({ terminalId }: { terminalId: string }) => <div data-testid="fake-terminal">{terminalId}</div>,
+  RunShellTerminalView: ({ terminalId, api }: {
+    terminalId: string;
+    api?: ShellTerminalApi;
+  }) => {
+    capturedApi = api;
+    return <div data-testid="fake-terminal">{terminalId}</div>;
+  },
 }));
 
 import { EnvironmentsTab } from '../EnvironmentsTab';
@@ -42,6 +52,8 @@ beforeEach(() => {
   runPreflightMutate = vi.fn().mockResolvedValue({ ok: true, result: {} });
   setUserCapMutate = vi.fn().mockResolvedValue({ ok: true });
   listQuery = vi.fn().mockResolvedValue([]);
+  terminalExitSubscribe = vi.fn().mockReturnValue({ unsubscribe: vi.fn() });
+  capturedApi = undefined;
   useHostsStore.setState({ featureStatus: null, hosts: [], hostsStatus: 'idle', hostsError: null, preflightLive: {} });
 });
 
@@ -169,6 +181,24 @@ describe('EnvironmentCard', () => {
     fireEvent.click(screen.getByLabelText('Close modal'));
     await waitFor(() => expect(terminalClose).toHaveBeenCalledWith({ terminalId: 't1' }));
     expect(screen.queryByTestId('host-terminal-modal')).toBeNull();
+  });
+
+  it('the host terminal api subscribes to the exit push for its terminal and relays the exit code', async () => {
+    const unsubscribe = vi.fn();
+    terminalExitSubscribe.mockReturnValue({ unsubscribe });
+    seed();
+    render(<EnvironmentsTab />);
+    fireEvent.click(screen.getByTestId('environment-terminal-h2'));
+    await screen.findByTestId('fake-terminal');
+    expect(capturedApi?.onExit).toBeDefined();
+    const listener = vi.fn();
+    const stop = capturedApi?.onExit?.(listener);
+    expect(terminalExitSubscribe).toHaveBeenCalledWith({ terminalId: 't1' }, expect.any(Object));
+    const handlers = terminalExitSubscribe.mock.calls[0][1] as { onData: (ev: { exitCode: number | null }) => void };
+    handlers.onData({ exitCode: 255 });
+    expect(listener).toHaveBeenCalledWith(255);
+    stop?.();
+    expect(unsubscribe).toHaveBeenCalled();
   });
 
   it('terminal open failure is shown', async () => {

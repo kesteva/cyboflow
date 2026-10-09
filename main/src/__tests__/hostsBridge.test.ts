@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   HOSTS_CHANNEL, HostsNotInitializedError, _resetHostsFacadeForTesting, emitHostsChanged,
-  emitPreflightProgress, getHostsFacade, hostEvents, hostPreflightChannel, peekHostsFacade, setHostsFacade,
+  emitHostTerminalExit, emitPreflightProgress, getHostsFacade, hostEvents, hostPreflightChannel,
+  hostTerminalChannel, peekHostsFacade, setHostsFacade,
   type HostsFacade,
 } from '../orchestrator/hostsBridge';
 
@@ -30,5 +31,12 @@ describe('hostsBridge', () => {
     emitPreflightProgress({ hostId: 'h2', check: null, done: true });
     expect(changed).toEqual([{ kind: 'hosts', hostId: 'h1' }]);
     expect(progress).toEqual([{ hostId: 'h1', check: null, done: true }]);
+  });
+  it('emits a terminal exit on that terminal\'s own channel only', () => {
+    const exits: unknown[] = [];
+    hostEvents.on(hostTerminalChannel('host::h1::t1'), (e) => exits.push(e));
+    emitHostTerminalExit({ terminalId: 'host::h1::t1', exitCode: 255 });
+    emitHostTerminalExit({ terminalId: 'host::h1::t2', exitCode: 0 });
+    expect(exits).toEqual([{ terminalId: 'host::h1::t1', exitCode: 255 }]);
   });
 });

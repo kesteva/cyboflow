@@ -84,6 +84,14 @@ export function HostTerminalModal({
         if (!res.ok) return { backlog: '', exited: true, exitCode: null };
         return { backlog: res.backlog, exited: res.exited, exitCode: res.exitCode };
       },
+      // ssh exiting after the modal opened (remote `exit`, dropped link) is pushed; the view shows "Disconnected (exit N)".
+      onExit: (listener) => {
+        const sub = trpc.cyboflow.hosts.onTerminalExit.subscribe(
+          { terminalId },
+          { onData: (ev) => listener(ev.exitCode) },
+        );
+        return () => sub.unsubscribe();
+      },
     };
   }, [terminalId]);
 

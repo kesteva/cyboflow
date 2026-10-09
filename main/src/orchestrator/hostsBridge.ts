@@ -11,6 +11,7 @@ import type {
   CapabilityTier,
   HostsChangedEvent,
   HostsFeatureStatus,
+  HostTerminalExitEvent,
   HostView,
   PreflightProgressEvent,
   PreflightResult,
@@ -77,6 +78,14 @@ export const HOSTS_CHANNEL = 'hosts';
 
 export function hostPreflightChannel(id: string): string {
   return `host-preflight-${id}`;
+}
+
+export function hostTerminalChannel(terminalId: string): string {
+  return `host-terminal-${terminalId}`;
+}
+
+export function emitHostTerminalExit(ev: HostTerminalExitEvent): void {
+  hostEvents.emit(hostTerminalChannel(ev.terminalId), ev);
 }
 
 export function emitHostsChanged(ev: HostsChangedEvent): void {

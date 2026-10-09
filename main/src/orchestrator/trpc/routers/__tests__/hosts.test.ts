@@ -10,9 +10,11 @@ import { createContext } from '../../context';
 import {
   _resetHostsFacadeForTesting,
   emitHostsChanged,
+  emitHostTerminalExit,
   emitPreflightProgress,
   hostEvents,
   hostPreflightChannel,
+  hostTerminalChannel,
   HOSTS_CHANNEL,
   setHostsFacade,
   type HostsFacade,
@@ -39,6 +41,7 @@ class FakeFacade implements HostsFacade {
   statusValue: HostsFeatureStatus = RUNNING;
   calls: Array<{ method: string; args: unknown[] }> = [];
   failWith: Error | null = null;
+  backlogValue: { backlog: string; exited: boolean; exitCode: number | null } = { backlog: 'hi', exited: false, exitCode: null };
   private rec<T>(method: string, args: unknown[], value: T): T {
     this.calls.push({ method, args });
     if (this.failWith) throw this.failWith;
@@ -60,7 +63,7 @@ class FakeFacade implements HostsFacade {
   terminalInput(terminalId: string, text: string): void { this.rec('terminalInput', [terminalId, text], undefined); }
   terminalResize(terminalId: string, cols: number, rows: number): void { this.rec('terminalResize', [terminalId, cols, rows], undefined); }
   terminalBacklog(terminalId: string): { backlog: string; exited: boolean; exitCode: number | null } {
-    return this.rec('terminalBacklog', [terminalId], { backlog: 'hi', exited: false, exitCode: null });
+    return this.rec('terminalBacklog', [terminalId], this.backlogValue);
   }
   terminalClose(terminalId: string): void { this.rec('terminalClose', [terminalId], undefined); }
 }
@@ -115,8 +118,21 @@ describe('unset / not running', () => {
   it('mutations answer feature_disabled when the facade is not running, without calling it', async () => {
     fake.statusValue = { ...RUNNING, enabled: false, running: false };
     expect(await caller().archive({ id: 'h1' })).toMatchObject({ ok: false, error: 'feature_disabled' });
-    expect(await caller().terminalBacklog({ terminalId: 't' })).toMatchObject({ ok: false, error: 'feature_disabled' });
+    expect(await caller().terminalInput({ terminalId: 't', text: 'x' })).toMatchObject({ ok: false, error: 'feature_disabled' });
     expect(fake.calls).toEqual([]);
+  });
+
+  it('terminalClose and terminalBacklog bypass the running gate (cleanup is always allowed)', async () => {
+    fake.statusValue = { ...RUNNING, enabled: false, running: false };
+    expect(await caller().terminalClose({ terminalId: 't' })).toEqual({ ok: true });
+    expect(await caller().terminalBacklog({ terminalId: 't' })).toEqual({ ok: true, backlog: 'hi', exited: false, exitCode: null });
+    expect(fake.calls.map((c) => c.method)).toEqual(['terminalClose', 'terminalBacklog']);
+  });
+
+  it('terminalClose / terminalBacklog are no-op / empty when unset', async () => {
+    _resetHostsFacadeForTesting();
+    expect(await caller().terminalClose({ terminalId: 't' })).toEqual({ ok: true });
+    expect(await caller().terminalBacklog({ terminalId: 't' })).toEqual({ ok: true, backlog: '', exited: true, exitCode: null });
   });
 
   it('get is PRECONDITION_FAILED when unset', async () => {
@@ -262,5 +278,43 @@ describe('subscriptions', () => {
     await done;
     expect(received).toEqual([{ hostId: 'h1', check: null, done: true }]);
     expect(hostEvents.listenerCount(hostPreflightChannel('h1'))).toBe(0);
+  });
+
+  it('onTerminalExit yields the pushed exit once, ends, and detaches', async () => {
+    const sub = await caller().onTerminalExit({ terminalId: 'host::h1::t1' });
+    const received: Array<{ exitCode: number | null }> = [];
+    const done = (async () => {
+      for await (const ev of sub as AsyncIterable<{ exitCode: number | null }>) received.push(ev);
+    })();
+    setImmediate(() => {
+      emitHostTerminalExit({ terminalId: 'host::h1::t2', exitCode: 0 });
+      emitHostTerminalExit({ terminalId: 'host::h1::t1', exitCode: 255 });
+    });
+    await done;
+    expect(received).toEqual([{ exitCode: 255 }]);
+    expect(hostEvents.listenerCount(hostTerminalChannel('host::h1::t1'))).toBe(0);
+  });
+
+  it('onTerminalExit answers immediately for a terminal that already exited (no race with the push)', async () => {
+    fake.backlogValue = { backlog: '', exited: true, exitCode: 1 };
+    fake.statusValue = { ...RUNNING, enabled: false, running: false }; // ungated, like the backlog it reads
+    const sub = await caller().onTerminalExit({ terminalId: 'host::h1::t1' });
+    const received: Array<{ exitCode: number | null }> = [];
+    for await (const ev of sub as AsyncIterable<{ exitCode: number | null }>) received.push(ev);
+    expect(received).toEqual([{ exitCode: 1 }]);
+    expect(hostEvents.listenerCount(hostTerminalChannel('host::h1::t1'))).toBe(0);
+  });
+
+  it('onTerminalExit ends without a frame on abort', async () => {
+    const ac = new AbortController();
+    const sub = await caller(ac.signal).onTerminalExit({ terminalId: 'host::h1::t1' });
+    const received: unknown[] = [];
+    const done = (async () => {
+      for await (const ev of sub as AsyncIterable<unknown>) received.push(ev);
+    })();
+    setImmediate(() => ac.abort());
+    await done;
+    expect(received).toEqual([]);
+    expect(hostEvents.listenerCount(hostTerminalChannel('host::h1::t1'))).toBe(0);
   });
 });

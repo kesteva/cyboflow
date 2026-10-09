@@ -142,6 +142,12 @@ export interface PreflightProgressEvent {
   done: boolean;
 }
 
+/** A host terminal's ssh process exited (pushed so an open terminal view can show "Disconnected (exit N)"). */
+export interface HostTerminalExitEvent {
+  terminalId: string;
+  exitCode: number | null;
+}
+
 /** ssh destination: no leading '-', a conservative charset, bounded length. */
 export const SSH_TARGET_RE = /^(?!-)[A-Za-z0-9._%+@:\[\]-]{1,253}$/;
 export const HOST_LABEL_MAX = 48;

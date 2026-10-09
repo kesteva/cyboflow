@@ -13,14 +13,17 @@
  *   terminalOpen       : mutation     -> HostsResult<{ terminalId }>
  *   terminalInput      : mutation     -> HostsResult<{}>    (high frequency: thin)
  *   terminalResize     : mutation     -> HostsResult<{}>    (high frequency: thin)
- *   terminalBacklog    : query        -> HostsResult<{ backlog, exited, exitCode }>
- *   terminalClose      : mutation     -> HostsResult<{}>
+ *   terminalBacklog    : query        -> HostsResult<{ backlog, exited, exitCode }>  (UNGATED)
+ *   terminalClose      : mutation     -> HostsResult<{}>                             (UNGATED)
  *   onHostsChanged     : subscription -> HostsChangedEvent
  *   onPreflightProgress: subscription -> PreflightProgressEvent
+ *   onTerminalExit     : subscription -> { exitCode }  (one frame, then ends; immediate if already exited)
  *
  * Every procedure is a thin wrapper over the HostsFacade wired at boot. The service throws NAMED errors and
  * this file converts them by `err.name` (HOSTS_ERROR_NAMES); an unrecognised error is rethrown and surfaces
- * as INTERNAL_SERVER_ERROR. A facade that is unset or not `running` answers `feature_disabled`.
+ * as INTERNAL_SERVER_ERROR. A facade that is unset or not `running` answers `feature_disabled` — except the
+ * terminal cleanup/read paths (terminalClose, terminalBacklog), which the service always allows: turning the
+ * feature off must never strand a live ssh PTY the renderer is trying to close.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3' or main/src/services/*.
  */
@@ -31,6 +34,7 @@ import { eventToAsyncIterable } from './events';
 import {
   hostEvents,
   hostPreflightChannel,
+  hostTerminalChannel,
   HOSTS_CHANNEL,
   peekHostsFacade,
   type HostsFacade,
@@ -46,6 +50,7 @@ import type {
   HostsFailureCode,
   HostsFeatureStatus,
   HostsResult,
+  HostTerminalExitEvent,
   HostView,
   PreflightProgressEvent,
 } from '../../../../../shared/types/hosts';
@@ -122,6 +127,24 @@ async function run<T extends object>(fn: (f: HostsFacade) => Promise<T> | T): Pr
     throw err; // unexpected: surfaces as INTERNAL_SERVER_ERROR
   }
 }
+
+/**
+ * Template for the always-allowed terminal paths: NO running gate (closing/reading is cleanup, never new remote
+ * work); an unset facade answers `unset`; known errors -> failure; unknown -> rethrow.
+ */
+function runUngated<T extends object>(fn: (f: HostsFacade) => T, unset: T): HostsResult<T> {
+  const f = peekHostsFacade();
+  if (!f) return { ok: true as const, ...unset };
+  try {
+    return { ok: true as const, ...fn(f) };
+  } catch (err) {
+    const failure = toHostsFailure(err);
+    if (failure) return failure;
+    throw err;
+  }
+}
+
+const NO_TERMINAL = { backlog: '', exited: true, exitCode: null } as const;
 
 /** `get`: not-found -> NOT_FOUND, disabled/unset -> PRECONDITION_FAILED, else rethrow. */
 function rethrowAsTRPCError(err: unknown): never {
@@ -222,14 +245,14 @@ export const hostsRouter = router({
 
   terminalBacklog: protectedProcedure
     .input(z.object({ terminalId: id }).strict())
-    .query(({ input }) => run((f) => f.terminalBacklog(input.terminalId))),
+    .query(({ input }) => runUngated((f) => f.terminalBacklog(input.terminalId), { ...NO_TERMINAL })),
 
   terminalClose: protectedProcedure
     .input(z.object({ terminalId: id }).strict())
-    .mutation(({ input }) => run((f) => {
+    .mutation(({ input }) => runUngated((f) => {
       f.terminalClose(input.terminalId);
       return {};
-    })),
+    }, {})),
 
   /** Any host change (rows, lifecycle, preflight running) or feature-status change. */
   onHostsChanged: protectedProcedure
@@ -253,6 +276,45 @@ export const hostsRouter = router({
       );
       for await (const ev of source) {
         yield ev;
+      }
+    }),
+
+  /**
+   * One host terminal's exit: yields `{ exitCode }` once and ends. The listener is attached BEFORE the backlog
+   * snapshot is read, so an exit that lands between the two is seen by one or the other; an already-exited (or
+   * unknown) terminal answers immediately.
+   */
+  onTerminalExit: protectedProcedure
+    .input(z.object({ terminalId: id }).strict())
+    .subscription(async function* ({ input, signal }): AsyncGenerator<{ exitCode: number | null }> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const channel = hostTerminalChannel(input.terminalId);
+      const state: { exit: { exitCode: number | null } | null; wake: (() => void) | null } = { exit: null, wake: null };
+      const current = (): { exitCode: number | null } | null => state.exit;
+      const onExit = (ev: HostTerminalExitEvent): void => {
+        state.exit = { exitCode: ev.exitCode };
+        state.wake?.();
+      };
+      const onAbort = (): void => state.wake?.();
+      hostEvents.on(channel, onExit);
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+      try {
+        if (current() === null) {
+          const f = peekHostsFacade();
+          const snap = f ? f.terminalBacklog(input.terminalId) : NO_TERMINAL;
+          if (snap.exited && current() === null) state.exit = { exitCode: snap.exitCode };
+        }
+        while (current() === null && !abortSignal.aborted) {
+          await new Promise<void>((resolve) => {
+            state.wake = resolve;
+          });
+          state.wake = null;
+        }
+        const exit = current();
+        if (exit !== null) yield exit;
+      } finally {
+        hostEvents.off(channel, onExit);
+        abortSignal.removeEventListener('abort', onAbort);
       }
     }),
 });

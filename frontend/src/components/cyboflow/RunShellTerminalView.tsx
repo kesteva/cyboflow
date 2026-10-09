@@ -70,6 +70,11 @@ export interface ShellTerminalApi {
   input: (text: string) => Promise<unknown>;
   resize: (cols: number, rows: number) => Promise<unknown>;
   backlog: () => Promise<{ backlog: string; exited?: boolean; exitCode?: number | null }>;
+  /**
+   * Optional exit PUSH: subscribe to the process exiting AFTER mount (the backlog only reports an exit that already
+   * happened). Returns the unsubscribe. Run shells omit it — their view is unchanged.
+   */
+  onExit?: (listener: (exitCode: number | null) => void) => () => void;
 }
 
 function defaultApi(runId: string, terminalId: string): ShellTerminalApi {
@@ -94,7 +99,7 @@ export function RunShellTerminalView({
   terminalId?: string;
   /** Alternate backend (the Environments host terminal). Omitted: today's `runs.shell*` calls, unchanged. */
   api?: ShellTerminalApi;
-  /** Called when the backlog reports the process already exited. */
+  /** Called once when the process is known to have exited (backlog at mount, or the api's exit push). */
   onExited?: (exitCode: number | null) => void;
 }): ReactElement {
   const apiRef = useRef(api);
@@ -168,6 +173,16 @@ export function RunShellTerminalView({
     let opened = false;
     let backlogSettled = false;
     const pending: string[] = [];
+
+    // Exit is reported by the backlog (already exited at mount) and/or the optional push; show it once.
+    let exitReported = false;
+    const reportExit = (exitCode: number | null): void => {
+      if (disposed || exitReported) return;
+      exitReported = true;
+      setDisconnected(exitCode === null ? 'Disconnected' : `Disconnected (exit ${exitCode})`);
+      onExitedRef.current?.(exitCode);
+    };
+    const unsubscribeExit = apiRef.current?.onExit?.(reportExit);
 
     const unsubscribe = subscribeToShellBytes({
       terminalId,
@@ -291,11 +306,7 @@ export function RunShellTerminalView({
           // a real result settles the backlog.
           if (backlogRes) {
             settleBacklog(backlogRes.backlog);
-            if (backlogRes.exited) {
-              const code = backlogRes.exitCode ?? null;
-              setDisconnected(code === null ? 'Disconnected' : `Disconnected (exit ${code})`);
-              onExitedRef.current?.(code);
-            }
+            if (backlogRes.exited) reportExit(backlogRes.exitCode ?? null);
           }
         })
         .catch(() => {
@@ -311,6 +322,7 @@ export function RunShellTerminalView({
       if (retryTimer) clearTimeout(retryTimer);
       resizeObserver.disconnect();
       unsubscribe();
+      unsubscribeExit?.();
       inputDisposable.dispose();
       if (termRef.current === term) termRef.current = null;
       try {
