@@ -111,6 +111,9 @@ const fakeFetch: FetchLike = (async (input: Parameters<FetchLike>[0], init?: Par
     const holder = { key: req.key, deviceId: 'dev-1', label: req.label, claimedAt: 1 };
     return json({ key: req.key, state: 'held_by_you', holder });
   }
+  if (url.pathname === '/v1/devices') {
+    return json({ devices: [{ id: 'dev-1', name: 'Studio' }, { id: 'dev-2', name: 'Laptop' }, { id: 7, name: 'bad row' }] });
+  }
   if (url.pathname === '/v1/projects' && init?.method === 'GET') return json({ projects: remoteProjects });
   if (url.pathname === '/v1/projects' && init?.method === 'POST') {
     const req = JSON.parse(String(init.body)) as { name: string; fingerprint: string };
@@ -453,6 +456,31 @@ describe('status for the Sync section', () => {
     ]);
     expect(service.getLog(projectId).some((l) => l.endsWith('created remote project rp'))).toBe(true);
     expect(service.getLog(other)).toEqual([]);
+  });
+});
+
+describe('conflicts', () => {
+  it('names the other machine from the device list, fetched once in the background', async () => {
+    service.start();
+    await service.enableProject({ projectId, mode: 'create' });
+    await service.idle();
+    service.store.upsertServerConflict(projectId, {
+      id: 'c1', projectId: 'rp', entityId: 'e1', kind: 'field', field: 'title', entityRef: null, entityTitle: null,
+      current: { value: 'Theirs', device: 'dev-2', hlc: null },
+      other: { value: 'Mine', device: 'dev-1', hlc: null },
+      createdAt: 1, seq: 1,
+    });
+    const changed = new Promise<void>((resolve) => service.once('changed', () => resolve()));
+
+    const [before] = service.listConflicts(projectId, 'open');
+    expect(before.current).toMatchObject({ device: 'dev-2', thisDevice: false, deviceName: null });
+    service.listConflicts(projectId, 'open');
+    await changed;
+
+    const [after] = service.listConflicts(projectId, 'open');
+    expect(after.current.deviceName).toBe('Laptop');
+    expect(after.other).toMatchObject({ thisDevice: true, deviceName: 'Studio' });
+    expect(requests.filter((r) => r === 'GET /v1/devices')).toHaveLength(1);
   });
 });
 

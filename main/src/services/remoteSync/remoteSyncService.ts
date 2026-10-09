@@ -55,6 +55,8 @@ export const SYNC_BACKOFF_CAP_MS = 120_000;
 export const CHECKSUM_EVERY_PASSES = 12;
 /** The service's limit on a project name. */
 const MAX_PROJECT_NAME = 200;
+/** How often conflicts may re-fetch the device list to name an unknown device. */
+const DEVICE_NAMES_REFRESH_MS = 5 * 60_000;
 
 export interface RemoteSyncServiceDeps {
   db: DatabaseLike;
@@ -101,6 +103,10 @@ export class RemoteSyncService extends EventEmitter {
   private readonly cleanups: Array<() => void> = [];
   private started = false;
   private readonly now: () => number;
+  /** Device id → name from the account's device list, so conflicts can name the other machine. */
+  private readonly deviceNames = new Map<string, string>();
+  private deviceNamesFetchedAt: number | null = null;
+  private deviceNamesLoading = false;
 
   constructor(private readonly deps: RemoteSyncServiceDeps) {
     super();
@@ -401,7 +407,41 @@ export class RemoteSyncService extends EventEmitter {
   /** Conflicts for the Conflicts view: open ones, or those resolved in the last 30 days. Every synced project when none is named. */
   listConflicts(projectId: number | null, view: 'open' | 'resolved'): RemoteSyncConflict[] {
     const ids = projectId === null ? this.store.listProjects().map((p) => p.projectId) : [projectId];
-    return ids.flatMap((id) => listConflictViews(this.conflictDeps(), id, view));
+    const views = ids.flatMap((id) => listConflictViews(this.conflictDeps(), id, view));
+    this.loadMissingDeviceNames(views);
+    return views;
+  }
+
+  /**
+   * Fetch the account's device list in the background when a conflict names a device this
+   * computer can't name yet; listeners re-read the conflicts on the change event. At most one
+   * fetch per DEVICE_NAMES_REFRESH_MS, so a device missing from the list never loops.
+   */
+  private loadMissingDeviceNames(views: RemoteSyncConflict[]): void {
+    const missing = views.some((v) => [v.current, v.other].some((side) => !side.thisDevice && side.device !== null && side.deviceName === null));
+    if (!missing || this.deviceNamesLoading) return;
+    if (this.deviceNamesFetchedAt !== null && this.now() - this.deviceNamesFetchedAt < DEVICE_NAMES_REFRESH_MS) return;
+    const client = this.readyClient();
+    if (!client) return;
+    this.deviceNamesLoading = true;
+    this.deviceNamesFetchedAt = this.now();
+    void client
+      .listDevices()
+      .then((devices) => {
+        let changed = false;
+        for (const d of devices) {
+          if (this.deviceNames.get(d.id) === d.name) continue;
+          this.deviceNames.set(d.id, d.name);
+          changed = true;
+        }
+        if (changed) this.emitChanged();
+      })
+      .catch((err: unknown) => {
+        this.deps.logger?.warn('[remoteSync] device list failed', { error: describe(err) });
+      })
+      .finally(() => {
+        this.deviceNamesLoading = false;
+      });
   }
 
   /** Settle a conflict as the user; the next pass (kicked now) sends it. */
@@ -414,7 +454,14 @@ export class RemoteSyncService extends EventEmitter {
   }
 
   private conflictDeps(): ConflictDeps {
-    return { db: this.deps.db, router: this.deps.router, store: this.store, deviceId: this.deps.cloud?.getDevice()?.deviceId ?? null, now: this.now };
+    return {
+      db: this.deps.db,
+      router: this.deps.router,
+      store: this.store,
+      deviceId: this.deps.cloud?.getDevice()?.deviceId ?? null,
+      deviceName: (id) => this.deviceNames.get(id) ?? null,
+      now: this.now,
+    };
   }
 
   /** The user confirmed a held mass delete: push it now. */

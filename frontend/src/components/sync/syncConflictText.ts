@@ -30,7 +30,13 @@ export function capitalize(s: string): string {
 }
 
 export function deviceName(side: RemoteSyncConflictSide): string {
-  return side.thisDevice ? 'This computer' : 'Another computer';
+  if (side.thisDevice) return 'This computer';
+  return side.deviceName ?? 'Another computer';
+}
+
+/** The device mid-sentence: a real name keeps its case, the generic labels drop theirs. */
+function deviceInSentence(side: RemoteSyncConflictSide): string {
+  return side.thisDevice || side.deviceName === null ? deviceName(side).toLowerCase() : side.deviceName;
 }
 
 export function formatTime(at: number | null): string {
@@ -77,7 +83,7 @@ export function resolutionLabel(conflict: RemoteSyncConflict): string {
 /** Banner copy: "<Field> changed on two machines — the <device> edit was applied." */
 export function bannerText(conflict: RemoteSyncConflict): string {
   if (conflict.kind === 'field') {
-    return `${capitalize(conflict.field ?? 'A field')} changed on two machines — the edit from ${deviceName(conflict.current).toLowerCase()} was applied.`;
+    return `${capitalize(conflict.field ?? 'A field')} changed on two machines — the edit from ${deviceInSentence(conflict.current)} was applied.`;
   }
   return `${kindLabel(conflict)}.`;
 }

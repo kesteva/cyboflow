@@ -147,6 +147,18 @@ export class SyncHttpClient {
     return this.request('POST', '/v1/tracker-claims', req);
   }
 
+  /** The account's devices (GET /v1/devices on the same origin), reduced to what conflicts name: id and name. */
+  async listDevices(): Promise<Array<{ id: string; name: string }>> {
+    const r = await this.request<unknown>('GET', '/v1/devices');
+    const list = unwrap<unknown>(r.body, 'devices');
+    if (!Array.isArray(list)) return [];
+    return list.flatMap((d: unknown) => {
+      if (d === null || typeof d !== 'object') return [];
+      const { id, name } = d as Record<string, unknown>;
+      return typeof id === 'string' && typeof name === 'string' ? [{ id, name }] : [];
+    });
+  }
+
   checksum(projectId: string, req: { atSeq: number; hash: string }): Promise<SyncResult<ChecksumResponse>> {
     return this.request('POST', `/v1/projects/${seg(projectId)}/checksum`, req);
   }

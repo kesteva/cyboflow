@@ -51,6 +51,8 @@ export interface ConflictDeps {
   store: SyncStore;
   /** This computer's device id, while signed in. */
   deviceId: string | null;
+  /** A device's name from the account's device list, or null while it is unknown. */
+  deviceName?: (deviceId: string) => string | null;
   now: () => number;
 }
 
@@ -131,7 +133,13 @@ function toView(
 
 function side(deps: ConflictDeps, s: ConflictSide): RemoteSyncConflictSide {
   const hlc = s.hlc ? parseHlc(s.hlc) : null;
-  return { value: s.value, device: s.device, thisDevice: s.device !== null && s.device === deps.deviceId, at: hlc?.ms ?? null };
+  return {
+    value: s.value,
+    device: s.device,
+    thisDevice: s.device !== null && s.device === deps.deviceId,
+    deviceName: s.device !== null ? (deps.deviceName?.(s.device) ?? null) : null,
+    at: hlc?.ms ?? null,
+  };
 }
 
 function actionsFor(db: DatabaseLike, projectId: number, r: ConflictRecord, type: SyncedEntityType | null): RemoteSyncConflictAction['kind'][] {

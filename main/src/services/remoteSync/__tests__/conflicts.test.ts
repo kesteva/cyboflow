@@ -38,7 +38,7 @@ beforeEach(() => {
   router = TaskChangeRouter.initialize(adapter);
   store = new SyncStore(adapter);
   store.optIn(projectId, 'rp', 'fp');
-  deps = { db: adapter, router, store, deviceId: 'dev-1', now: () => NOW };
+  deps = { db: adapter, router, store, deviceId: 'dev-1', deviceName: (d) => (d === 'dev-2' ? 'Studio' : null), now: () => NOW };
   seq = 0;
 });
 
@@ -85,8 +85,8 @@ describe('field conflicts', () => {
     expect(open()).toEqual([
       expect.objectContaining({
         id: 'c1', entityType: 'task', field: 'title', changedSince: false, currentNow: 'Studio title',
-        current: { value: 'Studio title', device: 'dev-2', thisDevice: false, at: NOW - 30_000 },
-        other: { value: 'My title', device: 'dev-1', thisDevice: true, at: NOW - 60_000 },
+        current: { value: 'Studio title', device: 'dev-2', thisDevice: false, deviceName: 'Studio', at: NOW - 30_000 },
+        other: { value: 'My title', device: 'dev-1', thisDevice: true, deviceName: null, at: NOW - 60_000 },
         actions: ['keep', 'use_other', 'merge'],
         pendingResolution: null,
       }),

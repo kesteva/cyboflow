@@ -33,6 +33,7 @@ import { SyncConflictsHost } from './SyncConflictsHost';
 import { SyncConflictBadge } from './SyncConflictBadge';
 import { SyncConflictBanner } from './SyncConflictBanner';
 import { SyncConflictDialog } from './SyncConflictDialog';
+import { sideLabel } from './syncConflictText';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
 function project(over: Partial<RemoteSyncProjectStatus> = {}): RemoteSyncProjectStatus {
@@ -75,8 +76,8 @@ function conflict(over: Partial<RemoteSyncConflict> = {}): RemoteSyncConflict {
     entityTitle: 'Do thing',
     kind: 'field',
     field: 'title',
-    current: { value: 'Mine', device: 'd1', thisDevice: true, at: 1_700_000_000_000 },
-    other: { value: 'Theirs', device: 'd2', thisDevice: false, at: 1_700_000_100_000 },
+    current: { value: 'Mine', device: 'd1', thisDevice: true, deviceName: null, at: 1_700_000_000_000 },
+    other: { value: 'Theirs', device: 'd2', thisDevice: false, deviceName: null, at: 1_700_000_100_000 },
     extra: null,
     createdAt: 10,
     resolvedAt: null,
@@ -252,8 +253,8 @@ describe('sync conflicts UI', () => {
       openDialogFor(
         conflict({
           field: 'body',
-          current: { value: 'a\nb', device: null, thisDevice: true, at: 1 },
-          other: { value: 'a\nc', device: null, thisDevice: false, at: 2 },
+          current: { value: 'a\nb', device: null, thisDevice: true, deviceName: null, at: 1 },
+          other: { value: 'a\nc', device: null, thisDevice: false, deviceName: null, at: 2 },
           changedSince: true,
           currentNow: 'a\nNEWEST',
         }),
@@ -270,7 +271,7 @@ describe('sync conflicts UI', () => {
         conflict({
           kind: 'delete_vs_edit',
           field: null,
-          other: { value: { title: 'Lost title' }, device: null, thisDevice: false, at: 1 },
+          other: { value: { title: 'Lost title' }, device: null, thisDevice: false, deviceName: null, at: 1 },
           actions: ['keep', 'recreate'],
         }),
       );
@@ -355,6 +356,22 @@ describe('sync conflicts UI', () => {
       );
       fireEvent.click(screen.getByRole('button', { name: 'Review' }));
       expect(useRemoteSyncConflictsStore.getState().dialogConflictId).toBe('c1');
+    });
+
+    it('name the other machine once its name is known, keeping its case', () => {
+      useRemoteSyncConflictsStore.setState({
+        conflicts: [
+          conflict({
+            current: { value: 'Theirs', device: 'd2', thisDevice: false, deviceName: 'Studio', at: 1 },
+            other: { value: 'Mine', device: 'd1', thisDevice: true, deviceName: null, at: 2 },
+          }),
+        ],
+      });
+      render(<SyncConflictBanner entityId="e1" />);
+      expect(screen.getByTestId('sync-conflict-banner')).toHaveTextContent(
+        'Title changed on two machines — the edit from Studio was applied.',
+      );
+      expect(sideLabel(useRemoteSyncConflictsStore.getState().conflicts[0].current)).toMatch(/^Studio · /);
     });
   });
 });

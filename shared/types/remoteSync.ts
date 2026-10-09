@@ -115,6 +115,8 @@ export interface RemoteSyncConflictSide {
   device: string | null;
   /** This computer wrote it. */
   thisDevice: boolean;
+  /** The writing device's name from the account's device list, or null while it is unknown. */
+  deviceName: string | null;
   /** When it was written (epoch ms, from its HLC), or null. */
   at: number | null;
 }
