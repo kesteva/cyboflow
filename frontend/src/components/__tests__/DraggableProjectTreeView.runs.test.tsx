@@ -694,6 +694,22 @@ describe('DraggableProjectTreeView — A/B variant chip', () => {
   });
 });
 
+describe('DraggableProjectTreeView — environment marker', () => {
+  it('shows the marker on a nested run and a parentless run with a remote host_id, not for local', async () => {
+    mockSessions = [makeSession({ id: 'sess-A', name: 'quick-A', projectId: 1 })];
+    mockRunsByProject = {
+      1: [
+        makeRun({ id: 'r1', session_id: 'sess-A', workflowName: 'sprint', branch_name: 'quick-A', host_id: 'h2' }),
+        makeRun({ id: 'r2', session_id: 'sess-gone', workflowName: 'planner', branch_name: 'orphan-br', host_id: 'h2' }),
+        makeRun({ id: 'r3', session_id: 'sess-gone', workflowName: 'ship', branch_name: 'local-br', host_id: null }),
+      ],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getAllByTestId('environment-marker')).toHaveLength(2));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Empty saved expansion must not lock projects collapsed (collapse regression)
 // ---------------------------------------------------------------------------

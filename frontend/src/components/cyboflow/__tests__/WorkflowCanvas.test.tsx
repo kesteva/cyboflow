@@ -243,6 +243,17 @@ describe('WorkflowCanvas', () => {
     expect(screen.queryByTestId('workflow-canvas-branch')).not.toBeInTheDocument();
   });
 
+  it('renders the host span only for a non-local host', () => {
+    const { rerender } = render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} runLabel="run-001" hostId="h2" />,
+    );
+    expect(screen.getByTestId('workflow-canvas-host')).toHaveTextContent('Remote');
+    rerender(<WorkflowCanvas definition={MOCK_DEFINITION} runLabel="run-001" hostId={null} />);
+    expect(screen.queryByTestId('workflow-canvas-host')).not.toBeInTheDocument();
+    rerender(<WorkflowCanvas definition={MOCK_DEFINITION} runLabel="run-001" hostId="local" />);
+    expect(screen.queryByTestId('workflow-canvas-host')).not.toBeInTheDocument();
+  });
+
   it('renders one column per phase with 138px width and 14px gap in canvas inner', () => {
     render(
       <WorkflowCanvas
