@@ -184,7 +184,7 @@ describe('sync conflicts UI', () => {
       expect(screen.getAllByText(/Another computer · /).length).toBeGreaterThan(0);
 
       m.listConflicts.mockImplementation(async ({ view }: { view: string }) =>
-        view === 'resolved' ? [conflict({ id: 'r1', resolvedAt: 5, resolution: 'Kept current' })] : [],
+        view === 'resolved' ? [conflict({ id: 'r1', resolvedAt: 5, resolution: 'keep_current' })] : [],
       );
       fireEvent.click(screen.getByText('Resolved (30 days)'));
       expect(await screen.findByText('Resolved: Kept current')).toBeInTheDocument();

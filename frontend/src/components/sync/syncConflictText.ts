@@ -53,10 +53,25 @@ export function formatValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+const RESOLUTION_LABEL: Record<string, string> = {
+  keep_current: 'Kept current',
+  use_other: 'Used the other value',
+  merged: 'Merged',
+  keep_deleted: 'Kept deleted',
+  recreated: 'Recreated as a new item',
+  keep_removed: 'Kept removed',
+  swapped: 'Swapped',
+  keep: 'Kept as is',
+  moved: 'Moved',
+  deleted_children: 'Deleted children',
+  expired: 'Expired',
+};
+
 export function resolutionLabel(conflict: RemoteSyncConflict): string {
   const r = conflict.pendingResolution ?? conflict.resolution;
   if (r === null) return 'Resolved';
-  return conflict.pendingResolution !== null ? `${r} (waiting to send)` : r;
+  const label = RESOLUTION_LABEL[r] ?? r;
+  return conflict.pendingResolution !== null ? `${label} (waiting to send)` : label;
 }
 
 /** Banner copy: "<Field> changed on two machines — the <device> edit was applied." */
