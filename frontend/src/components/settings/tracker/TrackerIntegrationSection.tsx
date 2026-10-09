@@ -207,7 +207,8 @@ export function TrackerIntegrationSection(): React.JSX.Element {
                         <span
                           className={cn('h-2 w-2 flex-shrink-0 rounded-full', status.dotClass)}
                         />
-                        {status.label}
+                        {/* A connection paused because another machine holds its sync claim says so. */}
+                        {connection.status === 'paused' && connection.claimHold ? connection.claimHold : status.label}
                       </span>
                       <Button
                         type="button"

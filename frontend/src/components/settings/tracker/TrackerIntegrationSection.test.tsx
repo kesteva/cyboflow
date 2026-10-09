@@ -184,6 +184,16 @@ describe('TrackerIntegrationSection', () => {
     expect(screen.queryByText('Connected')).not.toBeInTheDocument();
   });
 
+  it('says which computer runs it when another one holds the sync claim', async () => {
+    stubConnections({
+      7: [makeConnection({ status: 'paused', claimHold: 'Paused: beads (smk) runs on Studio' })],
+    });
+    render(<TrackerIntegrationSection />);
+
+    expect(await screen.findByText('Paused: beads (smk) runs on Studio')).toBeInTheDocument();
+    expect(screen.queryByText('Paused — check credentials')).not.toBeInTheDocument();
+  });
+
   it('queries every project and re-reads when a tracker change arrives', async () => {
     render(<TrackerIntegrationSection />);
 
