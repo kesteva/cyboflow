@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { SessionActionToast } from '../cyboflow/SessionActionToast';
+import { useOcclusion } from '../../hooks/useOcclusion';
 import { isSyncActive, useRemoteSyncConflictsStore } from '../../stores/remoteSyncConflictsStore';
 import { SyncConflictIndicator } from './SyncConflictIndicator';
 import { SyncConflictsView } from './SyncConflictsView';
@@ -18,6 +19,8 @@ export function SyncConflictsHost(): React.JSX.Element | null {
   const openView = useRemoteSyncConflictsStore((s) => s.openView);
 
   useEffect(() => init(), [init]);
+  // The toast is a fixed overlay: without a lease it would render behind an open web tab.
+  useOcclusion(toast !== null && isSyncActive(status), 'sync-conflict-toast');
 
   if (!isSyncActive(status)) return null;
   return (
