@@ -34,7 +34,7 @@ import { diskUsageService } from './services/diskUsageService';
 import { isBrokerProcess, type CodexBrokerReaper } from './services/codexBrokerReaper';
 import type { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
-import type { RunShellManager } from './services/runShellManager';
+import type { OwnedRunShell, RunShellManager } from './services/runShellManager';
 import type { WorktreeManager } from './services/worktreeManager';
 import type { GitStatusManager } from './services/gitStatusManager';
 import type { DatabaseService } from './database/database';
@@ -52,6 +52,8 @@ export interface SystemViewCompositionDeps {
   ptyCliManagers: AbstractCliManager[];
   /** Read lazily: the run-shell manager is constructed later in boot. */
   getRunShellManager: () => RunShellManager | null;
+  /** Live remote-environment terminal PTYs (supplied by the hosts composition); none when omitted. */
+  getHostTerminalShells?: () => Array<{ pid: number; terminalId: string; hostId: string }>;
   /** Source of the user's saved watched-port list, read per snapshot. */
   configManager: Pick<ConfigManager, 'getSystemWatchedPorts'>;
   /** Dev build: cyboflow's own dev renderer + CDP ports join the defaults. */
@@ -89,6 +91,16 @@ export function resolveWatchedPorts(
   return ports.map((port) => ({ port, label: own.get(port) ?? WATCHED_PORT_LABEL }));
 }
 
+/** Host-terminal PTYs ride the run-shell slot of the process snapshot: no run, no worktree. */
+function hostTerminalOwnedShells(deps: SystemViewCompositionDeps): OwnedRunShell[] {
+  return (deps.getHostTerminalShells?.() ?? []).map((shell) => ({
+    pid: shell.pid,
+    runId: `host::${shell.hostId}`,
+    terminalId: shell.terminalId,
+    worktreePath: '',
+  }));
+}
+
 export function composeSystemView(deps: SystemViewCompositionDeps): void {
   const { databaseService, worktreeManager, gitStatusManager, codexBrokerReaper } = deps;
   const buildWorktreeProvider = () =>
@@ -101,7 +113,10 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
     processSnapshot: new ProcessSnapshotService({
       cliManager: deps.ptyCliManagers,
       runShellManager: {
-        listOwnedShells: () => deps.getRunShellManager()?.listOwnedShells() ?? [],
+        listOwnedShells: () => {
+          const runShells = deps.getRunShellManager()?.listOwnedShells() ?? [];
+          return [...runShells, ...hostTerminalOwnedShells(deps)];
+        },
       },
       isBrokerProcess,
     }),

@@ -28,6 +28,7 @@ const STAMPED_MODULES = [
   'services/sessionManager.ts',
   'services/terminalPanelManager.ts',
   'services/runShellManager.ts',
+  'services/hosts/hostTerminalManager.ts',
   'services/panels/codex/appServer/runConfig.ts',
   'services/panels/logPanel/logsManager.ts',
   'orchestrator/verify/verificationAgentRunner.ts',
@@ -80,6 +81,7 @@ const SPAWN_SITES: Record<string, SpawnSite[]> = {
   'services/sessionManager.ts': [{ kind: 'call', callee: 'execAsync', count: 1 }],
   'services/terminalPanelManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
   'services/runShellManager.ts': [{ kind: 'call', callee: 'this.spawn', count: 1 }],
+  'services/hosts/hostTerminalManager.ts': [{ kind: 'call', callee: 'this.spawn', count: 1 }],
   'services/panels/codex/appServer/runConfig.ts': [
     { kind: 'property', name: 'cyboflow', count: 1 },
     { kind: 'return-stamp', count: 1 },
@@ -239,8 +241,8 @@ export function handWritesMarker(src: string): boolean {
 describe('spawn marker chokepoint coverage', () => {
   // 15 epic modules, minus the three spawn owners the Crystal cleanup deleted
   // (terminalSessionManager, runCommandManager, visualVerify/devServerManager).
-  it('enumerates all 12 live spawn-owning modules', () => {
-    expect(STAMPED_MODULES.length + INHERITING_MODULES.length).toBe(12);
+  it('enumerates all 13 live spawn-owning modules', () => {
+    expect(STAMPED_MODULES.length + INHERITING_MODULES.length).toBe(13);
   });
 
   it.each(STAMPED_MODULES)('%s calls stampSpawnMarker', (rel) => {
