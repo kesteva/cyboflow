@@ -1,7 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   SshTransport,
+  ensureControlDir,
   classifySshFailure,
   quoteRemoteArgv,
   shQuote,
@@ -118,7 +122,8 @@ describe('SshTransport argv', () => {
     expect(opts.env).toEqual({ PATH: '/usr/bin:/bin' });
     expect(ensureDir).toHaveBeenCalledWith('/Users/me/.cyboflow/ssh');
     await t.exec('cybo-mbp', ['true']);
-    expect(ensureDir).toHaveBeenCalledTimes(1);
+    // Re-ensured on every call: a directory removed while the app runs must not make ssh exit 255.
+    expect(ensureDir).toHaveBeenCalledTimes(2);
   });
 
   it('refuses an invalid or option-like destination before spawning', async () => {
@@ -145,6 +150,19 @@ describe('SshTransport argv', () => {
     const t = transport(runner, { ensureDir: () => { throw new Error('EACCES'); } });
     await t.exec('box', ['true']);
     expect(calls[0].args).toContain('ControlMaster=no');
+  });
+
+  it('recovers multiplexing once the control directory can be created again', async () => {
+    const { runner, calls } = fakeRunner();
+    let broken = true;
+    const log = logger();
+    const t = transport(runner, { log, ensureDir: () => { if (broken) throw new Error('EACCES'); } });
+    await t.exec('box', ['true']);
+    await t.exec('box', ['true']);
+    broken = false;
+    await t.exec('box', ['true']);
+    expect(calls.map((c) => c.args.includes('ControlMaster=no'))).toEqual([true, true, false]);
+    expect(log.warn).toHaveBeenCalledTimes(1);
   });
 
   it('escapes % in the data dir (ssh token syntax)', async () => {
@@ -177,6 +195,49 @@ describe('SshTransport argv', () => {
     transport(runner).closeMaster('-bad');
     transport(runner, { dir: `/${'y'.repeat(90)}` }).closeMaster('box');
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe.skipIf(!posix)('ensureControlDir (real temp dir)', () => {
+  let root: string;
+  beforeEach(() => {
+    // A SHORT root: os.tmpdir() on macOS is long enough to trip the sun_path fallback.
+    root = fs.mkdtempSync(path.join(fs.existsSync('/tmp') ? '/tmp' : os.tmpdir(), 'cfs-'));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('re-creates a directory removed while running, so the next call still multiplexes', async () => {
+    const dir = path.join(root, 'ssh');
+    const { runner, calls } = fakeRunner();
+    const t = new SshTransport({ runner, controlDir: () => dir, env: () => ({}) });
+    await t.exec('box', ['true']);
+    expect(fs.statSync(dir).isDirectory()).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+    await t.exec('box', ['true']);
+    expect(fs.statSync(dir).isDirectory()).toBe(true);
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    expect(calls.every((c) => c.args.includes('ControlMaster=auto'))).toBe(true);
+  });
+
+  it('restores mode 0700 and refuses a non-directory', () => {
+    const dir = path.join(root, 'ssh');
+    fs.mkdirSync(dir, { mode: 0o755 });
+    fs.chmodSync(dir, 0o755);
+    ensureControlDir(dir);
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    const file = path.join(root, 'file');
+    fs.writeFileSync(file, 'x');
+    expect(() => ensureControlDir(file)).toThrow(/not a directory/);
+  });
+
+  it('a non-directory at the control path falls back to ControlMaster=no', async () => {
+    const file = path.join(root, 'ssh');
+    fs.writeFileSync(file, 'x');
+    const { runner, calls } = fakeRunner();
+    await new SshTransport({ runner, controlDir: () => file, env: () => ({}) }).exec('box', ['true']);
+    expect(calls[0].args).toContain('ControlMaster=no');
   });
 });
 

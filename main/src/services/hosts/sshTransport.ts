@@ -13,7 +13,9 @@
  *  - Never throws for a non-zero exit, a spawn failure or a timeout: the answer is an ExecResult. It throws
  *    only for caller bugs (an invalid destination, an empty argv, a NUL byte in an argument).
  *
- * Connection reuse: ControlMaster=auto with sockets under `<cyboflow dir>/ssh` (created 0700 lazily). The
+ * Connection reuse: ControlMaster=auto with sockets under `<cyboflow dir>/ssh`. The directory is re-ensured
+ * (exists, is a directory, mode 0700) on EVERY call with one cheap stat — a dir removed while the app runs makes
+ * ssh's mux bind fail with ENOENT, which is fatal (exit 255) rather than a fallback, so it is never cached. The
  * socket path must fit macOS's 104-byte sun_path INCLUDING the 17-byte temporary suffix ssh appends while it
  * binds, so the expanded path is kept well under 100 bytes; a data dir too long for that (or one that cannot be
  * created) falls back to ControlMaster=no with a warning instead of failing the connection.
@@ -66,7 +68,10 @@ export interface SshTransportDeps {
   runner?: ProcessRunner;
   /** ControlMaster socket directory. Default `<getCyboflowDirectory()>/ssh`. */
   controlDir?: () => string;
-  /** Create the socket directory 0700 (idempotent). Throwing disables multiplexing for that call. */
+  /**
+   * Ensure the socket directory exists as a 0700 directory. Called before EVERY multiplexed ssh call, so it must
+   * be cheap when the directory is already right. Throwing disables multiplexing for that call.
+   */
   ensureDir?: (dir: string) => void;
   /** Child env. Default buildCommandEnv() (login-shell PATH; SSH_AUTH_SOCK inherited). */
   env?: () => NodeJS.ProcessEnv;
@@ -91,9 +96,23 @@ export function assertValidSshTarget(target: string): void {
   if (!SSH_TARGET_RE.test(target)) throw new InvalidSshTargetError();
 }
 
-function defaultEnsureDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+/**
+ * Default ensureDir: one lstat on the happy path; (re)creates a missing directory, restores a widened mode, and
+ * throws when the path exists but is not a directory (a symlink included — the sockets must not be redirected).
+ */
+export function ensureControlDir(dir: string): void {
+  let st: fs.Stats | null = null;
+  try {
+    st = fs.lstatSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  if (st === null) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    st = fs.lstatSync(dir);
+  }
+  if (!st.isDirectory()) throw new Error('ssh control path is not a directory');
+  if ((st.mode & 0o777) !== 0o700) fs.chmodSync(dir, 0o700);
 }
 
 /** Default runner: node:child_process.spawn (stdin support; no shell; windowsHide). */
@@ -176,13 +195,13 @@ export class SshTransport implements SshTransportLike {
   private readonly ensureDir: (dir: string) => void;
   private readonly env: () => NodeJS.ProcessEnv;
   private readonly logger: LoggerLike | undefined;
-  private dirReady = false;
   private warnedLongPath = false;
+  private warnedDir = false;
 
   constructor(deps: SshTransportDeps = {}) {
     this.runner = deps.runner ?? spawnCapture;
     this.controlDir = deps.controlDir ?? (() => path.join(getCyboflowDirectory(), 'ssh'));
-    this.ensureDir = deps.ensureDir ?? defaultEnsureDir;
+    this.ensureDir = deps.ensureDir ?? ensureControlDir;
     this.env = deps.env ?? (() => buildCommandEnv());
     this.logger = deps.logger;
   }
@@ -200,16 +219,18 @@ export class SshTransport implements SshTransportLike {
       }
       return null;
     }
-    if (!this.dirReady) {
-      try {
-        this.ensureDir(dir);
-        this.dirReady = true;
-      } catch (e) {
+    // Never cached: the directory can be removed (or its mode widened) while the app runs.
+    try {
+      this.ensureDir(dir);
+      this.warnedDir = false;
+    } catch (e) {
+      if (!this.warnedDir) {
+        this.warnedDir = true;
         this.logger?.warn('[hosts] could not create the ssh control directory; connection sharing is off', {
           error: e instanceof Error ? e.name : 'unknown',
         });
-        return null;
       }
+      return null;
     }
     // `%` is ssh's token escape; the path is quoted so a space in the data dir survives option parsing.
     return `"${dir.replace(/%/g, '%%')}/cm-%C"`;
