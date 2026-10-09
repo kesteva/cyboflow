@@ -423,6 +423,13 @@ describe('TrackerConnectedView — paused reconnect', () => {
     await screen.findAllByTestId('tracker-mapping-row');
   });
 
+  it('shows the claim hold text instead of the auth wording, keeping Reconnect', () => {
+    renderView(makeConnection({ status: 'paused', claimHold: 'Runs on Studio' }));
+    expect(screen.getByTestId('tracker-claim-hold')).toHaveTextContent('Runs on Studio');
+    expect(screen.queryByText(/rejected the stored key/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+  });
+
   it('shows the banner and submits the typed key when paused', async () => {
     renderView(makeConnection({ status: 'paused' }));
 
