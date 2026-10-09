@@ -29,11 +29,15 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+// Wall-clock bounded, not tick-bounded: a fixed tick budget can drain before a real
+// timer fires (Windows timer granularity is ~15.6 ms).
 async function until(pred: () => boolean, label = 'condition'): Promise<void> {
-  for (let i = 0; i < 4000; i += 1) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
     if (pred()) return;
     await new Promise((r) => setImmediate(r));
   }
+  if (pred()) return;
   throw new Error(`timed out waiting for ${label}`);
 }
 
