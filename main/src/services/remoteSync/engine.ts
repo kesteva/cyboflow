@@ -25,6 +25,7 @@ import {
   type PushOp,
   type PushRequest,
   type PushResponse,
+  type TrackerClaim,
 } from '../../../../shared/types/remoteSyncWire';
 import { canonicalJson, jsonByteLength, projectionHash } from './canonical';
 import { HlcClock, compareHlc, hlcFromIso } from './hlc';
@@ -58,7 +59,8 @@ export interface EngineDeps {
 }
 
 export type PassOutcome =
-  | { status: 'ok'; pulled: number; pushed: number; apply: ApplyReport }
+  /** `claims`: every tracker claim in the workspace, from this pass's /head. */
+  | { status: 'ok'; pulled: number; pushed: number; apply: ApplyReport; claims: TrackerClaim[] }
   | { status: 'skipped'; reason: string }
   | { status: 'paused'; reason: 'rewound' | 'epoch_changed' | 'upgrade_required' | 'revoked' | 'not_entitled' | 'storage_full' }
   | { status: 'failed'; error: SyncHttpError | Error };
@@ -172,7 +174,7 @@ export class RemoteSyncEngine {
 
       store.updateProject(projectId, { status: 'active', statusDetail: null, lastSyncAt: new Date(this.now()).toISOString() });
       this.persistClock();
-      return { status: 'ok', pulled, pushed, apply };
+      return { status: 'ok', pulled, pushed, apply, claims: head.body.claims ?? [] };
     } catch (err) {
       this.persistClock();
       return this.handleFailure(projectId, err);

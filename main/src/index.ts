@@ -1920,7 +1920,7 @@ async function initializeServices(): Promise<boolean> {
 
   const cloudAccount = composeCloudAccount({ db: cyboflowDb, configManager, logger: cyboflowLogger });
   // Cross-machine backlog sync (dev builds only) — see remoteSyncWiring.ts.
-  wireRemoteSync({ db: cyboflowDb, router: taskChangeRouter, reviewRouter: reviewItemRouter, configManager, cloud: cloudAccount?.handle ?? null, logger: cyboflowLogger });
+  wireRemoteSync({ db: cyboflowDb, router: taskChangeRouter, reviewRouter: reviewItemRouter, configManager, cloud: cloudAccount?.handle ?? null, trackers: trackerSyncService, logger: cyboflowLogger });
   persistentAgentsComposition = composePersistentAgents({ db: cyboflowDb, configManager, logger: cyboflowLogger, cloud: cloudAccount?.handle ?? null, wireConnectors: wireBridgeConnector });
   persistentAgentsComposition.start();
   // Native web viewer — the WebContentsView manager, its context menu and its

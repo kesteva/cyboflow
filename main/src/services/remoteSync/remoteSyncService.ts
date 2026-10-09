@@ -14,6 +14,7 @@
  *     creates the remote project and pushes its whole backlog; another machine
  *     joins it only with an empty local backlog, matched by repo fingerprint or
  *     picked explicitly.
+ *   - Tracker claims (trackerClaims.ts): refreshed after every successful pass.
  *
  * Constructed only in a dev build; does nothing unless sync is enabled
  * (ConfigManager.isRemoteSyncEnabled) and a device is signed in.
@@ -40,6 +41,7 @@ import { fingerprintProject, localFingerprint, type GitRunner } from './fingerpr
 import { isSyncedEntityType } from './projection';
 import { SyncHttpClient, SyncHttpError } from './syncHttpClient';
 import { SyncStore } from './syncStore';
+import { TrackerClaims } from './trackerClaims';
 
 export const SYNC_TICK_MS = 60_000;
 export const SYNC_DEBOUNCE_MS = 2_000;
@@ -83,6 +85,8 @@ interface ProjectRuntime {
 
 export class RemoteSyncService extends EventEmitter {
   readonly store: SyncStore;
+  /** The tracker-claim gate tracker sync consults (wired by remoteSyncWiring). */
+  readonly trackerClaims: TrackerClaims;
   private engine: RemoteSyncEngine | null = null;
   private client: SyncHttpClient | null = null;
   private readonly linking = new Set<number>();
@@ -97,6 +101,18 @@ export class RemoteSyncService extends EventEmitter {
     super();
     this.store = new SyncStore(deps.db);
     this.now = deps.now ?? (() => Date.now());
+    this.trackerClaims = new TrackerClaims({
+      store: this.store,
+      getClient: () => this.readyClient(),
+      getDevice: () => {
+        const device = deps.cloud?.getDevice() ?? null;
+        return device ? { deviceId: device.deviceId, deviceName: device.deviceName } : null;
+      },
+      isSyncOn: () => deps.configManager.isRemoteSyncEnabled(),
+      onClientError: (err) => this.handOffAuthFailure(err),
+      log: (projectId, line) => this.store.appendLog(projectId, line),
+      now: this.now,
+    });
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -324,6 +340,12 @@ export class RemoteSyncService extends EventEmitter {
       rt.attempt = 0;
       rt.backoffUntil = 0;
       rt.okPasses += 1;
+      try {
+        await this.trackerClaims.refresh(projectId, outcome.claims);
+        await this.trackerClaims.resumeAfterJoin(projectId);
+      } catch (err) {
+        this.deps.logger?.warn('[remoteSync] tracker claim refresh failed', { projectId, error: describe(err) });
+      }
       if (rt.okPasses % CHECKSUM_EVERY_PASSES === 0) await this.runChecksum(projectId, engine);
       return;
     }
@@ -443,6 +465,9 @@ export class RemoteSyncService extends EventEmitter {
         fingerprint = remote.fingerprint;
       }
       this.store.optIn(projectId, remoteProjectId, fingerprint);
+      // A joining machine's trackers wait until the first pull has applied, so
+      // historical ideas never file as new issues; the claims decide afterwards.
+      if (req.mode === 'join') this.trackerClaims.holdForJoin(projectId);
       this.store.appendLog(projectId, req.mode === 'create' ? `created remote project ${remoteProjectId}` : `joined remote project ${remoteProjectId}`);
       this.emitChanged();
       void this.syncProject(projectId, req.mode === 'create' ? 'created' : 'joined', { force: true });
@@ -463,6 +488,7 @@ export class RemoteSyncService extends EventEmitter {
     const rt = this.runtimes.get(projectId);
     if (rt?.debounce) clearTimeout(rt.debounce);
     if (rt?.running) await rt.running;
+    this.trackerClaims.releaseAll(projectId);
     this.store.optOut(projectId);
     this.runtimes.delete(projectId);
     this.emitChanged();

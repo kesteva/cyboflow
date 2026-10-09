@@ -12,6 +12,7 @@ import type { TaskChangeRouter } from '../../orchestrator/taskChangeRouter';
 import type { DatabaseLike, LoggerLike } from '../../orchestrator/types';
 import { getCyboflowDirectory } from '../../utils/cyboflowDirectory';
 import type { CloudAccountHandle } from '../cloud/cloudAccountHandle';
+import type { TrackerClaimConnections, TrackerClaimGate } from '../trackerSync/claimGate';
 import type { ConfigManager } from '../configManager';
 import { captureSeamError } from '../telemetry';
 import { RemoteSyncService } from './remoteSyncService';
@@ -22,6 +23,8 @@ export interface RemoteSyncWiringDeps {
   reviewRouter: ReviewItemRouter;
   configManager: ConfigManager;
   cloud: CloudAccountHandle | null;
+  /** Tracker sync: its connections run only on the device holding their claim. */
+  trackers: (TrackerClaimConnections & { setClaimGate(gate: TrackerClaimGate | null): void }) | null;
   logger: LoggerLike;
 }
 
@@ -70,6 +73,10 @@ export function wireRemoteSync(deps: RemoteSyncWiringDeps): RemoteSyncService | 
     enableProject: (req) => service.enableProject(req),
     disableProject: (projectId) => service.disableProject(projectId),
   });
+  if (deps.trackers) {
+    service.trackerClaims.setConnections(deps.trackers);
+    deps.trackers.setClaimGate(service.trackerClaims);
+  }
   service.start();
   app.on('before-quit', () => service.stop());
   return service;

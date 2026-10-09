@@ -83,6 +83,17 @@ export interface SyncDeviceRow {
   lastHlc: string | null;
 }
 
+/** A tracker claim as this machine last saw it (remote_sync_tracker_claims). */
+export interface StoredTrackerClaim {
+  key: string;
+  projectId: number;
+  /** 'unconfirmed': never checked successfully, so this machine must not run it. */
+  state: 'free' | 'held_by_you' | 'held_by_other' | 'unconfirmed';
+  holderDevice: string | null;
+  holderLabel: string | null;
+  checkedAt: string;
+}
+
 export interface StoredBatch {
   batchId: string;
   payloadJson: string;
@@ -459,4 +470,45 @@ export class SyncStore {
         .all(projectId) as Array<{ record_json: string }>
     ).map((r) => JSON.parse(r.record_json) as ConflictRecord);
   }
+
+  // ---- tracker claims --------------------------------------------------------
+
+  getClaim(key: string): StoredTrackerClaim | null {
+    const r = this.db.prepare('SELECT * FROM remote_sync_tracker_claims WHERE claim_key = ?').get(key) as
+      | Record<string, unknown>
+      | undefined;
+    return r ? toClaim(r) : null;
+  }
+
+  listClaims(projectId: number): StoredTrackerClaim[] {
+    return (this.db.prepare('SELECT * FROM remote_sync_tracker_claims WHERE project_id = ? ORDER BY claim_key').all(projectId) as Array<
+      Record<string, unknown>
+    >).map(toClaim);
+  }
+
+  putClaim(c: StoredTrackerClaim): void {
+    this.db
+      .prepare(
+        `INSERT INTO remote_sync_tracker_claims (claim_key, project_id, state, holder_device, holder_label, checked_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(claim_key) DO UPDATE SET project_id = excluded.project_id, state = excluded.state,
+           holder_device = excluded.holder_device, holder_label = excluded.holder_label, checked_at = excluded.checked_at`,
+      )
+      .run(c.key, c.projectId, c.state, c.holderDevice, c.holderLabel, c.checkedAt);
+  }
+
+  deleteClaim(key: string): void {
+    this.db.prepare('DELETE FROM remote_sync_tracker_claims WHERE claim_key = ?').run(key);
+  }
+}
+
+function toClaim(r: Record<string, unknown>): StoredTrackerClaim {
+  return {
+    key: r.claim_key as string,
+    projectId: r.project_id as number,
+    state: r.state as StoredTrackerClaim['state'],
+    holderDevice: (r.holder_device as string | null) ?? null,
+    holderLabel: (r.holder_label as string | null) ?? null,
+    checkedAt: r.checked_at as string,
+  };
 }

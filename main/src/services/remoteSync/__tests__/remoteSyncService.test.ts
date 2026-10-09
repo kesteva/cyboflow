@@ -106,6 +106,11 @@ const fakeFetch: FetchLike = (async (input: Parameters<FetchLike>[0], init?: Par
     return r;
   }
   if (url.pathname === '/v1/head') return json({ now: Date.now(), projects: { rp: 0 }, claims: [] });
+  if (url.pathname === '/v1/tracker-claims') {
+    const req = JSON.parse(String(init?.body)) as { key: string; label: string };
+    const holder = { key: req.key, deviceId: 'dev-1', label: req.label, claimedAt: 1 };
+    return json({ key: req.key, state: 'held_by_you', holder });
+  }
   if (url.pathname === '/v1/projects' && init?.method === 'GET') return json({ projects: remoteProjects });
   if (url.pathname === '/v1/projects' && init?.method === 'POST') {
     const req = JSON.parse(String(init.body)) as { name: string; fingerprint: string };
@@ -402,5 +407,33 @@ describe('linking a project', () => {
     expect(service.store.getProject(projectId)).toBeNull();
     expect(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?').get(projectId)).toEqual({ n: 1 });
     expect(service.getStatus()).toMatchObject({ projects: [] });
+  });
+});
+
+describe('tracker connections on join', () => {
+  it('pauses running trackers while the first pull applies, then resumes them through the claim', async () => {
+    const rows = [{ id: 'c1', projectId, provider: 'linear' as const, workspaceId: 'w', workspaceName: 'acme', baseUrl: null, status: 'active' as 'active' | 'paused' }];
+    const statusDuringPass: string[] = [];
+    service.trackerClaims.setConnections({
+      listLive: () => rows,
+      pause: (id) => {
+        const r = rows.find((x) => x.id === id);
+        if (r) r.status = 'paused';
+      },
+      resume: async (id) => {
+        const r = rows.find((x) => x.id === id);
+        const decision = r ? await service.trackerClaims.acquire(r) : { allowed: false as const, reason: 'gone' };
+        if (r && decision.allowed) r.status = 'active';
+        return decision;
+      },
+    });
+    service.start();
+    remoteProjects = [{ id: 'rp', name: 'rp', fingerprint: 'github.com/o/r', createdByDevice: 'dev-0', createdAt: 5 }];
+    expect(await service.enableProject({ projectId, mode: 'join', remoteProjectId: 'rp' })).toMatchObject({ ok: true });
+    statusDuringPass.push(rows[0].status);
+    await service.idle();
+    expect(statusDuringPass).toEqual(['paused']);
+    expect(rows[0].status).toBe('active');
+    expect(requests).toContain('POST /v1/tracker-claims');
   });
 });

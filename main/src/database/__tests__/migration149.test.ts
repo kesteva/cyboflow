@@ -35,13 +35,14 @@ describe('migration 149 — remote sync tables', () => {
         'remote_sync_tombstones',
         'remote_sync_batches',
         'remote_sync_conflicts',
+        'remote_sync_tracker_claims',
         'entity_ref_aliases',
       ]),
     );
     // No CHECK constraints anywhere (migration 130's lesson).
     const ddl = (db.prepare(`SELECT sql FROM sqlite_master WHERE name LIKE 'remote_sync_%' OR name = 'entity_ref_aliases'`)
       .all() as Array<{ sql: string | null }>).map((r) => r.sql ?? '');
-    expect(ddl.join('\n')).not.toMatch(/CHECK/i);
+    expect(ddl.join('\n')).not.toMatch(/\bCHECK\s*\(/i);
     db.close();
   });
 });

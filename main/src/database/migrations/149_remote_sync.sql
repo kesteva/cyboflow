@@ -102,6 +102,22 @@ CREATE TABLE IF NOT EXISTS remote_sync_conflicts (
 CREATE INDEX IF NOT EXISTS idx_remote_sync_conflicts_project ON remote_sync_conflicts(project_id, resolved_at);
 CREATE INDEX IF NOT EXISTS idx_remote_sync_conflicts_entity ON remote_sync_conflicts(entity_id);
 
+-- Tracker claims this machine last saw for a synced project (desktop doc,
+-- "Existing tracker connections"), keyed like the service's claims:
+-- remote_project_id|provider|workspace_id|base_url. Refreshed from /head every
+-- pass; read when the server is unreachable, so only the last-known holder keeps
+-- running. state: free | held_by_you | held_by_other.
+CREATE TABLE IF NOT EXISTS remote_sync_tracker_claims (
+  claim_key     TEXT PRIMARY KEY,
+  project_id    INTEGER NOT NULL,
+  state         TEXT NOT NULL,
+  holder_device TEXT,
+  holder_label  TEXT,
+  checked_at    TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES remote_sync_projects(project_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_remote_sync_tracker_claims_project ON remote_sync_tracker_claims(project_id);
+
 -- Old refs renamed by an M1b join, for fail-closed ambiguous_ref resolution.
 CREATE TABLE IF NOT EXISTS entity_ref_aliases (
   project_id  INTEGER NOT NULL,
