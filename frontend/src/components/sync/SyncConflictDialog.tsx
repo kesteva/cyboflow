@@ -113,10 +113,7 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
 
   const children = childrenOf(conflict.extra);
   const edges = edgesOf(conflict.extra);
-  const taskLabel = (id: string): string => {
-    const t = tasks.find((x) => x.id === id);
-    return t ? `${t.ref} ${t.title}` : id;
-  };
+  const taskLabel = (id: string): string => conflict.taskLabels[id] ?? 'a deleted task';
   const parents = useMemo(
     () =>
       tasks.filter(

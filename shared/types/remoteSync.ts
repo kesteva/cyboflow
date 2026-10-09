@@ -172,6 +172,8 @@ export interface RemoteSyncConflict {
   currentNow: unknown;
   /** The actions this conflict offers, the default first. */
   actions: RemoteSyncConflictAction['kind'][];
+  /** dependency_edge: "REF title" for each task its edges name that exists here, by task id. */
+  taskLabels: Record<string, string>;
 }
 
 export type RemoteSyncResolveResult = { ok: true } | { ok: false; message: string };

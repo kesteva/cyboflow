@@ -134,6 +134,7 @@ function toView(
     changedSince,
     currentNow,
     actions: actionsFor(deps.db, projectId, r, entityType),
+    taskLabels: r.kind === 'dependency_edge' ? taskLabelsOf(deps.db, projectId, r) : {},
   };
 }
 
@@ -319,6 +320,19 @@ function edgesOf(c: Pick<ConflictRecord, 'extra'>): { removed: Edge; kept: Edge 
   const removed = edge(extra?.removedEdge);
   const kept = edge(extra?.keptEdge);
   return removed && kept ? { removed, kept } : null;
+}
+
+/** "REF title" for the tasks a dependency_edge record's edges name, where they exist here. */
+function taskLabelsOf(db: DatabaseLike, projectId: number, c: Pick<ConflictRecord, 'extra'>): Record<string, string> {
+  const extra = c.extra as { removedEdge?: Partial<Edge>; keptEdge?: Partial<Edge> } | null | undefined;
+  const ids = [extra?.removedEdge, extra?.keptEdge].flatMap((e) => [e?.taskId, e?.dependsOnId]).filter((id): id is string => typeof id === 'string');
+  const labels: Record<string, string> = {};
+  const stmt = db.prepare('SELECT ref, title FROM tasks WHERE id = ? AND project_id = ?');
+  for (const id of new Set(ids)) {
+    const row = stmt.get(id, projectId) as { ref: string; title: string } | undefined;
+    if (row) labels[id] = `${row.ref} ${row.title}`;
+  }
+  return labels;
 }
 
 function childrenOf(c: Pick<ConflictRecord, 'extra'>): Array<{ id: string; type: SyncedEntityType }> {

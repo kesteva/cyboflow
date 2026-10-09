@@ -87,6 +87,7 @@ function conflict(over: Partial<RemoteSyncConflict> = {}): RemoteSyncConflict {
     changedSince: false,
     currentNow: 'Mine',
     actions: ['keep', 'use_other', 'merge'],
+    taskLabels: {},
     ...over,
   };
 }
@@ -240,18 +241,13 @@ describe('sync conflicts UI', () => {
     });
 
     it('describes a dependency conflict as its two edges and sends swap', async () => {
-      useBacklogStore.setState({
-        tasks: [
-          { id: 'ta', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Cut the branch' } as BacklogTaskItem,
-          { id: 'tb', project_id: 1, type: 'task', ref: 'TASK-2', title: 'Tag the build' } as BacklogTaskItem,
-        ],
-      });
       openDialogFor(
         conflict({
           kind: 'dependency_edge',
           field: 'depends_on',
           actions: ['keep', 'swap'],
           extra: { removedEdge: { taskId: 'ta', dependsOnId: 'tb' }, keptEdge: { taskId: 'tb', dependsOnId: 'ta' } },
+          taskLabels: { ta: 'TASK-1 Cut the branch', tb: 'TASK-2 Tag the build' },
         }),
       );
       const edges = screen.getByTestId('sync-conflict-edges');
