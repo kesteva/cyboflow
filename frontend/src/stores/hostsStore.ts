@@ -139,7 +139,12 @@ export const useHostsStore = create<HostsState>((set, get) => {
   const openPreflightSub = (hostId: string, r: PreflightRuntime): void => {
     r.sub = openResilientSubscription<PreflightProgressEvent>(
       `hosts.onPreflightProgress:${hostId}`,
-      (h) => trpc.cyboflow.hosts.onPreflightProgress.subscribe({ id: hostId }, h),
+      (h) => {
+        // A (re)opened stream starts clean: frames missed while closed would leave stale partial rows that
+        // merge into the next run.
+        set((s) => ({ preflightLive: withoutKey(s.preflightLive, hostId) }));
+        return trpc.cyboflow.hosts.onPreflightProgress.subscribe({ id: hostId }, h);
+      },
       { onData: (ev) => onProgress(hostId, ev) },
     );
   };
@@ -243,6 +248,8 @@ export const useHostsStore = create<HostsState>((set, get) => {
           rt.sub?.close();
           rt.sub = null;
           preflightRt.delete(hostId);
+          // Nobody is watching: drop the partial rows so they cannot merge into a later run.
+          set((s) => ({ preflightLive: withoutKey(s.preflightLive, hostId) }));
         }
       };
     },

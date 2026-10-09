@@ -169,6 +169,24 @@ describe('hostsStore', () => {
     expect(preflightUnsub).toHaveBeenCalledTimes(1);
   });
 
+  it('the last watcher release drops partial live rows, and a (re)opened stream starts clean', async () => {
+    teardown = store.getState().init();
+    await advance(0);
+    store.setState({ preflightLive: { h2: [makeCheck({ id: 'disk-free' })] } });
+    const r1 = store.getState().watchPreflight('h2');
+    // Opening the progress stream clears rows left from a previous (unwatched) run.
+    expect(store.getState().preflightLive.h2).toBeUndefined();
+    preflightHandlers?.onData({ hostId: 'h2', check: makeCheck({ id: 'arch' }), done: false });
+    expect(store.getState().preflightLive.h2).toHaveLength(1);
+    r1();
+    // No done frame arrived, but nobody is watching: the partial rows must not survive into a later run.
+    expect(store.getState().preflightLive.h2).toBeUndefined();
+    const r2 = store.getState().watchPreflight('h2');
+    preflightHandlers?.onData({ hostId: 'h2', check: makeCheck({ id: 'git' }), done: false });
+    expect(store.getState().preflightLive.h2.map((c) => c.id)).toEqual(['git']);
+    r2();
+  });
+
   it('mutations re-list on success and wrap a throw as a local failure', async () => {
     teardown = store.getState().init();
     await advance(0);
