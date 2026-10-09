@@ -34,6 +34,24 @@ interface OrphanChild {
   type: string;
 }
 
+interface Edge {
+  taskId: string;
+  dependsOnId: string;
+}
+
+function edgeOf(value: unknown): Edge | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { taskId, dependsOnId } = value as Record<string, unknown>;
+  return typeof taskId === 'string' && typeof dependsOnId === 'string' ? { taskId, dependsOnId } : null;
+}
+
+/** A dependency_edge conflict's two edges (`extra.removedEdge` / `extra.keptEdge`). */
+function edgesOf(extra: unknown): { removed: Edge | null; kept: Edge | null } {
+  if (typeof extra !== 'object' || extra === null) return { removed: null, kept: null };
+  const e = extra as { removedEdge?: unknown; keptEdge?: unknown };
+  return { removed: edgeOf(e.removedEdge), kept: edgeOf(e.keptEdge) };
+}
+
 function childrenOf(extra: unknown): OrphanChild[] {
   if (typeof extra !== 'object' || extra === null) return [];
   const list = (extra as { children?: unknown }).children;
@@ -94,6 +112,11 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
   }, []);
 
   const children = childrenOf(conflict.extra);
+  const edges = edgesOf(conflict.extra);
+  const taskLabel = (id: string): string => {
+    const t = tasks.find((x) => x.id === id);
+    return t ? `${t.ref} ${t.title}` : id;
+  };
   const parents = useMemo(
     () =>
       tasks.filter(
@@ -173,6 +196,22 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
             <ValuePane key={field} title={field} text={formatValue(value)} />
           ))}
         </div>
+      ) : conflict.kind === 'dependency_edge' ? (
+        <ul className="space-y-1 text-xs text-text-secondary" data-testid="sync-conflict-edges">
+          {edges.removed && (
+            <li>
+              <span className="font-semibold text-status-warning">Removed:</span> {taskLabel(edges.removed.taskId)} depends
+              on {taskLabel(edges.removed.dependsOnId)}
+            </li>
+          )}
+          {edges.kept && (
+            <li>
+              <span className="font-semibold text-text-primary">Kept:</span> {taskLabel(edges.kept.taskId)} depends on{' '}
+              {taskLabel(edges.kept.dependsOnId)}
+            </li>
+          )}
+          <li className="text-text-tertiary">Both machines added one of these at once, which made a cycle.</li>
+        </ul>
       ) : conflict.kind === 'orphaned' ? (
         <ul className="text-xs text-text-secondary" data-testid="sync-conflict-children">
           {children.map((c) => (

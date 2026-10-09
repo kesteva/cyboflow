@@ -115,7 +115,13 @@ function toView(
     entityId: r.entityId,
     entityType,
     entityRef: r.entityRef,
-    entityTitle: typeof r.entityTitle === 'string' ? r.entityTitle : null,
+    // Client-filed records (a cycle repair) carry no title: name the item from this machine's copy.
+    entityTitle:
+      typeof r.entityTitle === 'string'
+        ? r.entityTitle
+        : entityType
+          ? ((readEntityProjection(deps.db, projectId, entityType, r.entityId)?.fields.title as string | undefined) ?? null)
+          : null,
     kind: r.kind,
     field: r.field ?? null,
     current: side(deps, r.current),

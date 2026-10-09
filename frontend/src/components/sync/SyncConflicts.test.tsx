@@ -239,6 +239,30 @@ describe('sync conflicts UI', () => {
       );
     });
 
+    it('describes a dependency conflict as its two edges and sends swap', async () => {
+      useBacklogStore.setState({
+        tasks: [
+          { id: 'ta', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Cut the branch' } as BacklogTaskItem,
+          { id: 'tb', project_id: 1, type: 'task', ref: 'TASK-2', title: 'Tag the build' } as BacklogTaskItem,
+        ],
+      });
+      openDialogFor(
+        conflict({
+          kind: 'dependency_edge',
+          field: 'depends_on',
+          actions: ['keep', 'swap'],
+          extra: { removedEdge: { taskId: 'ta', dependsOnId: 'tb' }, keptEdge: { taskId: 'tb', dependsOnId: 'ta' } },
+        }),
+      );
+      const edges = screen.getByTestId('sync-conflict-edges');
+      expect(edges).toHaveTextContent('Removed: TASK-1 Cut the branch depends on TASK-2 Tag the build');
+      expect(edges).toHaveTextContent('Kept: TASK-2 Tag the build depends on TASK-1 Cut the branch');
+      fireEvent.click(screen.getByRole('button', { name: 'Swap (restore this edge, remove the other)' }));
+      await waitFor(() =>
+        expect(m.resolveConflict).toHaveBeenCalledWith({ conflictId: 'c1', action: { kind: 'swap' } }),
+      );
+    });
+
     it('sends use_other', async () => {
       openDialogFor(conflict());
       fireEvent.click(screen.getByRole('button', { name: 'Use the other value' }));
