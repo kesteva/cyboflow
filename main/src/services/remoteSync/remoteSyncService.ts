@@ -25,7 +25,10 @@ import { TASK_ALL_CHANNEL, taskChangeEvents } from '../../orchestrator/taskChang
 import type { DatabaseLike } from '../../orchestrator/types';
 import type { TaskChangedEvent } from '../../../../shared/types/tasks';
 import type {
+  RemoteSyncConflict,
+  RemoteSyncConflictAction,
   RemoteSyncEnableRequest,
+  RemoteSyncResolveResult,
   RemoteSyncEnableResult,
   RemoteSyncProjectChoices,
   RemoteSyncProjectStatus,
@@ -39,6 +42,7 @@ import type { CloudAccountHandle, CloudDevice } from '../cloud/cloudAccountHandl
 import { computeBackoffMs } from '../cloud/backoff';
 import { RemoteSyncEngine, type PassOutcome } from './engine';
 import { fingerprintProject, localFingerprint, type GitRunner } from './fingerprint';
+import { listConflictViews, resolveConflict as resolveConflictRecord, type ConflictDeps } from './conflicts';
 import { isSyncedEntityType } from './projection';
 import { SyncHttpClient, SyncHttpError } from './syncHttpClient';
 import { SyncStore } from './syncStore';
@@ -392,6 +396,27 @@ export class RemoteSyncService extends EventEmitter {
     }
   }
 
+  // ---- conflicts -----------------------------------------------------------
+
+  /** Conflicts for the Conflicts view: open ones, or those resolved in the last 30 days. Every synced project when none is named. */
+  listConflicts(projectId: number | null, view: 'open' | 'resolved'): RemoteSyncConflict[] {
+    const ids = projectId === null ? this.store.listProjects().map((p) => p.projectId) : [projectId];
+    return ids.flatMap((id) => listConflictViews(this.conflictDeps(), id, view));
+  }
+
+  /** Settle a conflict as the user; the next pass (kicked now) sends it. */
+  async resolveConflict(conflictId: string, action: RemoteSyncConflictAction): Promise<RemoteSyncResolveResult> {
+    const result = await resolveConflictRecord(this.conflictDeps(), conflictId, action);
+    if (!result.ok) return result;
+    this.emitChanged();
+    void this.syncProject(result.projectId, 'resolved', { force: true });
+    return { ok: true };
+  }
+
+  private conflictDeps(): ConflictDeps {
+    return { db: this.deps.db, router: this.deps.router, store: this.store, deviceId: this.deps.cloud?.getDevice()?.deviceId ?? null, now: this.now };
+  }
+
   /** The user confirmed a held mass delete: push it now. */
   async confirmHeldDeletes(projectId: number): Promise<void> {
     const engine = this.getEngine();
@@ -602,7 +627,7 @@ export class RemoteSyncService extends EventEmitter {
         lastSyncAt: p?.lastSyncAt ?? null,
         syncing: rt?.running !== null && rt?.running !== undefined,
         backoffUntil: rt && rt.backoffUntil > this.now() ? new Date(rt.backoffUntil).toISOString() : null,
-        openConflicts: p ? this.store.listOpenConflicts(id).length : 0,
+        openConflicts: p ? this.store.listConflictRows(id, { open: true }).filter((r) => !r.pendingResolution).length : 0,
         heldDeletes: p?.deleteHold.held ?? 0,
         trackerClaims: p
           ? this.store

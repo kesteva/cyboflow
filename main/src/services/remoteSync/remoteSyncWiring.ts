@@ -73,6 +73,8 @@ export function wireRemoteSync(deps: RemoteSyncWiringDeps): RemoteSyncService | 
     enableProject: (req) => service.enableProject(req),
     disableProject: (projectId) => service.disableProject(projectId),
     getLog: (projectId) => service.getLog(projectId),
+    listConflicts: (projectId, view) => service.listConflicts(projectId, view),
+    resolveConflict: (conflictId, action) => service.resolveConflict(conflictId, action),
     confirmHeldDeletes: (projectId) => service.confirmHeldDeletes(projectId),
     restoreHeldDeletes: (projectId) => service.restoreHeldDeletes(projectId),
   });

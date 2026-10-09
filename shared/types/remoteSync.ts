@@ -108,6 +108,67 @@ export type RemoteSyncEnableResult =
   | { ok: true; remoteProjectId: string }
   | { ok: false; reason: RemoteSyncEnableFailure; message: string; project?: RemoteSyncRemoteProject };
 
+/** One side of a sync conflict. */
+export interface RemoteSyncConflictSide {
+  value: unknown;
+  /** The device that wrote it (a device id), or null when unknown. */
+  device: string | null;
+  /** This computer wrote it. */
+  thisDevice: boolean;
+  /** When it was written (epoch ms, from its HLC), or null. */
+  at: number | null;
+}
+
+/** How the user settles a conflict; which ones apply depends on its kind (`actions`). */
+export type RemoteSyncConflictAction =
+  /** field: keep current · delete_vs_edit: keep deleted · dependency_edge: keep removed · orphaned: keep as is. */
+  | { kind: 'keep' }
+  /** field: write the other value. */
+  | { kind: 'use_other' }
+  /** field (text): write a merged value. */
+  | { kind: 'merge'; value: string }
+  /** delete_vs_edit: create a new item from the lost values. */
+  | { kind: 'recreate' }
+  /** orphaned: move the children under another parent. */
+  | { kind: 'move'; parentId: string }
+  /** orphaned: delete the children. */
+  | { kind: 'delete_children' };
+
+/**
+ * A sync conflict: an edit that was thrown away, or a delete that changed
+ * something the user did not see happen. Conflicts apply automatically; this
+ * is the record the user reviews.
+ */
+export interface RemoteSyncConflict {
+  id: string;
+  projectId: number;
+  entityId: string;
+  entityType: 'idea' | 'epic' | 'task' | null;
+  entityRef: string | null;
+  entityTitle: string | null;
+  /** field | delete_vs_edit | dependency_edge | orphaned (unknown kinds pass through). */
+  kind: string;
+  field: string | null;
+  /** The value that stands (applied). For delete_vs_edit, null: the item is deleted. */
+  current: RemoteSyncConflictSide;
+  /** The value that lost. For delete_vs_edit, every lost field as an object. */
+  other: RemoteSyncConflictSide;
+  /** orphaned: `{ children: [{ id, ref, type }] }`; dependency_edge: the removed edge. */
+  extra: unknown;
+  createdAt: number;
+  resolvedAt: number | null;
+  resolution: string | null;
+  /** Resolved here, waiting to reach the server. */
+  pendingResolution: string | null;
+  /** field: the value has changed again since; `currentNow` is the value here now. */
+  changedSince: boolean;
+  currentNow: unknown;
+  /** The actions this conflict offers, the default first. */
+  actions: RemoteSyncConflictAction['kind'][];
+}
+
+export type RemoteSyncResolveResult = { ok: true } | { ok: false; message: string };
+
 /**
  * What the Settings → Integrations → Sync section renders from.
  * `available: false` is the release-build answer: the section renders nothing.

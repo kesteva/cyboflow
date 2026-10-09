@@ -8,6 +8,8 @@
  *   enableProject     : mutation RemoteSyncEnableRequest -> RemoteSyncEnableResult
  *   disableProject    : mutation { projectId } -> void
  *   getLog            : query { projectId } -> string[]
+ *   listConflicts     : query { projectId?, view } -> RemoteSyncConflict[]
+ *   resolveConflict   : mutation { conflictId, action } -> RemoteSyncResolveResult
  *   confirmHeldDeletes: mutation { projectId } -> void
  *   restoreHeldDeletes: mutation { projectId } -> number
  *   onChanged         : subscription -> RemoteSyncStatus
@@ -25,7 +27,9 @@ import { eventToAsyncIterable } from './events';
 import { REMOTE_SYNC_CHANGED_CHANNEL, getRemoteSyncFacade, remoteSyncEvents } from '../../remoteSyncBridge';
 import type { RemoteSyncFacade } from '../../remoteSyncBridge';
 import type {
+  RemoteSyncConflict,
   RemoteSyncEnableResult,
+  RemoteSyncResolveResult,
   RemoteSyncProjectChoices,
   RemoteSyncStatus,
 } from '../../../../../shared/types/remoteSync';
@@ -37,6 +41,15 @@ function requireFacade(): RemoteSyncFacade {
 }
 
 const projectId = z.number().int().positive();
+
+const conflictAction = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('keep') }),
+  z.object({ kind: z.literal('use_other') }),
+  z.object({ kind: z.literal('merge'), value: z.string().max(256 * 1024) }),
+  z.object({ kind: z.literal('recreate') }),
+  z.object({ kind: z.literal('move'), parentId: z.string().min(1).max(200) }),
+  z.object({ kind: z.literal('delete_children') }),
+]);
 
 const enableRequest = z.discriminatedUnion('mode', [
   z.object({ projectId, mode: z.literal('create') }),
@@ -63,6 +76,12 @@ export const remoteSyncRouter = router({
     await requireFacade().disableProject(input.projectId);
   }),
   getLog: protectedProcedure.input(z.object({ projectId })).query(({ input }): string[] => requireFacade().getLog(input.projectId)),
+  listConflicts: protectedProcedure
+    .input(z.object({ projectId: projectId.optional(), view: z.enum(['open', 'resolved']).default('open') }))
+    .query(({ input }): RemoteSyncConflict[] => getRemoteSyncFacade()?.listConflicts(input.projectId ?? null, input.view) ?? []),
+  resolveConflict: protectedProcedure
+    .input(z.object({ conflictId: z.string().min(1).max(200), action: conflictAction }))
+    .mutation(({ input }): Promise<RemoteSyncResolveResult> => requireFacade().resolveConflict(input.conflictId, input.action)),
   confirmHeldDeletes: protectedProcedure.input(z.object({ projectId })).mutation(async ({ input }) => {
     await requireFacade().confirmHeldDeletes(input.projectId);
   }),

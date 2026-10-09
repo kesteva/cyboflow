@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS remote_sync_conflicts (
   resolved_at         INTEGER,
   pending_upload      INTEGER NOT NULL DEFAULT 0,
   pending_resolution  TEXT,
+  -- idea | epic | task, captured when the record lands: a delete purges the
+  -- entity's own history, and "Recreate" needs to know what it was.
+  entity_type         TEXT,
   FOREIGN KEY (project_id) REFERENCES remote_sync_projects(project_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_remote_sync_conflicts_project ON remote_sync_conflicts(project_id, resolved_at);

@@ -418,23 +418,23 @@ export class SyncStore {
     if (existing && existing.seq !== null && existing.seq >= record.seq) return;
     this.db
       .prepare(
-        `INSERT INTO remote_sync_conflicts (id, project_id, entity_id, kind, record_json, seq, resolved_at, pending_upload)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        `INSERT INTO remote_sync_conflicts (id, project_id, entity_id, kind, record_json, seq, resolved_at, pending_upload, entity_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ${ENTITY_TYPE_LOOKUP})
          ON CONFLICT(id) DO UPDATE SET
            record_json = excluded.record_json, seq = excluded.seq, resolved_at = excluded.resolved_at,
-           pending_upload = 0`,
+           pending_upload = 0, entity_type = COALESCE(remote_sync_conflicts.entity_type, excluded.entity_type)`,
       )
-      .run(record.id, projectId, record.entityId, record.kind, JSON.stringify(record), record.seq, record.resolvedAt ?? null);
+      .run(record.id, projectId, record.entityId, record.kind, JSON.stringify(record), record.seq, record.resolvedAt ?? null, ...typeLookupParams(record.entityId));
   }
 
   /** Store a conflict this client filed; it uploads on the next pass. */
   putClientConflict(projectId: number, record: Omit<ConflictRecord, 'seq'>): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO remote_sync_conflicts (id, project_id, entity_id, kind, record_json, seq, resolved_at, pending_upload)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, 1)`,
+        `INSERT OR IGNORE INTO remote_sync_conflicts (id, project_id, entity_id, kind, record_json, seq, resolved_at, pending_upload, entity_type)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, 1, ${ENTITY_TYPE_LOOKUP})`,
       )
-      .run(record.id, projectId, record.entityId, record.kind, JSON.stringify(record));
+      .run(record.id, projectId, record.entityId, record.kind, JSON.stringify(record), ...typeLookupParams(record.entityId));
   }
 
   listPendingUploads(projectId: number): Array<Omit<ConflictRecord, 'seq'>> {
@@ -484,6 +484,45 @@ export class SyncStore {
     ).map((r) => JSON.parse(r.record_json) as ConflictRecord);
   }
 
+  /**
+   * Conflicts for the Conflicts view: open ones (resolved here but not yet sent
+   * included, flagged by `pendingResolution`), or those resolved since `resolvedSince`.
+   */
+  listConflictRows(
+    projectId: number,
+    view: { open: true } | { open: false; resolvedSince: number },
+  ): Array<{ record: ConflictRecord; resolvedAt: number | null; pendingResolution: string | null; entityType: SyncedEntityType | null }> {
+    const rows = (
+      view.open
+        ? this.db
+            .prepare(
+              `SELECT record_json, resolved_at, pending_resolution, entity_type FROM remote_sync_conflicts
+                WHERE project_id = ? AND resolved_at IS NULL ORDER BY COALESCE(seq, 0) DESC, id`,
+            )
+            .all(projectId)
+        : this.db
+            .prepare(
+              `SELECT record_json, resolved_at, pending_resolution, entity_type FROM remote_sync_conflicts
+                WHERE project_id = ? AND resolved_at >= ? ORDER BY resolved_at DESC, id`,
+            )
+            .all(projectId, view.resolvedSince)
+    ) as Array<{ record_json: string; resolved_at: number | null; pending_resolution: string | null; entity_type: SyncedEntityType | null }>;
+    return rows.map((r) => ({
+      record: JSON.parse(r.record_json) as ConflictRecord,
+      resolvedAt: r.resolved_at,
+      pendingResolution: r.pending_resolution,
+      entityType: r.entity_type,
+    }));
+  }
+
+  /** The project an open conflict belongs to, or null. */
+  conflictProject(conflictId: string): number | null {
+    const r = this.db.prepare('SELECT project_id FROM remote_sync_conflicts WHERE id = ?').get(conflictId) as
+      | { project_id: number }
+      | undefined;
+    return r?.project_id ?? null;
+  }
+
   // ---- tracker claims --------------------------------------------------------
 
   getClaim(key: string): StoredTrackerClaim | null {
@@ -514,6 +553,13 @@ export class SyncStore {
     this.db.prepare('DELETE FROM remote_sync_tracker_claims WHERE claim_key = ?').run(key);
   }
 }
+
+/** The entity's type while anything here still knows it: its row, its sync state, or its tombstone. */
+const ENTITY_TYPE_LOOKUP = `COALESCE(
+  (SELECT 'idea' FROM ideas WHERE id = ?), (SELECT 'epic' FROM epics WHERE id = ?), (SELECT 'task' FROM tasks WHERE id = ?),
+  (SELECT entity_type FROM remote_sync_entities WHERE entity_id = ? LIMIT 1),
+  (SELECT entity_type FROM remote_sync_tombstones WHERE entity_id = ? LIMIT 1))`;
+const typeLookupParams = (entityId: string): string[] => [entityId, entityId, entityId, entityId, entityId];
 
 function parseDeleteHold(json: unknown): DeleteHold {
   const hold: DeleteHold = { window: [], held: 0, approveNext: false };

@@ -11,7 +11,10 @@
  */
 import { EventEmitter } from 'node:events';
 import type {
+  RemoteSyncConflict,
+  RemoteSyncConflictAction,
   RemoteSyncEnableRequest,
+  RemoteSyncResolveResult,
   RemoteSyncEnableResult,
   RemoteSyncProjectChoices,
   RemoteSyncStatus,
@@ -35,6 +38,10 @@ export interface RemoteSyncFacade {
   confirmHeldDeletes(projectId: number): Promise<void>;
   /** Re-create the items of a held mass delete; resolves how many. */
   restoreHeldDeletes(projectId: number): Promise<number>;
+  /** Open conflicts, or those resolved in the last 30 days; every synced project when projectId is null. */
+  listConflicts(projectId: number | null, view: 'open' | 'resolved'): RemoteSyncConflict[];
+  /** Settle a conflict as the user. */
+  resolveConflict(conflictId: string, action: RemoteSyncConflictAction): Promise<RemoteSyncResolveResult>;
   /** The project's sync log, oldest first. */
   getLog(projectId: number): string[];
 }
