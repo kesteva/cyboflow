@@ -15,6 +15,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { MarkdownPreview } from './MarkdownPreview';
+import { SyncConflictBanner } from './sync/SyncConflictBanner';
 import { trpc } from '../trpc/client';
 import { CATEGORY_LABEL } from './Backlog/markers';
 import type { BacklogTaskItem, EntityCategory, Priority } from '../../../shared/types/tasks';
@@ -83,6 +84,7 @@ export function EpicDetailEditor({ epic, isOpen, onClose, onSaved }: EpicDetailE
     <Modal isOpen={isOpen} onClose={onClose} size="lg" className="epic-detail-editor">
       <ModalHeader>Edit {entityLabel} · {epic.ref}</ModalHeader>
       <ModalBody>
+        <SyncConflictBanner entityId={epic.id} className="mb-3 border px-3" />
         <div className="flex flex-col gap-3" data-testid="epic-detail-editor">
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Title

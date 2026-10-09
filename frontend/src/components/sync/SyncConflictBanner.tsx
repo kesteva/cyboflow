@@ -1,8 +1,15 @@
 import { needsReview, useRemoteSyncConflictsStore } from '../../stores/remoteSyncConflictsStore';
+import { cn } from '../../utils/cn';
 import { bannerText } from './syncConflictText';
 
 /** Top-of-detail banner for an item with an open sync conflict. Renders null otherwise. */
-export function SyncConflictBanner({ entityId }: { entityId: string }): React.JSX.Element | null {
+export function SyncConflictBanner({
+  entityId,
+  className,
+}: {
+  entityId: string;
+  className?: string;
+}): React.JSX.Element | null {
   const conflicts = useRemoteSyncConflictsStore((s) => s.conflicts);
   const openDialog = useRemoteSyncConflictsStore((s) => s.openDialog);
   const mine = needsReview(conflicts).filter((c) => c.entityId === entityId);
@@ -11,7 +18,10 @@ export function SyncConflictBanner({ entityId }: { entityId: string }): React.JS
   return (
     <div
       data-testid="sync-conflict-banner"
-      className="flex items-center justify-between gap-3 border-b border-status-warning bg-surface-secondary px-6 py-2 text-xs text-status-warning"
+      className={cn(
+        'flex items-center justify-between gap-3 border-b border-status-warning bg-surface-secondary px-6 py-2 text-xs text-status-warning',
+        className,
+      )}
     >
       <span>
         {bannerText(first)}
