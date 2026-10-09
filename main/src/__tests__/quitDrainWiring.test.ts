@@ -91,9 +91,10 @@ describe('before-quit wiring (index.ts)', () => {
   it('arms the post-quit exit watchdog with a hard app.exit', () => {
     // finish re-issues app.quit() so the graceful will-quit → quit sequence gets
     // its chance; forceExit is the backstop for the observed post-will-quit hang,
-    // and the only sane action at that point is app.exit.
+    // and the only sane action at that point is app.exit. The block form may arm
+    // a requested relaunch first (relaunchIntent.ts), but must still end in app.exit.
     const body = beforeQuitListenerBody();
-    expect(body).toMatch(/runQuitDrain\(\{[\s\S]*forceExit:\s*\(\)\s*=>\s*app\.exit\(0\)/);
+    expect(body).toMatch(/runQuitDrain\(\{[\s\S]*forceExit:\s*\(\)\s*=>\s*(?:app\.exit\(0\)|\{[^}]*app\.exit\(0\);?\s*\})/);
   });
 
   // Every owner of a node-pty handle must be torn down inside the drain. A pty
