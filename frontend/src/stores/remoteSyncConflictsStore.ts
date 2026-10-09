@@ -128,5 +128,5 @@ export const useRemoteSyncConflictsStore = create<RemoteSyncConflictsState>((set
 /** Per-project counts, so a count moving between projects still refetches. */
 function totalSignature(status: RemoteSyncStatus | null): string {
   if (status === null || !status.available) return '';
-  return status.projects.map((p) => `${p.projectId}:${p.openConflicts}`).join(',');
+  return `${status.conflictsRevision}|${status.projects.map((p) => `${p.projectId}:${p.openConflicts}`).join(',')}`;
 }

@@ -53,7 +53,7 @@ function project(over: Partial<RemoteSyncProjectStatus> = {}): RemoteSyncProject
   };
 }
 
-function status(projects: RemoteSyncProjectStatus[], enabled = true): RemoteSyncStatus {
+function status(projects: RemoteSyncProjectStatus[], enabled = true, conflictsRevision = 0): RemoteSyncStatus {
   return {
     available: true,
     enabled,
@@ -63,6 +63,7 @@ function status(projects: RemoteSyncProjectStatus[], enabled = true): RemoteSync
     staging: false,
     signedIn: true,
     projects,
+    conflictsRevision,
   };
 }
 
@@ -152,6 +153,18 @@ describe('sync conflicts UI', () => {
       expect(badge).toHaveTextContent('1');
       fireEvent.click(screen.getByTestId('sync-indicator'));
       expect(await screen.findByTestId('sync-conflicts-view')).toBeInTheDocument();
+    });
+  });
+
+  describe('refresh', () => {
+    it('re-reads the conflicts when the revision moves with the counts unchanged', async () => {
+      await mountHost(status([project({ openConflicts: 1 })]), [conflict()]);
+      await waitFor(() => expect(useRemoteSyncConflictsStore.getState().conflicts).toHaveLength(1));
+      const named = conflict({ current: { value: 'Mine', device: 'd2', thisDevice: false, deviceName: 'Studio', at: 1 } });
+      m.listConflicts.mockResolvedValue([named]);
+      act(() => pushStatus(status([project({ openConflicts: 1 })])));
+      act(() => pushStatus(status([project({ openConflicts: 1 })], true, 1)));
+      await waitFor(() => expect(useRemoteSyncConflictsStore.getState().conflicts[0].current.deviceName).toBe('Studio'));
     });
   });
 

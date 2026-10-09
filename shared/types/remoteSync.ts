@@ -196,4 +196,6 @@ export type RemoteSyncStatus =
       staging: boolean;
       signedIn: boolean;
       projects: RemoteSyncProjectStatus[];
+      /** Bumped when conflict views change without a count changing (a device name arrived): re-read them. */
+      conflictsRevision: number;
     };

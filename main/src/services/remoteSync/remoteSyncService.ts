@@ -107,6 +107,9 @@ export class RemoteSyncService extends EventEmitter {
   private readonly deviceNames = new Map<string, string>();
   private deviceNamesFetchedAt: number | null = null;
   private deviceNamesLoading = false;
+  /** A conflict needed a name while sync couldn't run (token still locked): look again after the next pass. */
+  private deviceNamesWanted = false;
+  private conflictsRevision = 0;
 
   constructor(private readonly deps: RemoteSyncServiceDeps) {
     super();
@@ -358,6 +361,10 @@ export class RemoteSyncService extends EventEmitter {
         this.deps.logger?.warn('[remoteSync] tracker claim refresh failed', { projectId, error: describe(err) });
       }
       if (rt.okPasses % CHECKSUM_EVERY_PASSES === 0) await this.runChecksum(projectId, engine);
+      if (this.deviceNamesWanted) {
+        this.deviceNamesWanted = false;
+        this.listConflicts(null, 'open');
+      }
       return;
     }
     if (outcome.status === 'skipped') return;
@@ -422,7 +429,10 @@ export class RemoteSyncService extends EventEmitter {
     if (!missing || this.deviceNamesLoading) return;
     if (this.deviceNamesFetchedAt !== null && this.now() - this.deviceNamesFetchedAt < DEVICE_NAMES_REFRESH_MS) return;
     const client = this.readyClient();
-    if (!client) return;
+    if (!client) {
+      this.deviceNamesWanted = true;
+      return;
+    }
     this.deviceNamesLoading = true;
     this.deviceNamesFetchedAt = this.now();
     void client
@@ -434,7 +444,9 @@ export class RemoteSyncService extends EventEmitter {
           this.deviceNames.set(d.id, d.name);
           changed = true;
         }
-        if (changed) this.emitChanged();
+        if (!changed) return;
+        this.conflictsRevision += 1;
+        this.emitChanged();
       })
       .catch((err: unknown) => {
         this.deps.logger?.warn('[remoteSync] device list failed', { error: describe(err) });
@@ -693,6 +705,7 @@ export class RemoteSyncService extends EventEmitter {
       staging: device ? isStagingOrigin(device.origin) : false,
       signedIn: device !== null,
       projects,
+      conflictsRevision: this.conflictsRevision,
     };
   }
 

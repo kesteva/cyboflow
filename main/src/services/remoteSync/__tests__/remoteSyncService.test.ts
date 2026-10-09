@@ -484,6 +484,39 @@ describe('conflicts', () => {
   });
 });
 
+describe('conflicts before the token unlocks', () => {
+  it('looks the device up after the first pass once sync can run', async () => {
+    service.start();
+    await service.enableProject({ projectId, mode: 'create' });
+    await service.idle();
+    service.store.upsertServerConflict(projectId, {
+      id: 'c1', projectId: 'rp', entityId: 'e1', kind: 'field', field: 'title', entityRef: null, entityTitle: null,
+      current: { value: 'Theirs', device: 'dev-2', hlc: null },
+      other: { value: 'Mine', device: 'dev-1', hlc: null },
+      createdAt: 1, seq: 1,
+    });
+    const token = cloud.token;
+    cloud.token = null;
+    expect(service.listConflicts(projectId, 'open')[0].current.deviceName).toBeNull();
+    expect(requests).not.toContain('GET /v1/devices');
+
+    cloud.token = token;
+    const changed = new Promise<void>((resolve) => {
+      const onChanged = (): void => {
+        const status = service.getStatus();
+        if (status.available && status.conflictsRevision > 0) {
+          service.off('changed', onChanged);
+          resolve();
+        }
+      };
+      service.on('changed', onChanged);
+    });
+    await service.syncNow(projectId);
+    await changed;
+    expect(service.listConflicts(projectId, 'open')[0].current.deviceName).toBe('Laptop');
+  });
+});
+
 describe('mass-delete hold', () => {
   /** N tasks this machine has already agreed with the server on. */
   async function syncedTasks(n: number): Promise<string[]> {
