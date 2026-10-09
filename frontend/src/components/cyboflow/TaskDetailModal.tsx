@@ -42,6 +42,7 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { Modal } from '../ui/Modal';
 import { MarkdownPreview } from '../MarkdownPreview';
+import { SyncConflictBanner } from '../sync/SyncConflictBanner';
 import { trpc } from '../../trpc/client';
 import { CATEGORY_LABEL } from '../Backlog/markers';
 import { DesignAffordance } from './DesignAffordance';
@@ -184,6 +185,8 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
             ← Back to {task.ref}
           </button>
         )}
+
+        <SyncConflictBanner entityId={active.id} />
 
         {/* Header — ref + priority chip, then title + summary. */}
         <div style={{ padding: '20px 24px 14px', borderBottom: `1px solid ${HAIRLINE}` }}>

@@ -18,6 +18,7 @@ import { Toggle } from '../ui/Toggle';
 import { TrackerIntegrationSection } from './tracker/TrackerIntegrationSection';
 import { CloudAccountSection } from './cloud/CloudAccountSection';
 import { VendorCredentialsSection } from './agents/VendorCredentialsSection';
+import { RemoteSyncSection } from './sync/RemoteSyncSection';
 
 type ProviderStatus = 'checking' | 'connected' | 'attention' | 'unavailable';
 
@@ -600,6 +601,8 @@ export function IntegrationsSettings(): React.JSX.Element {
       </SettingsSection>
 
       <TrackerIntegrationSection />
+
+      <RemoteSyncSection />
 
       <div className="flex items-center justify-between gap-4 border-t border-border-primary pt-4">
         <p className="text-xs leading-relaxed text-text-tertiary">

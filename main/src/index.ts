@@ -153,6 +153,7 @@ import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { DatabaseBackupService } from './services/databaseBackupService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
+import { wireRemoteSync } from './services/remoteSync/remoteSyncWiring';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { composeSystemView } from './systemViewComposition';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -1919,6 +1920,8 @@ async function initializeServices(): Promise<boolean> {
   });
 
   const cloudAccount = composeCloudAccount({ db: cyboflowDb, configManager, logger: cyboflowLogger });
+  // Cross-machine backlog sync (dev builds only) — see remoteSyncWiring.ts.
+  wireRemoteSync({ db: cyboflowDb, router: taskChangeRouter, reviewRouter: reviewItemRouter, configManager, cloud: cloudAccount?.handle ?? null, trackers: trackerSyncService, logger: cyboflowLogger });
   persistentAgentsComposition = composePersistentAgents({ db: cyboflowDb, configManager, logger: cyboflowLogger, cloud: cloudAccount?.handle ?? null, wireConnectors: wireBridgeConnector });
   persistentAgentsComposition.start();
   // Native web viewer — the WebContentsView manager, its context menu and its

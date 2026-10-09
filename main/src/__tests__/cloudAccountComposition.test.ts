@@ -39,6 +39,8 @@ class FakeConfig extends EventEmitter {
   enabled = true;
   isAgentsAvailable(): boolean { return this.available; }
   isAgentsEnabled(): boolean { return this.available && this.enabled; }
+  syncEnabled = false;
+  isRemoteSyncEnabled(): boolean { return this.available && this.syncEnabled; }
   getCloudOrigin(): string { return 'https://cloud-staging.cyboflow.com'; }
   update(enabled: boolean): void {
     this.enabled = enabled;
@@ -144,6 +146,28 @@ describe('composeCloudAccount', () => {
     expect(vi.getTimerCount()).toBe(base);
     vi.advanceTimersByTime(CLOUD_BOOT_UNLOCK_DELAY_MS * 2);
     expect(electronMock.safeStorage.decryptString).not.toHaveBeenCalled();
+  });
+
+  it('sync alone is a consumer: it opens the gate and schedules the boot unlock, even with the agents kill switch set', () => {
+    vi.useFakeTimers();
+    seed(db);
+    config.enabled = false;
+    config.syncEnabled = true;
+    process.env[KILL_ENV] = '1';
+    const base = vi.getTimerCount();
+    const composition = compose();
+    expect(vi.getTimerCount()).toBe(base + 1);
+    expect(composition?.service.getStatus()).toMatchObject({ available: true });
+  });
+
+  it('turning sync on is a user action that unlocks', () => {
+    seed(db);
+    config.enabled = false;
+    const composition = compose();
+    config.syncEnabled = true;
+    config.emit('config-updated', {});
+    expect(electronMock.safeStorage.decryptString).toHaveBeenCalledTimes(1);
+    expect(composition?.service.getState()).toBe('ok');
   });
 
   it('before-quit clears a pending boot unlock timer', () => {

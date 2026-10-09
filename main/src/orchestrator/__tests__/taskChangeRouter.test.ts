@@ -387,12 +387,19 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     expect(version).toBe(3);
     expect(eventCount(db, 'task', taskId)).toBe(3);
 
-    // A no-op update writes NOTHING and does not bump version.
+    // A no-op update writes NOTHING, does not bump version, and broadcasts nothing.
     const before = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskId) as { version: number }).version;
+    const emitted: unknown[] = [];
+    const onEmit = (e: unknown): void => {
+      emitted.push(e);
+    };
+    taskChangeEvents.on(TASK_ALL_CHANNEL, onEmit);
     await router.applyChange(1, { actor: 'user', taskId, fields: { summary: 'a summary' } });
+    taskChangeEvents.off(TASK_ALL_CHANNEL, onEmit);
     const after = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskId) as { version: number }).version;
     expect(after).toBe(before);
     expect(eventCount(db, 'task', taskId)).toBe(3);
+    expect(emitted).toEqual([]);
   });
 
   it('write_policy authority: user/agent CANNOT set a derived stage; orchestrator can', async () => {

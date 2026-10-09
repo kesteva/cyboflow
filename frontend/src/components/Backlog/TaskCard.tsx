@@ -43,6 +43,7 @@ import { ChevronDown, ChevronRight, Play, Loader2, Pencil, Lightbulb } from 'luc
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
 import { trpc } from '../../trpc/client';
+import { SyncConflictBadge } from '../sync/SyncConflictBadge';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -377,6 +378,7 @@ export function TaskBody({
         {/* Human task (migration 137) — no badge on the 'agent' default. */}
         {task.executor === 'human' && <ExecutorBadge />}
         {task.experimentSeed && <ExperimentBadge />}
+        <SyncConflictBadge entityId={task.id} />
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
 

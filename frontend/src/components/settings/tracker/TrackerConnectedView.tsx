@@ -137,6 +137,7 @@ export function TrackerConnectedView({
   onAddMapping,
 }: TrackerConnectedViewProps): React.JSX.Element {
   const meta = providerMeta(connection.provider);
+  const claimHold = connection.claimHold ? connection.claimHold : null;
 
   // Optimistic mirror of the editable settings rows.
   const [statusSyncMode, setStatusSyncMode] = useState<TrackerStatusSyncMode>(
@@ -516,10 +517,12 @@ export function TrackerConnectedView({
                 data-testid="tracker-reconnect-banner"
               >
                 <p className="text-xs font-semibold text-status-warning">
-                  {meta.needsApiKey ? 'Credentials need attention' : 'Workspace needs attention'}
+                  {claimHold ? 'Running on another computer' : meta.needsApiKey ? 'Credentials need attention' : 'Workspace needs attention'}
                 </p>
                 <p className="mt-1 text-xs leading-relaxed text-text-secondary">
-                  {meta.needsApiKey ? (
+                  {claimHold ? (
+                    <span data-testid="tracker-claim-hold">{claimHold}</span>
+                  ) : meta.needsApiKey ? (
                     <>
                       {meta.name} rejected the stored key on the last sync, so syncing is paused.
                       Paste a new {meta.apiKeyLabel.toLowerCase()} to reconnect.

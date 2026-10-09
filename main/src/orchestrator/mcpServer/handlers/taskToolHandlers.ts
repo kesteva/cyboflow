@@ -21,6 +21,7 @@ import {
 } from '../../taskListing';
 import { getCurrentApprovedDesign } from '../../design/approvedDesigns';
 import { resolveIdeaComponents } from '../../ideaComponents/resolveIdeaComponents';
+import { openConflictNotes } from '../../syncConflictNotes';
 import { IdeaComponentError, IdeaComponentRouter } from '../../ideaComponents/ideaComponentRouter';
 import { toCompactTask, toFullTask, toMcpAttachments } from '../backlogProjection';
 import type { BacklogTaskItem, TaskType } from '../../../../../shared/types/tasks';
@@ -703,6 +704,11 @@ export class TaskToolHandlers {
       // read and act on this.
       task['components'] = resolveIdeaComponents(this.db, item.id);
     }
+
+    // Cross-machine sync: an open conflict means one machine's edit was set
+    // aside for a person to review. Absent when there is none.
+    const syncConflicts = openConflictNotes(this.db, item.id);
+    if (syncConflicts.length > 0) task['sync_conflicts'] = syncConflicts;
 
     this.writeResponse(client, {
       type: 'mcp-query-response',

@@ -85,7 +85,8 @@ export function composeCloudAccount(deps: CloudAccountCompositionDeps): CloudAcc
     fetch: fetchImpl,
     secrets: { encrypt: encryptSecret, decrypt: decryptSecret, isAvailable: isSecretStorageAvailable },
     openExternal: (url) => shell.openExternal(url),
-    isEnabled: () => configManager.isAgentsEnabled(),
+    // Consumers: Agents & Environments and cross-machine backlog sync.
+    isEnabled: () => configManager.isAgentsEnabled() || configManager.isRemoteSyncEnabled(),
     isDevBuild: () => configManager.isAgentsAvailable(),
     getConfiguredOrigin: () => configManager.getCloudOrigin(),
     appVersion,
@@ -100,23 +101,27 @@ export function composeCloudAccount(deps: CloudAccountCompositionDeps): CloudAcc
   service.on('signedOut', () => emitCloudChanged({ kind: 'signedOut', status: service.getStatus() }));
   service.on('revoked', () => emitCloudChanged({ kind: 'revoked', status: service.getStatus() }));
 
-  // One unlock at boot, only when a consumer will run: with the kill switch set nothing consumes the token.
-  if (
-    configManager.isAgentsEnabled() &&
-    !isPersistentAgentsKilled() &&
-    service.getState() === 'locked'
-  ) {
+  // One unlock at boot, only when a consumer will run: with the agents kill switch set, agents do not
+  // consume the token (sync still may).
+  const consumerEnabled = (): boolean =>
+    (configManager.isAgentsEnabled() && !isPersistentAgentsKilled()) || configManager.isRemoteSyncEnabled();
+  if (consumerEnabled() && service.getState() === 'locked') {
     service.scheduleBootUnlock(CLOUD_BOOT_UNLOCK_DELAY_MS);
   }
 
-  let lastEnabled = configManager.isAgentsEnabled();
+  const gateOpen = (): boolean => configManager.isAgentsEnabled() || configManager.isRemoteSyncEnabled();
+  let lastEnabled = gateOpen();
+  let lastConsumer = consumerEnabled();
   configManager.on('config-updated', () => {
-    const enabled = configManager.isAgentsEnabled();
-    if (enabled === lastEnabled) return;
+    const enabled = gateOpen();
+    const consumer = consumerEnabled();
+    const consumerTurnedOn = consumer && !lastConsumer;
+    const gateChanged = enabled !== lastEnabled;
     lastEnabled = enabled;
-    // Enabling agents is a user action: an implicit unlock (never re-prompts after a failure).
-    if (enabled && !isPersistentAgentsKilled()) service.unlock('user');
-    service.notifyGateChanged();
+    lastConsumer = consumer;
+    // Turning a consumer on is a user action: an implicit unlock (never re-prompts after a failure).
+    if (consumerTurnedOn) service.unlock('user');
+    if (gateChanged) service.notifyGateChanged();
   });
 
   setCloudAccountFacade(toFacade(service));

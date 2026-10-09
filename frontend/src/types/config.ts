@@ -10,6 +10,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 import type { WebViewerConfig } from '../../../shared/types/webViewer';
+import type { RemoteSyncConfig } from '../../../shared/types/remoteSync';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 /** Desktop-notification preferences (Settings → Notifications). */
@@ -147,6 +148,9 @@ export interface AppConfig {
   // TCP ports the System view probes (see shared/types/systemWatchedPorts.ts).
   // Absent ⇒ the build's defaults; [] ⇒ watch nothing.
   systemWatchedPorts?: number[];
+  // Cross-machine backlog sync flag (see main's AppConfig.remoteSync). Dev builds
+  // only; whether the feature is available comes from cyboflow.remoteSync.getStatus.
+  remoteSync?: RemoteSyncConfig;
   // Auto-surface idle PTY quick sessions into the human review queue. A blocking
   // human_task is minted for an interactive quick session that finished a turn
   // and has sat unviewed longer than thresholdMinutes. Absent members floor to

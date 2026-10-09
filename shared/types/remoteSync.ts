@@ -1,0 +1,197 @@
+/**
+ * Cross-machine backlog sync ("remote sync") — shared config + status types.
+ *
+ * The desktop is a client of the cyboflow-sync service: it relies on the
+ * service's HTTP contract (protocol 1), never on the server's code. This module
+ * is compiled into BOTH the Electron main process and the Vite renderer, so it
+ * stays Electron-free: pure types and constants.
+ *
+ * DEV BUILDS ONLY for now. The whole feature is gated on
+ * `ConfigManager.isRemoteSyncAvailable()` (unpackaged `pnpm dev` or the
+ * packaged "Cyboflow Dev" variant). In a stable build no facade is wired, the
+ * engine never starts, the config write is rejected, and the renderer renders
+ * nothing.
+ */
+
+/**
+ * Stored shape of the `remoteSync` config block. Sparse like `webViewer`: an
+ * absent member floors on read, so config.json stays byte-identical for users
+ * who never touch the feature.
+ */
+export interface RemoteSyncConfig {
+  /**
+   * The feature flag. Absent → `false`. Effective only in a dev build:
+   * `isRemoteSyncEnabled()` is `isRemoteSyncAvailable() && enabled`.
+   */
+  enabled?: boolean;
+}
+
+/** The complete set of storable keys; the config boundary iterates THIS. */
+export const REMOTE_SYNC_CONFIG_KEYS = ['enabled'] as const satisfies readonly (keyof RemoteSyncConfig)[];
+
+/** A synced project's row status (remote_sync_projects.status). */
+export type RemoteSyncProjectState =
+  | 'pending'
+  | 'active'
+  | 'paused'
+  | 'error'
+  | 'rewound'
+  | 'upgrade_required'
+  | 'storage_full';
+
+/** A tracker claim on a synced project: which machine runs that tracker connection. */
+export interface RemoteSyncTrackerClaim {
+  /** "Linear (acme) runs on Studio". */
+  label: string;
+  /** This machine holds it. */
+  mine: boolean;
+}
+
+/** One local project in the Sync section; every project is listed, synced or not. */
+export interface RemoteSyncProjectStatus {
+  projectId: number;
+  name: string;
+  /** Null while sync is off for this project (then `status` is null too). */
+  remoteProjectId: string | null;
+  status: RemoteSyncProjectState | null;
+  statusDetail: string | null;
+  lastSyncAt: string | null;
+  /** A pass is running right now. */
+  syncing: boolean;
+  /** Set while the project backs off after a failure (ISO). */
+  backoffUntil: string | null;
+  openConflicts: number;
+  /** Local deletes held back as a mass delete, waiting for the user to push or restore them. */
+  heldDeletes: number;
+  trackerClaims: RemoteSyncTrackerClaim[];
+}
+
+/** A project on the sync service, as offered for joining. */
+export interface RemoteSyncRemoteProject {
+  id: string;
+  name: string;
+  /** Epoch ms. */
+  createdAt: number;
+}
+
+/** What turning sync on for a project can offer (Settings → Sync, per project). */
+export interface RemoteSyncProjectChoices {
+  projectId: number;
+  /** The repo fingerprint sent to the service (credentials stripped); null when the project has no usable git remote. */
+  fingerprint: string | null;
+  /** Ideas, epics and tasks in the local backlog. Joining needs 0 in this version. */
+  localItemCount: number;
+  /** Remote projects with this project's fingerprint: the proposed join. */
+  matches: RemoteSyncRemoteProject[];
+  /** Every other remote project not already linked here, for an explicit pick. */
+  others: RemoteSyncRemoteProject[];
+}
+
+export type RemoteSyncEnableRequest =
+  | { projectId: number; mode: 'create' }
+  | { projectId: number; mode: 'join'; remoteProjectId: string };
+
+export type RemoteSyncEnableFailure =
+  /** Sync is off, signed out, or the token is locked. */
+  | 'not_ready'
+  /** Joining needs an empty local backlog in this version. */
+  | 'not_empty'
+  /** A remote project with this fingerprint already exists: offer to join it. */
+  | 'exists'
+  /** The remote project is gone. */
+  | 'not_found'
+  /** Another project here already syncs with that remote project, or this one syncs with another. */
+  | 'conflict'
+  | 'failed';
+
+export type RemoteSyncEnableResult =
+  | { ok: true; remoteProjectId: string }
+  | { ok: false; reason: RemoteSyncEnableFailure; message: string; project?: RemoteSyncRemoteProject };
+
+/** One side of a sync conflict. */
+export interface RemoteSyncConflictSide {
+  value: unknown;
+  /** The device that wrote it (a device id), or null when unknown. */
+  device: string | null;
+  /** This computer wrote it. */
+  thisDevice: boolean;
+  /** When it was written (epoch ms, from its HLC), or null. */
+  at: number | null;
+}
+
+/** How the user settles a conflict; which ones apply depends on its kind (`actions`). */
+export type RemoteSyncConflictAction =
+  /** field: keep current · delete_vs_edit: keep deleted · dependency_edge: keep removed · orphaned: keep as is. */
+  | { kind: 'keep' }
+  /** field: write the other value. */
+  | { kind: 'use_other' }
+  /** field (text): write a merged value. */
+  | { kind: 'merge'; value: string }
+  /** delete_vs_edit: create a new item from the lost values. */
+  | { kind: 'recreate' }
+  /** orphaned: move the children under another parent. */
+  | { kind: 'move'; parentId: string }
+  /** orphaned: delete the children. */
+  | { kind: 'delete_children' }
+  /** dependency_edge: restore the removed edge and remove the one that was kept. */
+  | { kind: 'swap' };
+
+/**
+ * A sync conflict: an edit that was thrown away, or a delete that changed
+ * something the user did not see happen. Conflicts apply automatically; this
+ * is the record the user reviews.
+ */
+export interface RemoteSyncConflict {
+  id: string;
+  projectId: number;
+  entityId: string;
+  entityType: 'idea' | 'epic' | 'task' | null;
+  entityRef: string | null;
+  entityTitle: string | null;
+  /** field | delete_vs_edit | dependency_edge | orphaned (unknown kinds pass through). */
+  kind: string;
+  field: string | null;
+  /** The value that stands (applied). For delete_vs_edit, null: the item is deleted. */
+  current: RemoteSyncConflictSide;
+  /** The value that lost. For delete_vs_edit, every lost field as an object. */
+  other: RemoteSyncConflictSide;
+  /**
+   * orphaned: `{ children: [{ id, ref, type }] }`; dependency_edge:
+   * `{ removedEdge, keptEdge? }`, each `{ taskId, dependsOnId }`.
+   */
+  extra: unknown;
+  createdAt: number;
+  resolvedAt: number | null;
+  resolution: string | null;
+  /** Resolved here, waiting to reach the server. */
+  pendingResolution: string | null;
+  /** field: the value has changed again since; `currentNow` is the value here now. */
+  changedSince: boolean;
+  currentNow: unknown;
+  /** The actions this conflict offers, the default first. */
+  actions: RemoteSyncConflictAction['kind'][];
+}
+
+export type RemoteSyncResolveResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * What the Settings → Integrations → Sync section renders from.
+ * `available: false` is the release-build answer: the section renders nothing.
+ */
+export type RemoteSyncStatus =
+  | { available: false }
+  | {
+      available: true;
+      /** The feature flag (`remoteSync.enabled`). */
+      enabled: boolean;
+      /** The shared cyboflow cloud sign-in's state (CloudHandleState). */
+      cloudState: string;
+      /** The signed-in device sync runs as. */
+      device: { name: string; code: string } | null;
+      /** The cloud origin the signed-in device talks to. */
+      serverOrigin: string | null;
+      /** True when `serverOrigin` is the staging deployment (drives the "Staging" badge). */
+      staging: boolean;
+      signedIn: boolean;
+      projects: RemoteSyncProjectStatus[];
+    };

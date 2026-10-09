@@ -18,6 +18,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { MarkdownPreview } from './MarkdownPreview';
+import { SyncConflictBanner } from './sync/SyncConflictBanner';
 import { IdeaAttachmentStrip } from './cyboflow/IdeaAttachmentStrip';
 import { useIdeaAttachments } from '../hooks/useIdeaAttachments';
 import { trpc } from '../trpc/client';
@@ -112,6 +113,7 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
     <Modal isOpen={isOpen} onClose={onClose} size="lg" className="idea-detail-editor">
       <ModalHeader>Edit idea · {idea.ref}</ModalHeader>
       <ModalBody>
+        <SyncConflictBanner entityId={idea.id} className="mb-3 border px-3" />
         <div className="flex flex-col gap-3" data-testid="idea-detail-editor">
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Title
