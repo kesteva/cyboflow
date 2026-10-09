@@ -29,6 +29,7 @@ vi.mock('../../trpc/client', () => ({
 
 import { useRemoteSyncConflictsStore } from '../../stores/remoteSyncConflictsStore';
 import { useBacklogStore } from '../../stores/backlogStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { SyncConflictsHost } from './SyncConflictsHost';
 import { SyncConflictBadge } from './SyncConflictBadge';
 import { SyncConflictBanner } from './SyncConflictBanner';
@@ -143,6 +144,15 @@ describe('sync conflicts UI', () => {
       await waitFor(() => expect(screen.getByTestId('sync-indicator')).toHaveAttribute('data-state', 'syncing'));
       act(() => pushStatus(status([project({ backoffUntil: '2030-01-01T00:00:00Z' })])));
       await waitFor(() => expect(screen.getByTestId('sync-indicator')).toHaveAttribute('data-state', 'error'));
+    });
+
+    it('flags held deletions and opens the Sync settings when nothing else needs review', async () => {
+      await mountHost(status([project({ heldDeletes: 30 })]));
+      const indicator = await screen.findByTestId('sync-indicator');
+      expect(indicator).toHaveAttribute('aria-label', 'Sync idle, 30 deletions waiting to sync');
+      expect(screen.getByTestId('sync-indicator-held')).toBeInTheDocument();
+      fireEvent.click(indicator);
+      expect(useNavigationStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'integrations' });
     });
 
     it('shows the open count excluding pending, and opens the view on click', async () => {
