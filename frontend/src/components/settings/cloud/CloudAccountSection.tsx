@@ -140,7 +140,7 @@ export function CloudAccountSection(): React.JSX.Element | null {
   );
   const restartButton = (): React.JSX.Element => (
     <Button
-      variant="secondary"
+      variant="primary"
       size="sm"
       data-testid="cloud-restart-app"
       loading={pending === 'restart'}

@@ -73,7 +73,8 @@ export function ThreadHeader({
         </span>
         <span className="min-w-0 break-words">{health?.copy ?? 'Not connected'}</span>
       </div>
-      {c !== null && (
+      {/* While the sign-in is locked nothing below is live; the banner carries the fix. */}
+      {c !== null && c.availability.state !== 'locked' && (
         <div className="mt-2">
           <CapabilityChips snapshot={c.capabilities} transport={c.transport} vendor={agent.vendor} testId="thread-chips" />
         </div>

@@ -175,7 +175,7 @@ export function AgentCard({
 
       <RetiredRevokeWarnings retired={agent.retiredConnections} />
 
-      {c !== null && (
+      {c !== null && c.availability.state !== 'locked' && (
         <CapabilityChips snapshot={c.capabilities} transport={c.transport} vendor={agent.vendor} />
       )}
 

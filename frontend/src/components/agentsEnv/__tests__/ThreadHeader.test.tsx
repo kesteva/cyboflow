@@ -96,6 +96,18 @@ describe('ThreadHeader', () => {
     expect(screen.queryByText(/Archive/)).toBeNull();
   });
 
+  it('a locked sign-in hides the capability chips', () => {
+    const { rerender } = render(<ThreadHeader agent={makeAgent()} {...props()} />);
+    expect(screen.getByTestId('thread-chips')).toBeInTheDocument();
+    rerender(
+      <ThreadHeader
+        agent={makeAgent({ connection: makeConnection({ availability: { state: 'locked', message: null, retryAt: null } }) })}
+        {...props()}
+      />,
+    );
+    expect(screen.queryByTestId('thread-chips')).toBeNull();
+  });
+
   it('the back button reads All agents', () => {
     const p = props();
     render(<ThreadHeader agent={makeAgent()} {...p} />);

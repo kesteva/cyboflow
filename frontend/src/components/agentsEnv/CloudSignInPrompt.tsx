@@ -151,7 +151,7 @@ export function CloudSignInPrompt({
           <>
             <p className={text}>{KEYCHAIN_RESTART_COPY}</p>
             <Button
-              variant="secondary"
+              variant="primary"
               size="sm"
               data-testid="cloud-prompt-restart"
               loading={pending === 'restart'}
