@@ -64,16 +64,43 @@ function writeWithAutoScroll(term: Terminal, chunk: string): void {
   if (atBottom) term.scrollToBottom();
 }
 
+/** What the view needs from a backend: open (idempotent), keystrokes, geometry, and the retained tail. */
+export interface ShellTerminalApi {
+  open: () => Promise<{ ok: boolean; reason?: string; message?: string }>;
+  input: (text: string) => Promise<unknown>;
+  resize: (cols: number, rows: number) => Promise<unknown>;
+  backlog: () => Promise<{ backlog: string; exited?: boolean; exitCode?: number | null }>;
+}
+
+function defaultApi(runId: string, terminalId: string): ShellTerminalApi {
+  return {
+    open: () => trpc.cyboflow.runs.shellOpen.mutate({ runId, terminalId }),
+    input: (text) => trpc.cyboflow.runs.shellInput.mutate({ terminalId, text }),
+    resize: (cols, rows) => trpc.cyboflow.runs.shellResize.mutate({ terminalId, cols, rows }),
+    backlog: () => trpc.cyboflow.runs.shellBacklog.query({ terminalId }),
+  };
+}
+
 export function RunShellTerminalView({
   runId,
   terminalId = runId,
+  api,
+  onExited,
 }: {
   runId: string;
   /** Per-terminal key. Defaults to runId (the run's PRIMARY terminal); added
    *  terminal tabs pass a distinct id. Channel + input/resize/backlog key off it;
    *  shellOpen still needs runId to resolve the worktree. */
   terminalId?: string;
+  /** Alternate backend (the Environments host terminal). Omitted: today's `runs.shell*` calls, unchanged. */
+  api?: ShellTerminalApi;
+  /** Called when the backlog reports the process already exited. */
+  onExited?: (exitCode: number | null) => void;
 }): ReactElement {
+  const apiRef = useRef(api);
+  apiRef.current = api;
+  const onExitedRef = useRef(onExited);
+  onExitedRef.current = onExited;
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   // The host session's web-link handler, read at click time (null → OS browser).
@@ -82,6 +109,7 @@ export function RunShellTerminalView({
   openWebLinkRef.current = openWebLink;
   const { theme } = useTheme();
   const [error, setError] = useState<string | null>(null);
+  const [disconnected, setDisconnected] = useState<string | null>(null);
 
   // Re-apply the xterm palette on theme change. xterm caches resolved colors at
   // construction, so we push the new CSS-variable values via options.theme +
@@ -103,6 +131,15 @@ export function RunShellTerminalView({
     if (!container) return;
     let disposed = false;
     setError(null);
+    setDisconnected(null);
+
+    // Backend calls resolve at call time so the default path is exactly today's `runs.shell*` calls.
+    const backend: ShellTerminalApi = {
+      open: () => (apiRef.current ?? defaultApi(runId, terminalId)).open(),
+      input: (text) => (apiRef.current ?? defaultApi(runId, terminalId)).input(text),
+      resize: (cols, rows) => (apiRef.current ?? defaultApi(runId, terminalId)).resize(cols, rows),
+      backlog: () => (apiRef.current ?? defaultApi(runId, terminalId)).backlog(),
+    };
 
     const term = new Terminal({
       fontSize: 14,
@@ -145,7 +182,7 @@ export function RunShellTerminalView({
 
     // Keystrokes relay verbatim (xterm encodes Enter as '\r'); stdin is always on.
     const inputDisposable = term.onData((data) => {
-      void trpc.cyboflow.runs.shellInput.mutate({ terminalId, text: data });
+      void backend.input(data);
     });
 
     const flushPending = (): void => {
@@ -204,7 +241,7 @@ export function RunShellTerminalView({
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         if (disposed) return;
-        void trpc.cyboflow.runs.shellResize.mutate({ terminalId, cols, rows });
+        void backend.resize(cols, rows);
       }, 100);
     });
     resizeObserver.observe(container);
@@ -227,8 +264,8 @@ export function RunShellTerminalView({
     const RETRY_MS = 1500;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const attemptOpen = (attemptsLeft: number): void => {
-      void trpc.cyboflow.runs.shellOpen
-        .mutate({ runId, terminalId })
+      void backend
+        .open()
         .then((res) => {
           if (disposed) return undefined;
           if (!res.ok) {
@@ -240,19 +277,26 @@ export function RunShellTerminalView({
             setError(
               res.reason === 'no_worktree'
                 ? 'This run has no worktree — a shell is unavailable.'
-                : 'Could not open a shell for this run.',
+                : (res.message ?? 'Could not open a shell for this run.'),
             );
             settleBacklog();
             return undefined;
           }
           setError(null);
-          return trpc.cyboflow.runs.shellBacklog.query({ terminalId });
+          return backend.backlog();
         })
         .then((backlogRes) => {
           if (disposed) return;
           // `undefined` here is a retry/terminal-fail branch (already handled);
           // a real result settles the backlog.
-          if (backlogRes) settleBacklog(backlogRes.backlog);
+          if (backlogRes) {
+            settleBacklog(backlogRes.backlog);
+            if (backlogRes.exited) {
+              const code = backlogRes.exitCode ?? null;
+              setDisconnected(code === null ? 'Disconnected' : `Disconnected (exit ${code})`);
+              onExitedRef.current?.(code);
+            }
+          }
         })
         .catch(() => {
           if (!disposed) settleBacklog();
@@ -284,6 +328,14 @@ export function RunShellTerminalView({
 
   return (
     <div className="flex h-full w-full flex-col" data-testid="run-shell-terminal-view">
+      {disconnected && (
+        <div
+          data-testid="run-shell-terminal-disconnected"
+          className="flex-shrink-0 border-b border-border-primary bg-bg-secondary px-3 py-2 text-xs text-status-warning"
+        >
+          {disconnected}
+        </div>
+      )}
       {error && (
         <div className="flex-shrink-0 border-b border-border-primary bg-bg-secondary px-3 py-2 text-xs text-text-tertiary">
           {error}

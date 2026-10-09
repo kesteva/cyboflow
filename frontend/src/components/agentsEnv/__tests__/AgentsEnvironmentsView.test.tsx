@@ -1,7 +1,7 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { makeAgent, makeStatus } from './fixtures';
+import { makeAgent, makeStatus, makeHostsStatus, makeLocalHost } from './fixtures';
 
 let unlockMutate: ReturnType<typeof vi.fn>;
 let listAgentsQuery: ReturnType<typeof vi.fn>;
@@ -13,6 +13,12 @@ vi.mock('../../../trpc/client', () => ({
         status: { query: vi.fn().mockResolvedValue({ available: false }) },
         onCloudChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         unlock: { get mutate() { return unlockMutate; } },
+      },
+      hosts: {
+        status: { query: vi.fn().mockResolvedValue({ available: true, enabled: true, killed: false, scheduleKilled: false, running: true }) },
+        list: { query: vi.fn().mockResolvedValue([]) },
+        onHostsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onPreflightProgress: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
       persistentAgents: {
         status: { query: vi.fn().mockResolvedValue({ devBuild: true, configEnabled: true, enabled: true, killed: false, running: true, bridgeDisabled: false }) },
@@ -30,6 +36,7 @@ vi.mock('../../../trpc/client', () => ({
 import { AgentsEnvironmentsView } from '../AgentsEnvironmentsView';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { usePersistentAgentsStore } from '../../../stores/persistentAgentsStore';
+import { useHostsStore } from '../../../stores/hostsStore';
 
 function seed(agents: ReturnType<typeof makeAgent>[], status: 'ready' | 'loading' = 'ready'): void {
   usePersistentAgentsStore.setState({ agents, agentsStatus: status, featureStatus: makeStatus(), threads: {}, connectors: [] });
@@ -51,11 +58,13 @@ beforeEach(() => {
 });
 
 describe('AgentsEnvironmentsView', () => {
-  it('the Agents tab is selected by default and Environments shows the placeholder', () => {
+  it('the Agents tab is selected by default and Environments swaps in the Environments tab', () => {
+    useHostsStore.setState({ featureStatus: makeHostsStatus(), hosts: [makeLocalHost()], hostsStatus: 'ready' });
     render(<AgentsEnvironmentsView />);
     expect(screen.getByTestId('agents-env-tab-agents')).toHaveAttribute('aria-selected', 'true');
     fireEvent.click(screen.getByTestId('agents-env-tab-environments'));
-    expect(screen.getByTestId('environments-placeholder')).toBeInTheDocument();
+    expect(screen.getByTestId('environments-tab')).toBeInTheDocument();
+    expect(screen.getByTestId('environment-card-local')).toBeInTheDocument();
     expect(screen.getByTestId('agents-env-tab-environments')).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByTestId('agents-empty')).toBeNull();
   });
@@ -72,6 +81,23 @@ describe('AgentsEnvironmentsView', () => {
     expect(screen.getByTestId('agents-connect-button')).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('agents-env-tab-environments'));
     expect(screen.queryByTestId('agents-connect-button')).toBeNull();
+  });
+
+  it('the Environments tab shows Add environment (not Connect) and opens the dialog', async () => {
+    useHostsStore.setState({ featureStatus: makeHostsStatus(), hosts: [makeLocalHost()], hostsStatus: 'ready' });
+    useNavigationStore.setState({ agentsEnvTab: 'environments' });
+    render(<AgentsEnvironmentsView />);
+    expect(screen.queryByTestId('agents-connect-button')).toBeNull();
+    fireEvent.click(screen.getByTestId('environments-add-button'));
+    expect(await screen.findByTestId('add-environment-dialog')).toBeInTheDocument();
+  });
+
+  it('hides Add environment while Environments is off', () => {
+    useHostsStore.setState({ featureStatus: makeHostsStatus({ running: false, enabled: false }) });
+    useNavigationStore.setState({ agentsEnvTab: 'environments' });
+    render(<AgentsEnvironmentsView />);
+    expect(screen.queryByTestId('environments-add-button')).toBeNull();
+    expect(screen.getByTestId('environments-off')).toBeInTheDocument();
   });
 
   it('a selected agent renders its thread, and All agents goes back', async () => {

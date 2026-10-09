@@ -4,9 +4,11 @@ import { Button } from '../ui/Button';
 import { trpc } from '../../trpc/client';
 import { useNavigationStore, type AgentsEnvTab } from '../../stores/navigationStore';
 import { usePersistentAgentsStore } from '../../stores/persistentAgentsStore';
+import { useHostsStore } from '../../stores/hostsStore';
 import { AgentsTab } from './AgentsTab';
 import { ConnectAgentDialog } from './ConnectAgentDialog';
-import { EnvironmentsPlaceholder } from './EnvironmentsPlaceholder';
+import { EnvironmentsTab } from './EnvironmentsTab';
+import { AddEnvironmentDialog } from './AddEnvironmentDialog';
 import { PersistentAgentThreadView } from './PersistentAgentThreadView';
 
 const TABS: ReadonlyArray<{ id: AgentsEnvTab; label: string }> = [
@@ -14,7 +16,7 @@ const TABS: ReadonlyArray<{ id: AgentsEnvTab; label: string }> = [
   { id: 'environments', label: 'Environments' },
 ];
 
-/** Center pane: the Agents tab (cards or one agent's thread) and the Environments placeholder. */
+/** Center pane: the Agents tab (cards or one agent's thread) and the Environments tab. */
 export function AgentsEnvironmentsView(): React.JSX.Element {
   const tab = useNavigationStore((s) => s.agentsEnvTab);
   const agentId = useNavigationStore((s) => s.agentsEnvAgentId);
@@ -22,7 +24,9 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
   const selectAgent = useNavigationStore((s) => s.selectPersistentAgent);
   const agents = usePersistentAgentsStore((s) => s.agents);
   const agentsStatus = usePersistentAgentsStore((s) => s.agentsStatus);
+  const hostsStatus = useHostsStore((s) => s.featureStatus);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [addEnvOpen, setAddEnvOpen] = useState(false);
   const [resumeAgentId, setResumeAgentId] = useState<string | null>(null);
   const [reconnectAgentId, setReconnectAgentId] = useState<string | null>(null);
 
@@ -82,6 +86,17 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
                   Connect an agent
                 </Button>
               )}
+              {tab === 'environments' && hostsStatus?.running === true && !hostsStatus.killed && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Plus className="h-3 w-3" />}
+                  data-testid="environments-add-button"
+                  onClick={() => setAddEnvOpen(true)}
+                >
+                  Add environment
+                </Button>
+              )}
             </div>
           </div>
 
@@ -118,7 +133,7 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden">
         {tab === 'environments' ? (
-          <EnvironmentsPlaceholder />
+          <EnvironmentsTab />
         ) : agentId !== null && selected !== null ? (
           <PersistentAgentThreadView
             agentId={agentId}
@@ -138,6 +153,8 @@ export function AgentsEnvironmentsView(): React.JSX.Element {
           />
         )}
       </div>
+
+      <AddEnvironmentDialog isOpen={addEnvOpen} onClose={() => setAddEnvOpen(false)} />
 
       <ConnectAgentDialog
         isOpen={connectOpen || resumeAgentId !== null || reconnectAgentId !== null}

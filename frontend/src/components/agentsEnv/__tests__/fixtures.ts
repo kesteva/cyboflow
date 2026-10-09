@@ -6,6 +6,12 @@ import type {
   CloudStatus,
 } from '../../../../../shared/types/cloudAccountWire';
 import type {
+  HostView,
+  HostsFeatureStatus,
+  PreflightCheckResult,
+  PreflightResult,
+} from '../../../../../shared/types/hosts';
+import type {
   AgentViewT,
   AgentsFeatureStatus,
   ConnectionViewT,
@@ -175,4 +181,91 @@ export function makeCloudStatus(display: CloudDisplayState = 'signed_in', over: 
         }
       : null,
   };
+}
+
+export function makeHostsStatus(over: Partial<HostsFeatureStatus> = {}): HostsFeatureStatus {
+  return { available: true, enabled: true, killed: false, scheduleKilled: false, running: true, ...over };
+}
+
+export function makeCheck(over: Partial<PreflightCheckResult> = {}): PreflightCheckResult {
+  return {
+    id: 'ssh-reachable',
+    label: 'SSH reachable',
+    status: 'pass',
+    detail: 'Connected',
+    tierImpact: 'none',
+    durationMs: 120,
+    ...over,
+  };
+}
+
+export function makePreflight(over: Partial<PreflightResult> = {}): PreflightResult {
+  return {
+    hostId: 'h2',
+    mode: 'full',
+    startedAt: '2026-10-09T10:00:00.000Z',
+    finishedAt: '2026-10-09T10:00:05.000Z',
+    results: [
+      makeCheck(),
+      makeCheck({ id: 'git', label: 'git installed', detail: 'git 2.45' }),
+      makeCheck({
+        id: 'sleep-settings',
+        label: 'Sleep settings',
+        status: 'warn',
+        detail: 'Machine sleeps after 10 minutes',
+        fix: 'sudo pmset -a sleep 0',
+      }),
+      makeCheck({ id: 'mcp-roundtrip', label: 'MCP round trip', status: 'skipped', detail: 'Arrives with remote flows' }),
+    ],
+    reachable: true,
+    detectedTier: 'cli',
+    runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false },
+    arch: 'arm64',
+    osVersion: '15.1',
+    toolchainHash: null,
+    appVersion: '0.5.1',
+    ...over,
+  };
+}
+
+export function makeHost(over: Partial<HostView> = {}): HostView {
+  return {
+    id: 'h2',
+    label: 'Build box',
+    kind: 'ssh',
+    sshTarget: 'build@10.0.0.5',
+    remoteRoot: null,
+    arch: 'arm64',
+    osVersion: '15.1',
+    detectedTier: 'cli',
+    userCapTier: null,
+    effectiveTier: 'cli',
+    tierSource: 'detected',
+    lifecycleState: 'online',
+    lastSeenAt: '2026-10-09T10:00:05.000Z',
+    preflight: makePreflight(),
+    preflightAt: '2026-10-09T10:00:05.000Z',
+    lastAttempt: null,
+    preflightRunning: false,
+    runningSessions: 0,
+    runningRuns: 0,
+    archivedAt: null,
+    createdAt: '2026-10-08T10:00:00.000Z',
+    ...over,
+  };
+}
+
+export function makeLocalHost(over: Partial<HostView> = {}): HostView {
+  return makeHost({
+    id: 'local',
+    label: 'This Mac',
+    kind: 'local',
+    sshTarget: null,
+    detectedTier: 'full',
+    effectiveTier: 'full',
+    tierSource: 'fixed',
+    preflight: null,
+    preflightAt: null,
+    ...over,
+  });
 }
