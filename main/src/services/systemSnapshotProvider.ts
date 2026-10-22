@@ -49,6 +49,8 @@ export interface SystemSnapshotProviderDeps {
   isPidAlive?: (pid: number) => boolean;
   /** This process's instance id. Defaults to {@link getInstanceId}. */
   getSelfInstanceId?: () => string;
+  /** This app's main-process pid. Defaults to `process.pid`. */
+  selfPid?: number;
   /**
    * Reads the spawn marker off scanned rows' environments. Defaults to the real
    * reader ({@link createSpawnMarkerReader}): linux reads `/proc/<pid>/environ`
@@ -165,6 +167,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
   const readRecords = deps.readInstanceRecords ?? (() => readInstanceRecordsFromDisk());
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
   const selfId = deps.getSelfInstanceId ?? getInstanceId;
+  const selfPid = deps.selfPid ?? process.pid;
   const readMarkers = deps.readMarkers ?? createSpawnMarkerReader();
 
   return {
@@ -181,7 +184,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
         readMarkers(rows),
       ]);
       const marked: MarkedProcess[] = rows.map((r) => ({ ...r, marker: markers.get(r.pid) ?? null }));
-      const liveInstances = buildLiveInstanceSet(selfId(), records, isPidAlive);
+      const liveInstances = buildLiveInstanceSet(selfId(), selfPid, records, isPidAlive);
       // The registry's path set IS the worktree truth (sessions/runs ∪ git).
       const truth: WorktreeTruth = { knownWorktreePaths };
       // Classify the WHOLE table (ancestry walks need every row), then drop unrelated host

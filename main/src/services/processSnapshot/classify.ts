@@ -49,6 +49,13 @@ export interface LiveInstanceSet {
    * NOT proof of death, so an unknown id is never sweep-eligible.
    */
   readonly deadInstanceIds: ReadonlySet<string>;
+  /**
+   * Main-process pid → instance id for every LIVE instance (self included). An
+   * unmarked helper the app runs itself (`du`, `git`, … via execFile) has no spawn
+   * marker, but its parent chain still reaches a live app's main process: that is
+   * a live child, not a stray.
+   */
+  readonly liveMainPids: ReadonlyMap<number, string>;
 }
 
 /**
@@ -57,17 +64,23 @@ export interface LiveInstanceSet {
  */
 export function buildLiveInstanceSet(
   selfInstanceId: string,
+  selfPid: number,
   records: readonly Pick<InstanceRecord, 'instanceId' | 'pid'>[],
   isPidAlive: (pid: number) => boolean,
 ): LiveInstanceSet {
   const live = new Set<string>([selfInstanceId]);
   const dead = new Set<string>();
+  const mainPids = new Map<number, string>([[selfPid, selfInstanceId]]);
   for (const r of records) {
     if (r.instanceId === selfInstanceId) continue;
-    if (isPidAlive(r.pid)) live.add(r.instanceId);
-    else dead.add(r.instanceId);
+    if (isPidAlive(r.pid)) {
+      live.add(r.instanceId);
+      if (!mainPids.has(r.pid)) mainPids.set(r.pid, r.instanceId);
+    } else {
+      dead.add(r.instanceId);
+    }
   }
-  return { selfInstanceId, liveInstanceIds: live, deadInstanceIds: dead };
+  return { selfInstanceId, liveInstanceIds: live, deadInstanceIds: dead, liveMainPids: mainPids };
 }
 
 /** Non-numeric fields every bucket shares. */
@@ -206,8 +219,10 @@ function formatElapsedDisplay(seconds: number | null): string | null {
  *     confirmed dead (record missing/unreadable), is only suspected.
  *  2. No marker, but this app's own manager holds the handle → owned.
  *  3. No marker, cyboflow-shaped (see {@link selfLooksCyboflow}, or an ancestor is
- *     cyboflow's) → suspected.
- *  4. Anything else → foreign.
+ *     cyboflow's), parent chain reaching a live instance's main process → owned
+ *     (this instance) or foreign (another live one): an unmarked execFile helper.
+ *  4. No marker, cyboflow-shaped, no live app above it → suspected.
+ *  5. Anything else → foreign.
  */
 export function classify(
   rows: readonly MarkedProcess[],
@@ -249,6 +264,29 @@ export function classify(
       if (cur.owner !== null) return cur;
       seen.add(cur.pid);
       cur = byPid.get(cur.ppid);
+    }
+    return null;
+  };
+
+  /** The live instance whose main process is an ancestor of `p`, if any. */
+  const liveAppAncestor = (p: ProcessSnapshotRow): string | null => {
+    const seen = new Set<number>([p.pid]);
+    let ppid = p.ppid;
+    for (let depth = 0; depth < MAX_ANCESTRY_DEPTH && !seen.has(ppid); depth++) {
+      const app = liveInstances.liveMainPids.get(ppid);
+      if (app !== undefined) return app;
+      const cur = byPid.get(ppid);
+      if (!cur) return null;
+      seen.add(ppid);
+      ppid = cur.ppid;
+    }
+    return null;
+  };
+
+  /** The first known worktree `p`'s command line names (e.g. `du -sk -- <wt>`). */
+  const mentionedWorktree = (p: MarkedProcess): string | null => {
+    for (const wt of worktreeTruth.knownWorktreePaths) {
+      if (mentionsPath(p.command, wt)) return wt;
     }
     return null;
   };
@@ -308,6 +346,18 @@ export function classify(
       };
     }
     if (selfLooksCyboflow(p, worktreeTruth) || ancestorIsCyboflow(p)) {
+      const app = liveAppAncestor(p);
+      if (app === liveInstances.selfInstanceId) {
+        const attributed = p.worktreePath === null ? { ...p, worktreePath: mentionedWorktree(p) } : p;
+        return {
+          ...base(attributed),
+          bucket: 'owned',
+          process: attributed,
+          owner: null,
+          instanceId: app,
+        };
+      }
+      if (app !== null) return foreign(p, app);
       return { ...base(p), bucket: 'suspected', process: p };
     }
     return foreign(p, null);
