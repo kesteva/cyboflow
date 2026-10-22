@@ -382,9 +382,9 @@ function App() {
               system → agentsEnv (only while the feature is running) → backlog →
               projectOverview (needs activeProjectId) → LandingHome. The
               navigationStore mutual-exclusion invariant guarantees at most one
-              overlay flag is set, so the order is just a tiebreaker. focusQueue
-              scrolls LandingHome to its review queue when the user arrived from
-              the human-review rail affordance. */}
+              overlay flag is set, so the order is just a tiebreaker. LandingHome
+              always opens at the top of the page, including when the user
+              arrived from the human-review rail affordance. */}
         <div className="flex flex-col flex-1 overflow-hidden">
           {guidedShell !== 'none' ? (
             <GuidedSetupSurface />
@@ -498,7 +498,7 @@ function App() {
                 </div>
               </div>
             )}>
-              <LandingHome focusQueue={showHumanReview} />
+              <LandingHome />
             </ErrorBoundary>
           )}
         </div>
