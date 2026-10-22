@@ -52,6 +52,13 @@ const ANSI_CSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 const AUTH_URL_RE = /https:\/\/[^\s"'<>]+oauth\/authorize[^\s"'<>]*/i;
 const CODE_PROMPT_RE = /paste code here/i;
 const SUCCESS_RE = /login successful|logged in as/i;
+/**
+ * A malformed code (no `#state` half) is rejected locally: the CLI writes this
+ * to STDERR and keeps waiting on stdin for another paste — no re-prompt on
+ * stdout, no exit. (A well-formed but wrong code exits 1 instead.)
+ */
+const INVALID_CODE_RE = /invalid code/i;
+const INVALID_CODE_MESSAGE = 'That code was not accepted. Copy the whole code from the browser and paste it again.';
 
 export interface ClaudeAuthLoginDependencies {
   /** Absolute path to a `claude` binary that understands `auth login`; null when none is available. */
@@ -255,7 +262,13 @@ export class ClaudeAuthLoginService {
     });
     child.stderr?.on('data', (chunk: string) => {
       if (attempt !== this.attempt) return;
-      this.stderrTail = (this.stderrTail + stripAnsi(chunk)).slice(-2000);
+      const text = stripAnsi(chunk);
+      this.stderrTail = (this.stderrTail + text).slice(-2000);
+      // Back to the code field — otherwise the dialog sits on "Verifying"
+      // until the attempt times out while the CLI waits for another paste.
+      if (this.state.phase === 'verifying' && INVALID_CODE_RE.test(text)) {
+        this.state = { ...this.state, phase: 'awaiting-code', error: INVALID_CODE_MESSAGE };
+      }
     });
     child.on('error', (error) => {
       if (attempt !== this.attempt) return;
@@ -282,7 +295,7 @@ export class ClaudeAuthLoginService {
     if (!this.isLive() || !this.child?.stdin || trimmed.length === 0) return this.getState();
     if (this.state.phase !== 'awaiting-code' && this.state.phase !== 'starting') return this.getState();
     this.child.stdin.write(`${trimmed}\n`);
-    this.state = { ...this.state, phase: 'verifying' };
+    this.state = { ...this.state, phase: 'verifying', error: null };
     return this.getState();
   }
 

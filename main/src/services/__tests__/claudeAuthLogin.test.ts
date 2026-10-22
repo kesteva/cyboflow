@@ -132,6 +132,21 @@ describe('ClaudeAuthLoginService', () => {
     expect(child().written).toBe('abc123#state\n');
   });
 
+  it('returns to awaiting-code when the CLI rejects a malformed code on stderr, and clears the error on resubmit', async () => {
+    const { service, child } = harness();
+    service.start();
+    child().stdout.write(OPENING + VISIT + PROMPT);
+    await flush();
+    service.submitCode('bogus');
+    child().stderr.write('Invalid code. Please make sure the full code was copied.\n');
+    await flush();
+    const state = service.getState();
+    expect(state.phase).toBe('awaiting-code');
+    expect(state.error).toMatch(/not accepted/);
+    expect(service.submitCode('real#state')).toMatchObject({ phase: 'verifying', error: null });
+    expect(child().written).toBe('bogus\nreal#state\n');
+  });
+
   it('ignores an empty code and a code submitted before any attempt', () => {
     const { service, children } = harness();
     expect(service.submitCode('abc').phase).toBe('idle');

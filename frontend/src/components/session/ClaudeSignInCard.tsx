@@ -266,7 +266,11 @@ export function ClaudeSignInFlow({ onSignedIn, onClose }: ClaudeSignInFlowProps)
               Continue
             </Button>
           </form>
-          {submitError && <p className="text-xs text-status-error">{submitError}</p>}
+          {(submitError ?? state.error) && (
+            <p className="text-xs text-status-error" data-testid="claude-sign-in-code-error">
+              {submitError ?? state.error}
+            </p>
+          )}
         </div>
       )}
 
