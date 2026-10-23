@@ -241,7 +241,7 @@ describe('full mode with the toolchain and the link', () => {
   });
 
   it('PREFLIGHT_PING_TYPE mirrors the socket handler constant', async () => {
-    const { PREFLIGHT_PING_MESSAGE_TYPE } = await import('../../../orchestrator/mcpServer/mcpQueryHandler');
+    const { PREFLIGHT_PING_MESSAGE_TYPE } = await import('../../../orchestrator/mcpServer/preflightPing');
     expect(PREFLIGHT_PING_TYPE).toBe(PREFLIGHT_PING_MESSAGE_TYPE);
   }, 30_000);
 });

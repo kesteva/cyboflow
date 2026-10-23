@@ -43,6 +43,7 @@ import {
   ORCH_AUTH_KILL_SWITCH_ENV_VAR,
   type OrchTokenVerifier,
 } from '../orchAuthToken';
+import { PREFLIGHT_PING_MESSAGE_TYPE, preflightPongLine } from './preflightPing';
 
 // ---------------------------------------------------------------------------
 // Wire-envelope narrowing
@@ -588,6 +589,11 @@ export class OrchSocketServer {
 
     if (!isMcpQueryEnvelope(parsed)) {
       this.logger.warn('[Cyboflow Orch IPC] dropped malformed envelope', { line });
+      return;
+    }
+
+    if (parsed.type === PREFLIGHT_PING_MESSAGE_TYPE && parsed.runId === undefined) {
+      socket.write(preflightPongLine(parsed.requestId)); // unauthenticated by design: no run, no state
       return;
     }
 

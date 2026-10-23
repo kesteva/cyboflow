@@ -32,7 +32,7 @@ import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { OrchSocketServer, isNamedPipePath } from '../orchSocketServer';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
-import { PREFLIGHT_PING_MESSAGE_TYPE } from '../mcpQueryHandler';
+import { PREFLIGHT_PING_MESSAGE_TYPE } from '../preflightPing';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';

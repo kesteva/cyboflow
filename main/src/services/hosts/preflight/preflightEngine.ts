@@ -100,7 +100,7 @@ export const PRELAUNCH_TIMEOUT_DETAIL = 'Did not answer in time';
 export const NOT_CHECKED_BEFORE_LAUNCH_DETAIL = 'Not checked before a launch';
 
 /**
- * Mirrors PREFLIGHT_PING_MESSAGE_TYPE (orchestrator/mcpServer/mcpQueryHandler.ts) — duplicated as a literal so the
+ * Mirrors PREFLIGHT_PING_MESSAGE_TYPE (orchestrator/mcpServer/preflightPing.ts) — duplicated as a literal so the
  * preflight does not pull the whole MCP query handler graph in for one string; a test pins the two together.
  */
 export const PREFLIGHT_PING_TYPE = 'preflight-ping';
