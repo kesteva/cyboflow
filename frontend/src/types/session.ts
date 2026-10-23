@@ -262,6 +262,15 @@ export interface CreateSessionRequest {
    * main/src/types/session.ts (request-parity rule).
    */
   designIdeaId?: string;
+  /**
+   * Environment (host) to run the session on (M2). A remote host id stamps
+   * sessions.host_id; 'local' or null = This Mac; omitted = the project's default
+   * environment when environments are on, else This Mac. Only honored by
+   * sessions:create-quick, which refuses a remote host for anything but a
+   * worktree-backed claude-sdk / codex-sdk session. KEEP IN SYNC with the twin in
+   * main/src/types/session.ts (request-parity rule).
+   */
+  hostId?: string | null;
   projectId?: number;
   baseBranch?: string;
   toolType?: 'claude' | 'none';

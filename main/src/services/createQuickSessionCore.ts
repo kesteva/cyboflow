@@ -32,6 +32,7 @@ import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { isPtyLane } from './panelLane';
 import { normalizePathSeparators } from '../utils/posixPath';
+import { isRemoteHostId, type HostsFeatureStatus, type HostView } from '../../../shared/types/hosts';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -56,6 +57,8 @@ export interface QuickSessionJobData {
   /** Work directly in the project checkout — no dedicated worktree (migration 047). */
   inPlace?: boolean;
   claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore' };
+  /** Remote environment (M2); absent = This Mac. Only a validated remote id is ever set. */
+  hostId?: string | null;
 }
 
 /** The collaborators the core needs — structural so both IPC + boot wiring inject them. */
@@ -138,6 +141,11 @@ export interface CreateQuickSessionCoreOptions {
    * project path, never `/${nameHint}`).
    */
   inPlace?: boolean;
+  /**
+   * Remote environment (M2) the session runs on — set ONLY by sessions:create-quick, after
+   * {@link resolveQuickSessionHost} validated it. Every other caller omits it (This Mac).
+   */
+  hostId?: string | null;
   /** Await budget for the session-created event (default 30s). */
   timeoutMs?: number;
 }
@@ -207,6 +215,8 @@ export async function createQuickSessionCore(
     agentModel: opts.agentModel,
     inPlace,
     claudeConfig: opts.claudeConfig,
+    // Remote environment (M2): only a remote id rides the job, so a local payload is unchanged.
+    ...(isRemoteHostId(opts.hostId) ? { hostId: opts.hostId } : {}),
   });
 
   // Await the session row via the session-created event. Concurrent create-quick
@@ -448,4 +458,117 @@ export function stampQuickSessionRuntimeConfig(
             agent_runtime = ?
       WHERE id = ?`,
   ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, sessionId);
+}
+
+/** The slice of the hosts facade (orchestrator/hostsBridge.ts `HostsFacade`) the host resolver reads. */
+export interface QuickSessionHostsReader {
+  status(): HostsFeatureStatus;
+  /** Throws when the id is unknown. */
+  get(id: string): HostView;
+}
+
+/** What {@link resolveQuickSessionHost} needs to know about the launch being resolved. */
+export interface QuickSessionHostInput {
+  /** The raw IPC `hostId` (untrusted): a string names an environment, null = This Mac, absent = default. */
+  requestedHostId: unknown;
+  /** projects.default_host_id (migration 152). */
+  projectDefaultHostId: string | null | undefined;
+  /** The RESOLVED session runtime (undefined = Claude, decided by the substrate). */
+  agentRuntime: SessionAgentRuntime | undefined;
+  /** The substrate the launch requests (undefined = the substrate ladder decides — the PTY by default). */
+  requestedSubstrate: CliSubstrate | undefined;
+  inPlace: boolean;
+  isDesignSession: boolean;
+  ultracode: boolean;
+  /** CYBOFLOW_DISABLE_ORCH_SOCK_AUTH is set: a remote agent could not authenticate to the orch socket. */
+  orchSocketAuthDisabled: boolean;
+}
+
+export type QuickSessionHostResolution = { ok: true; hostId: string | null } | { ok: false; error: string };
+
+export const REMOTE_ENVIRONMENTS_OFF_MESSAGE = 'Remote environments are turned off';
+
+/**
+ * The launch-shape reason this session cannot run on a remote environment, or null when it can. M2 hosts only
+ * worktree-backed structured SDK sessions (Claude SDK / Codex SDK); PTY terminals, design, ultracode and in-place
+ * sessions stay on This Mac.
+ */
+function remoteShapeRefusal(input: QuickSessionHostInput): string | null {
+  if (input.inPlace) return 'In-place sessions run on This Mac only. Choose a worktree session to use a remote environment.';
+  if (input.isDesignSession) return 'Design sessions run on This Mac only.';
+  if (input.ultracode) return 'Ultracode sessions run on This Mac only.';
+  const runtime = remoteSessionRuntime(input);
+  if (runtime === null) {
+    return 'Remote environments run Claude SDK or Codex SDK sessions only. Terminal and other agents run on This Mac.';
+  }
+  return null;
+}
+
+/** claude-sdk / codex-sdk on the SDK substrate, else null. Claude's runtime comes from the substrate. */
+function remoteSessionRuntime(input: QuickSessionHostInput): 'claude-sdk' | 'codex-sdk' | null {
+  if (input.requestedSubstrate !== 'sdk') return null;
+  const runtime = input.agentRuntime ?? 'claude-sdk';
+  return runtime === 'claude-sdk' || runtime === 'codex-sdk' ? runtime : null;
+}
+
+/**
+ * Decide which environment a `sessions:create-quick` launch runs on, BEFORE anything is enqueued:
+ * an explicit request (a string; 'local' = This Mac) > the project's default environment (only while
+ * environments are running and not kill-switched, and only for a session shape a remote can host) > This Mac.
+ * A remote pick is validated (exists, not archived, SSH, full tier, cyboflow tools installed, the runtime's SDK
+ * available there); every refusal is a readable message the renderer shows. Local resolves to null — the
+ * canonical stamp — so a local launch threads nothing.
+ */
+export function resolveQuickSessionHost(
+  hosts: QuickSessionHostsReader | null,
+  input: QuickSessionHostInput,
+): QuickSessionHostResolution {
+  const explicit = input.requestedHostId;
+  const status = hosts?.status() ?? null;
+  const featureOn = status !== null && status.running && !status.killed;
+
+  let candidate: string | null;
+  if (typeof explicit === 'string' && explicit.trim().length > 0) {
+    candidate = explicit.trim();
+  } else if (explicit === null) {
+    candidate = null;
+  } else {
+    // Absent (or a blank string — treated as "no choice").
+    // No explicit choice: the project default applies only while the feature runs, and only to a session shape a
+    // remote environment can host — a terminal or design launch in a remote-default project stays on This Mac.
+    const fallback = featureOn ? input.projectDefaultHostId : null;
+    candidate = isRemoteHostId(fallback) && remoteShapeRefusal(input) === null ? fallback : null;
+  }
+  if (!isRemoteHostId(candidate)) return { ok: true, hostId: null };
+
+  if (!featureOn || hosts === null) return { ok: false, error: REMOTE_ENVIRONMENTS_OFF_MESSAGE };
+  if (input.orchSocketAuthDisabled) {
+    return { ok: false, error: 'Remote environments need orchestrator socket authentication, which is turned off (CYBOFLOW_DISABLE_ORCH_SOCK_AUTH).' };
+  }
+  const shapeRefusal = remoteShapeRefusal(input);
+  if (shapeRefusal !== null) return { ok: false, error: shapeRefusal };
+
+  let host: HostView;
+  try {
+    host = hosts.get(candidate);
+  } catch {
+    return { ok: false, error: 'That environment no longer exists. Pick another environment.' };
+  }
+  const name = host.label;
+  if (host.archivedAt !== null) return { ok: false, error: `The environment "${name}" is archived.` };
+  if (host.kind !== 'ssh') return { ok: false, error: `The environment "${name}" is not a remote machine.` };
+  if (host.effectiveTier !== 'full') {
+    return { ok: false, error: `The environment "${name}" cannot run SDK sessions yet. Run its check from Environments.` };
+  }
+  if (!host.remoteReady) {
+    return { ok: false, error: `Install cyboflow tools on "${name}" (Environments) before starting a session there.` };
+  }
+  const runtime = remoteSessionRuntime(input);
+  const runtimes = host.preflight?.runtimes;
+  const available = runtime === 'claude-sdk' ? runtimes?.claudeSdk === true : runtimes?.codexSdk === true;
+  if (!available) {
+    const label = runtime === 'claude-sdk' ? 'Claude' : 'Codex';
+    return { ok: false, error: `${label} is not available on "${name}". Check the machine from Environments.` };
+  }
+  return { ok: true, hostId: candidate };
 }

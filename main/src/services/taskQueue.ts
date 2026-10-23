@@ -12,6 +12,7 @@ import type { ToolPanel } from '../../../shared/types/panels';
 import type { Project } from '../database/models';
 import { getCurrentBranch } from './gitPlumbingCommands';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 
 /**
  * Generate a deterministic session name from a prompt string.
@@ -81,7 +82,15 @@ interface CreateSessionJob {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
   };
+  /**
+   * Remote environment (M2) the session runs on; null/undefined = This Mac. Set only by
+   * sessions:create-quick after it validated the host. Stamped on sessions.host_id.
+   */
+  hostId?: string | null;
 }
+
+/** Thrown by the session-creation processor for a remote job until remote worktrees land (M2-C2). */
+export const REMOTE_SESSIONS_UNAVAILABLE_MESSAGE = 'Remote sessions are not available yet';
 
 export class TaskQueue {
   private sessionQueue: SimpleQueue<CreateSessionJob>;
@@ -133,12 +142,19 @@ export class TaskQueue {
     const sessionConcurrency = isLinux ? 1 : 5;
 
     this.sessionQueue.process(sessionConcurrency, async (job) => {
-      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, baseCommittish, toolType, claudeConfig, inPlace } = job.data;
+      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, baseCommittish, toolType, claudeConfig, inPlace, hostId } = job.data;
       const { sessionManager, worktreeManager } = this.options;
 
       // Processing session creation job - verbose debug logging removed
 
       try {
+        // TODO(M2-C2): replace this guard with the remote worktree branch (services/hosts/remoteCheckout.ts).
+        // Until then a remote job must fail BEFORE anything is provisioned — never cut a LOCAL worktree for a
+        // session that claims to live on another machine.
+        if (isRemoteHostId(hostId)) {
+          throw new Error(REMOTE_SESSIONS_UNAVAILABLE_MESSAGE);
+        }
+
         const targetProject = sessionManager.getProjectById(projectId);
         if (!targetProject) {
           throw new Error(`Project with ID ${projectId} not found`);
@@ -221,7 +237,8 @@ export class TaskQueue {
           inPlace,
           job.data.agentProvider,
           job.data.agentRuntime,
-          job.data.agentModel
+          job.data.agentModel,
+          hostId !== undefined ? { hostId } : undefined
         );
 
         // Attach claudeConfig to the session object for the panel creation in events.ts

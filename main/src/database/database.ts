@@ -1735,8 +1735,8 @@ export class DatabaseService {
       const displayOrder = maxOrder + 1;
       
       this.db.prepare(`
-        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, agent_provider, agent_runtime, agent_model, display_order, tool_type, base_commit, base_branch, run_id)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, agent_provider, agent_runtime, agent_model, display_order, tool_type, base_commit, base_branch, run_id, host_id)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         data.id,
         data.name,
@@ -1755,9 +1755,9 @@ export class DatabaseService {
         data.tool_type || 'claude',
         data.base_commit || null,
         data.base_branch || null,
-        data.run_id ?? null
+        data.run_id ?? null,
+        data.host_id ?? null // M2: NULL = This Mac (canonical); a remote id only from sessions:create-quick
       );
-      
       const session = this.getSession(data.id);
       if (!session) {
         throw new Error('Failed to create session');

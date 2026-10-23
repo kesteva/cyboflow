@@ -33,7 +33,10 @@ import {
   createQuickSessionCore,
   stampQuickSessionRuntimeConfig,
   QUICK_PROVIDER_SDK_RUNTIME,
+  resolveQuickSessionHost,
 } from '../services/createQuickSessionCore';
+import { peekHostsFacade } from '../orchestrator/hostsBridge';
+import { isOrchSockAuthDisabled } from '../orchestrator/orchAuthToken';
 import { isPermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -1238,6 +1241,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         : quickResolvedRuntime;
       const quickRequestedSubstrateForLaunch = isDesignSession ? 'sdk' : requestedSubstrate;
 
+      // Environment (M2): explicit request > project default (environments on) > This Mac. Every refusal lands
+      // HERE, before anything is enqueued; a local launch resolves to null and threads nothing.
+      const hostResolution = resolveQuickSessionHost(peekHostsFacade(), {
+        requestedHostId: request.hostId,
+        projectDefaultHostId: targetProject.default_host_id,
+        agentRuntime: quickAgentRuntimeForLaunch,
+        requestedSubstrate: quickRequestedSubstrateForLaunch,
+        inPlace,
+        isDesignSession,
+        ultracode: requestedEffort === 'ultracode',
+        orchSocketAuthDisabled: isOrchSockAuthDisabled(),
+      });
+      if (!hostResolution.ok) return { success: false, error: hostResolution.error };
+
       // Create the session + wire the __quick__ sentinel run via the SHARED core
       // (createQuickSessionCore) — the same path experiments.startSideBySide uses
       // for its SHA-pinned arm sessions. The core: enqueues the session-create job
@@ -1270,6 +1287,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // matching to the NAME fallback.
           inPlace,
           ...(isDesignSession ? { requireSdkSubstrate: true } : {}),
+          ...(hostResolution.hostId !== null ? { hostId: hostResolution.hostId } : {}),
         },
       );
 

@@ -19,8 +19,10 @@
  * the stub's worktreePath and the 30-second timeout fires.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { _resetClaimedQuickSessionIdsForTesting } from '../../services/createQuickSessionCore';
+import { _resetHostsFacadeForTesting, setHostsFacade, type HostsFacade } from '../../orchestrator/hostsBridge';
+import type { HostView } from '../../../../shared/types/hosts';
 
 // Electron is imported transitively via session.ts -> panelManager etc.
 vi.mock('electron', () => ({
@@ -2019,4 +2021,85 @@ describe('sessions:input handler - substrate routing', () => {
     expect(fakeOmpSdkManager.spawnCliProcess.mock.calls[0][0]).not.toHaveProperty('resumeSessionId');
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// Environments (M2-C1): the handler resolves + validates the host BEFORE any enqueue.
+// ---------------------------------------------------------------------------
+
+describe('sessions:create-quick handler - environment (host) resolution', () => {
+  const READY_HOST = {
+    id: 'h-ssh', label: 'Studio', kind: 'ssh', archivedAt: null, effectiveTier: 'full', remoteReady: true,
+    preflight: { runtimes: { claudeSdk: true, codexSdk: true, claudeCli: false, codexCli: false } },
+  } as unknown as HostView;
+  const RUNNING_STATUS = { available: true, enabled: true, killed: false, scheduleKilled: false, running: true };
+
+  afterEach(() => {
+    _resetHostsFacadeForTesting();
+  });
+
+  function wireHosts(): void {
+    setHostsFacade({
+      status: () => RUNNING_STATUS,
+      get: (id: string) => {
+        if (id !== READY_HOST.id) throw new Error('HostNotFoundError');
+        return READY_HOST;
+      },
+    } as unknown as HostsFacade);
+  }
+
+  it('an explicit remote host with environments off is refused before enqueue', async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+    const res = await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42, branchName: TEST_BRANCH, agentRuntime: 'claude-sdk', hostId: 'h-ssh',
+    });
+    expect(res).toEqual({ success: false, error: 'Remote environments are turned off' });
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('an explicit remote host refuses an interactive (PTY) launch before enqueue', async () => {
+    wireHosts();
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42, branchName: TEST_BRANCH, substrate: 'interactive', hostId: 'h-ssh',
+    })) as { success: boolean; error?: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Claude SDK or Codex SDK sessions only/);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('a valid remote claude-sdk launch threads hostId into the session-create job', async () => {
+    wireHosts();
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42, branchName: TEST_BRANCH, agentRuntime: 'claude-sdk', hostId: 'h-ssh',
+    });
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledTimes(1);
+    expect(fakeTaskQueue.createSession.mock.calls[0][0]).toMatchObject({ hostId: 'h-ssh' });
+  });
+
+  it('the project default host applies to an eligible launch only while environments run', async () => {
+    wireHosts();
+    const { services, fakeTaskQueue, fakeDatabaseService } = makeServices();
+    fakeDatabaseService.getProject = (_id: number) =>
+      ({ id: 42, name: 'TestProject', path: '/proj', default_host_id: 'h-ssh' }) as ReturnType<typeof fakeDatabaseService.getProject>;
+    const handlers = registerWith(services);
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH, agentRuntime: 'codex-sdk' });
+    expect(fakeTaskQueue.createSession.mock.calls[0][0]).toMatchObject({ hostId: 'h-ssh' });
+  });
+
+  it('a local launch enqueues the unchanged payload (no hostId key)', async () => {
+    wireHosts();
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH, hostId: 'local' });
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledTimes(2);
+    for (const call of fakeTaskQueue.createSession.mock.calls) {
+      expect(Object.keys(call[0] as object)).not.toContain('hostId');
+    }
+  });
 });

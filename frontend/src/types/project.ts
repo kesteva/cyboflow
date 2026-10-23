@@ -31,6 +31,11 @@ export interface Project {
    * `thoroughnessToTuningLevel` (`shared/types/thoroughness.ts`).
    */
   solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
+  /**
+   * The project's default environment (migration 152; `projects:get-all` spreads the row). NULL/undefined = This
+   * Mac. New sessions launch there when environments are on and the launch names no environment.
+   */
+  default_host_id?: string | null;
 }
 
 export interface CreateProjectRequest {
