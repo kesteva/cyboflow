@@ -372,16 +372,20 @@ function appServerEnvironment(
  * PATH, socket or token) made complete for the environment by
  * RemoteRuntimeSession.env — remote HOME/USER/…, the remote PATH with the pushed
  * `codex-path` first, the forwarded CYBOFLOW_ORCH_SOCKET and
- * CYBOFLOW_ORCH_TOKEN_FILE. A lane's `laneEnv` is NOT carried: its values are
- * this Mac's build-slot paths. One builder for the cold spawn and the warm
- * fingerprint.
+ * CYBOFLOW_ORCH_TOKEN_FILE. A lane's `laneEnv` IS carried (merged last, like the
+ * local builder): for a remote run laneBuildSlots computes its values against the
+ * REMOTE worktree. One builder for the cold spawn and the warm fingerprint.
  */
 function remoteAppServerEnvironment(
   runId: string,
   options: ClaudeSpawnerOptions,
   remote: RemoteCodexLaunch,
 ): NodeJS.ProcessEnv {
-  return remote.session.env(buildCodexRemoteAppServerEnvironment(runId, options.worktreePath));
+  const laneEnv = options.laneEnv ?? {};
+  return remote.session.env(
+    { ...buildCodexRemoteAppServerEnvironment(runId, options.worktreePath), ...laneEnv },
+    { extraKeys: Object.keys(laneEnv) },
+  );
 }
 
 function defaultCodexAppServerClientFactory(

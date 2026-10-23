@@ -20,7 +20,6 @@
   "src/orchestrator/omp/ompBridgeConfig.ts",
   "src/orchestrator/orchAuthToken.ts",
   "src/orchestrator/permissionRules.ts",
-  "src/orchestrator/programmatic/defaultProgrammaticRunner.ts",
   "src/orchestrator/programmatic/environmentActions.ts",
   "src/orchestrator/programmatic/laneBuildSlotsWiring.ts",
   "src/orchestrator/runFileExplorer.ts",

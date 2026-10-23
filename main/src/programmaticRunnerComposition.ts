@@ -82,8 +82,9 @@ import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { readRunDigest } from './orchestrator/runDigestReader';
 import { buildStepTransitionEvent } from './orchestrator/stepTransitionBridge';
-import { runGitAsync } from './utils/runGit';
-import { checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { worktreeProbe } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { isRemoteHostId } from '../../shared/types/hosts';
+import { createRunHostAccess } from './services/hosts/runHostAccess';
 import type { VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import type { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import type { WorkflowRegistry } from './orchestrator/workflowRegistry';
@@ -196,6 +197,24 @@ export function composeProgrammaticRunner(
   // Assigned synchronously by the monitorFactory IIFE below, then returned.
   let buildMonitorSession: BuildMonitorSession | null = null;
 
+  // A REMOTE run's worktree (workflow_runs.host_id names an environment, spec M2
+  // §5 D3) through its host: the runner's lane build slots + environment actions
+  // and the commit probe below. Gates are read per call, so it is safe to build
+  // before hostsComposition starts; a local / NULL run never consults it.
+  const runHostAccess = createRunHostAccess();
+  // A run's remote host id, or null (This Mac / unknown / a failed read).
+  const readRunRemoteHostId = (runId: string): string | null => {
+    try {
+      const row = rawDb.prepare(`SELECT host_id FROM workflow_runs WHERE id = ?`).get(runId) as
+        | { host_id?: unknown }
+        | undefined;
+      const hostId = typeof row?.host_id === 'string' ? row.host_id : null;
+      return isRemoteHostId(hostId) && hostId.length > 0 ? hostId : null;
+    } catch {
+      return null;
+    }
+  };
+
   // Programmatic-run driver (execution-model seam, Stage 2). When a run's
   // immutable `execution_model` stamp is 'programmatic', RunExecutor delegates the
   // whole run to this collaborator: host code (the WorkflowController) walks the
@@ -211,6 +230,7 @@ export function composeProgrammaticRunner(
     // step cleanly skips (fail-open) and visual verification never fires on the
     // programmatic plane.
     db: rawDb,
+    runHostAccess,
     reporter: {
       report: (runId, stepId, status) =>
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
@@ -344,7 +364,10 @@ export function composeProgrammaticRunner(
         injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
       ): MonitorSession =>
         new DefaultMonitorSession({
-          ctx,
+          // A remote run's monitor queries run without its (remote) worktree as
+          // cwd. The runner already marks its ctx; the lazy rehydrator's ctx is
+          // built from the row, so the stamp is re-read here for it.
+          ctx: ctx.remoteWorktree === true || readRunRemoteHostId(ctx.runId) === null ? ctx : { ...ctx, remoteWorktree: true },
           history,
           structuredQuery,
           textQuery,
@@ -524,20 +547,30 @@ export function composeProgrammaticRunner(
         // backstop can only withhold a false integrate, never invent a failure.
         beginCommitProbe: async (rid) => {
           const row = rawDb
-            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
-            .get(rid) as { worktree_path?: unknown } | undefined;
+            .prepare(`SELECT worktree_path, host_id FROM workflow_runs WHERE id = ?`)
+            .get(rid) as { worktree_path?: unknown; host_id?: unknown } | undefined;
           const worktreePath =
             row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
               ? row.worktree_path
               : null;
           if (worktreePath === null) return undefined;
+          // A REMOTE run's worktree is probed through its environment (spec M2 §5
+          // D3); This Mac's git on a remote path would fail every probe.
+          const remoteHostId =
+            row && typeof row.host_id === 'string' && isRemoteHostId(row.host_id) && row.host_id.length > 0
+              ? row.host_id
+              : null;
+          const probe = worktreeProbe(
+            worktreePath,
+            remoteHostId !== null ? runHostAccess.forHost(remoteHostId) : undefined,
+          );
           const readHead = async (): Promise<string> =>
-            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+            (await probe.git(['rev-parse', 'HEAD'])).trim();
           // `--untracked-files=all` lists files, not collapsed directories, so a new
           // file inside an already-untracked directory still reads as NEW dirt.
           const readDirtyPaths = async (): Promise<string[]> =>
             parsePorcelainPaths(
-              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
+              await probe.git(['status', '--porcelain', '--untracked-files=all']),
             );
           const startHead = await readHead();
           // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
@@ -569,7 +602,7 @@ export function composeProgrammaticRunner(
                 const bootstrapShas = new Set(runbookBootstrapStamps.commitShasForRun(rid));
                 if (bootstrapShas.size > 0) {
                   const between = (
-                    await runGitAsync(worktreePath, ['rev-list', `${startHead}..${endHead}`])
+                    await probe.git(['rev-list', `${startHead}..${endHead}`])
                   )
                     .split('\n')
                     .map((line) => line.trim())
@@ -593,7 +626,7 @@ export function composeProgrammaticRunner(
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
-              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
+              buildSlots: await probe.buildSlots(), // committed lane build output at the END HEAD (tri-state)
             };
           };
         },

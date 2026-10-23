@@ -27,6 +27,7 @@
  * Standalone-typecheck note: this is the SDK-importing leaf; nothing here imports
  * electron / better-sqlite3 / a concrete service beyond the claude-exe resolver.
  */
+import { tmpdir } from 'os';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
@@ -62,7 +63,8 @@ export interface StructuredQueryFn {
   (args: {
     prompt: string;
     schema: Record<string, unknown>;
-    cwd: string;
+    /** The run's worktree. Absent (a remote run's worktree is not on this machine) ⇒ a local temp dir. */
+    cwd?: string;
     model?: string;
     signal?: AbortSignal;
   }): Promise<unknown>;
@@ -73,7 +75,8 @@ export interface StructuredQueryFn {
  * concatenated text ('' if none). Fakeable in tests (no SDK).
  */
 export interface TextQueryFn {
-  (args: { prompt: string; cwd: string; model?: string; signal?: AbortSignal }): Promise<string>;
+  /** `cwd` absent ⇒ a local temp dir (see StructuredQueryFn). */
+  (args: { prompt: string; cwd?: string; model?: string; signal?: AbortSignal }): Promise<string>;
 }
 
 /** Concatenate the text blocks of an SDK assistant message (string or block[]). */
@@ -153,7 +156,7 @@ export function makeSdkStructuredQuery(
       const q = query({
         prompt,
         options: {
-          cwd,
+          cwd: cwd ?? tmpdir(),
           ...(model ? { model } : {}),
           maxTurns: MONITOR_MAX_TURNS,
           // HARD availability ceiling. `allowedTools` governs AUTO-APPROVAL ONLY
@@ -234,7 +237,7 @@ export function makeSdkTextQuery(
       const q = query({
         prompt,
         options: {
-          cwd,
+          cwd: cwd ?? tmpdir(),
           ...(model ? { model } : {}),
           maxTurns: MONITOR_MAX_TURNS,
           // HARD availability ceiling. `allowedTools` governs AUTO-APPROVAL ONLY
