@@ -113,6 +113,15 @@ export type { McpQueryMessage, McpQueryResponse, McpQueryHandlerDeps, WorkflowCo
 export { resolveGlobalAgentContext } from './globalAgentContext';
 
 /**
+ * The remote-environment preflight's link probe (spec A6 `mcp-roundtrip`): `{"type":"preflight-ping",
+ * "requestId":<nonce>}` sent through a host's forwarded orch socket, answered `{ok:true, data:{pong:true}}`.
+ * It carries NO runId, so the socket server never binds or authenticates it, and it reads/writes no state —
+ * it only proves the forward reaches this server. Handled ahead of the McpQueryMessage switch (it is not a
+ * run-scoped MCP tool message).
+ */
+export const PREFLIGHT_PING_MESSAGE_TYPE = 'preflight-ping';
+
+/**
  * The workflow step id whose Approve answer flips a plan-gated run's drafted
  * epics/tasks visible + sprint-eligible (stamping plan_approved_at). Mirrors the
  * same-named constant in questionRouter.ts — duplicated as a bare literal to keep
@@ -307,6 +316,10 @@ export class McpQueryHandler {
    * Never throws — all exceptions are caught and surfaced as ok:false responses.
    */
   async handleMessage(msg: McpQueryMessage, client: net.Socket): Promise<void> {
+    if ((msg as { type: string }).type === PREFLIGHT_PING_MESSAGE_TYPE) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { pong: true } });
+      return;
+    }
     try {
       switch (msg.type) {
         case 'mcp-list-pending-approvals':

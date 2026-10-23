@@ -26,7 +26,7 @@ import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSyn
 import { join, isAbsolute, resolve } from 'node:path';
 import * as os from 'node:os';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
-import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
+import { McpQueryHandler, PREFLIGHT_PING_MESSAGE_TYPE, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedApproval, seedQuestion } from '../../__test_fixtures__/orchestratorTestDb';
@@ -3569,6 +3569,31 @@ describe('McpQueryHandler', () => {
       expect(response.requestId).toBe('req-9');
       expect(response.ok).toBe(false);
       expect(response.error).toBe('unknown_message_type');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // preflight-ping (remote-environment link probe)
+  // -------------------------------------------------------------------------
+
+  describe('preflight-ping', () => {
+    it('answers ok:true with pong and the same requestId, with no runId and no state touched', async () => {
+      const { socket, writes } = makeSocketDouble();
+      const before = db.prepare('SELECT COUNT(*) AS n FROM raw_events').get() as { n: number };
+      const msg = { type: PREFLIGHT_PING_MESSAGE_TYPE, requestId: 'ping-1' } as unknown as McpQueryMessage;
+
+      await expect(handler.handleMessage(msg, socket)).resolves.toBeUndefined();
+
+      expect(writes).toHaveLength(1);
+      expect(writes[0].endsWith('\n')).toBe(true);
+      expect(JSON.parse(writes[0])).toEqual({
+        type: 'mcp-query-response',
+        requestId: 'ping-1',
+        ok: true,
+        data: { pong: true },
+      });
+      const after = db.prepare('SELECT COUNT(*) AS n FROM raw_events').get() as { n: number };
+      expect(after.n).toBe(before.n);
     });
   });
 });
