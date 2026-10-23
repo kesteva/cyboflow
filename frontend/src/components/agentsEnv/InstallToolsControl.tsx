@@ -63,8 +63,8 @@ export function InstallToolsControl({ host }: { host: HostView }): React.JSX.Ele
         </Button>
       </div>
       <div className="text-[10px] text-text-tertiary">
-        Copies the Claude and Codex agents and the cyboflow bridge to this Mac&apos;s folder{' '}
-        {host.remoteRoot ?? `~/cf-remote/${host.id}`}. Needed for sessions and workflows.
+        Copies the Claude and Codex agents and the cyboflow bridge to{' '}
+        {host.remoteRoot ?? `~/cf-remote/${host.id}`} on {host.label}. Needed for sessions and workflows.
       </div>
       {installing && (
         <div data-testid={`install-tools-progress-${host.id}`} className="flex flex-col gap-1">
