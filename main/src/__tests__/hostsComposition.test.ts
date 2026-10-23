@@ -39,6 +39,7 @@ import {
   peekHostsFacade,
 } from '../orchestrator/hostsBridge';
 import { HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../services/hosts/flags';
+import { getRemoteRuntime, setRemoteRuntime } from '../services/hosts/remoteRuntimeBridge';
 import type { HostsChangedEvent } from '../../../shared/types/hosts';
 import type { LoggerLike } from '../orchestrator/types';
 
@@ -112,6 +113,7 @@ afterEach(() => {
   comp.stop();
   hostEvents.off(HOSTS_CHANNEL, onEvent);
   _resetHostsFacadeForTesting();
+  setRemoteRuntime(null);
   raw.close();
   vi.unstubAllEnvs();
 });
@@ -220,6 +222,33 @@ describe('composeHosts', () => {
     } finally {
       hostEvents.off(hostTerminalChannel(terminalId), onExit);
     }
+  });
+});
+
+describe('composeHosts remote runtime bridge', () => {
+  it('publishes the remote runtime at start() and clears it at stop()', () => {
+    expect(getRemoteRuntime()).toBeNull();
+    comp.start();
+    expect(getRemoteRuntime()).toBe(comp.remoteRuntime);
+    comp.stop();
+    expect(getRemoteRuntime()).toBeNull();
+    comp.start();
+    expect(getRemoteRuntime()).toBe(comp.remoteRuntime);
+  });
+
+  it('stop() leaves a runtime it did not publish in place', () => {
+    comp.start();
+    const other = { resolveHostId: () => null, prepare: () => Promise.reject(new Error('x')), removeRunToken: async () => undefined };
+    setRemoteRuntime(other);
+    comp.stop();
+    expect(getRemoteRuntime()).toBe(other);
+  });
+
+  it('the composed runtime resolves hosts from the db and gates prepare on the live service', async () => {
+    expect(comp.remoteRuntime.resolveHostId({ hostId: 'local' })).toBeNull();
+    expect(comp.remoteRuntime.resolveHostId({ hostId: 'h1' })).toBe('h1');
+    config.enabled = false;
+    await expect(comp.remoteRuntime.prepare('h1', { runId: 'r1', spawnKey: 'r1' })).rejects.toThrow(/turned off/);
   });
 });
 

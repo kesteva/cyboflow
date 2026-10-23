@@ -16,6 +16,10 @@
  * the registry builds gets `preflightExtras` from the service (expected toolchain + link handle), through a late-
  * bound closure: the registry is constructed before the service it calls back into.
  *
+ * Remote runtime (spec B1): a RemoteRuntime over the service (gates, links), the registry (ExecutionHosts) and the db
+ * (host resolution) is published on services/hosts/remoteRuntimeBridge at start() and cleared at stop(), so the
+ * agent managers reach it without a constructor change.
+ *
  * Host terminal lifecycle guards (the renderer modal owns a terminal, but cannot always close it):
  *  - a config change that leaves the feature not running (or remote hosts kill-switched) destroys every terminal;
  *  - the first terminal opened against a main-window webContents attaches (once per webContents id) a main-frame
@@ -37,6 +41,8 @@ import { buildToolchainManifest, pushToolchain, resolveToolchainSources } from '
 import { HostTerminalManager, type OwnedHostShell } from './services/hosts/hostTerminalManager';
 import { LocalHost } from './services/hosts/localHost';
 import { PreflightScheduler } from './services/hosts/preflightScheduler';
+import { RemoteRuntime } from './services/hosts/remoteRuntime';
+import { getRemoteRuntime, setRemoteRuntime } from './services/hosts/remoteRuntimeBridge';
 import { SshTransport } from './services/hosts/sshTransport';
 
 export interface HostsCompositionDeps {
@@ -59,6 +65,8 @@ export function defaultOrchSocketPath(platform: NodeJS.Platform = process.platfo
 
 export interface HostsComposition {
   service: HostsService;
+  /** Published on remoteRuntimeBridge while started. */
+  remoteRuntime: RemoteRuntime;
   /** PTY shells owned by open host terminals (System view). */
   terminalShells: () => OwnedHostShell[];
   /** Idempotent. */
@@ -158,6 +166,13 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
   });
   setHostsFacade(service);
+  const remoteRuntime = new RemoteRuntime({
+    db,
+    hosts: service,
+    getHost: (hostId) => registry.get(hostId),
+    logger,
+    captureError: captureSeamError,
+  });
 
   const onConfig = (): void => {
     // Turned off (or remote hosts kill-switched): no terminal may outlive the feature.
@@ -169,15 +184,18 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
 
   return {
     service,
+    remoteRuntime,
     terminalShells: () => terminals.listOwnedShells(),
     start(): void {
       if (started) return;
       started = true;
+      setRemoteRuntime(remoteRuntime);
       scheduler.start();
       configManager.on('config-updated', onConfig);
     },
     stop(): void {
       started = false;
+      if (getRemoteRuntime() === remoteRuntime) setRemoteRuntime(null);
       scheduler.stop();
       configManager.off('config-updated', onConfig);
       service.shutdown();
