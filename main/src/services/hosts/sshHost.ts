@@ -37,7 +37,7 @@ import {
 } from '../../orchestrator/trpc/contracts/executionHost';
 import type { LoggerLike } from '../../orchestrator/types';
 import { RemoteHostProcess, type HostProcessTimers } from './hostProcess';
-import { runSshPreflight, type CaptureErrorFn } from './preflight/preflightEngine';
+import { runSshPreflight, type CaptureErrorFn, type SshPreflightExtras } from './preflight/preflightEngine';
 import {
   buildRemoteSpawnCommand,
   encodeEnvPrelude,
@@ -161,6 +161,11 @@ export interface SshHostDeps {
   remoteFacts?: () => RemoteHostFacts | null;
   /** HostProcess kill timers (tests). */
   processTimers?: HostProcessTimers;
+  /**
+   * The full-tier inputs of a preflight (expected toolchain, orch link, prelaunch node path), resolved per run by
+   * the hosts service. Absent (or rejecting) ⇒ the M1 checks: sdk-binary-hash / mcp-roundtrip skipped.
+   */
+  preflightExtras?: (mode: PreflightResult['mode']) => Promise<SshPreflightExtras>;
   appVersion: string;
   transport: SshTransportLike;
   /** Local existence probe for the remote-root guard. Default node:fs existsSync. */
@@ -349,14 +354,22 @@ export class SshHost implements ExecutionHost {
     });
   }
 
-  preflight(
+  async preflight(
     mode: PreflightResult['mode'],
     onCheck?: (r: PreflightCheckResult) => void,
     signal?: AbortSignal,
   ): Promise<PreflightResult> {
     const d = this.deps;
+    let extras: SshPreflightExtras = {};
+    try {
+      extras = (await d.preflightExtras?.(mode)) ?? {};
+    } catch (err) {
+      // The preflight never throws: without its extras it is the M1 check set.
+      d.logger?.warn('[hosts] preflight inputs unavailable', { error: err instanceof Error ? err.name : 'unknown' });
+    }
     return runSshPreflight(
       {
+        ...extras,
         hostId: d.id,
         sshTarget: d.sshTarget,
         remoteRoot: d.remoteRoot,

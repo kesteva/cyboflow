@@ -6,9 +6,16 @@
  * token env file (`<remote root>/env`) is only inspected with `test`, `stat` (its mode) and `grep -c`
  * (COUNTS of token lines) — never its value. `/etc/os-release` is read with `sed -n` for one field, never
  * sourced. Every probe is guarded (`2>/dev/null`, `|| true` style), so the script runs to `probe_done=1`.
+ *
+ * Installed toolchain (spec A6 `sdk-binary-hash`): given the EXPECTED hash of this Mac's toolchain for the
+ * machine's arch, the probe reports whether `<root>/toolchain/<hash>/manifest.json` exists, whether it names that
+ * hash, and the byte sizes (stat, never a checksum: the push already verified every sha256) of the claude binary,
+ * the MCP bundle and the codex entrypoint. The hash and the codex path are validated locally and enter the script
+ * only as single-quoted shell words.
  */
 import { redactSecrets } from '../../../../shared/types/hosts';
 import { shQuote } from './sshTransport';
+import { TOOLCHAIN_CLAUDE_REL, TOOLCHAIN_HASH_RE, TOOLCHAIN_MANIFEST_NAME, TOOLCHAIN_MCP_REL } from './toolchain/types';
 
 export interface ProbeRecord {
   home: string | null;
@@ -50,6 +57,16 @@ export interface ProbeRecord {
   sleepValue: string | null;
   sleepPrevented: boolean | null;
   diskFreeKb: number | null;
+  /** The toolchain hash the toolchain section looked for (echoed back); null when no section ran. */
+  tcHash: string | null;
+  /** `<root>/toolchain/<hash>/manifest.json` exists. null = not reported. */
+  tcManifest: boolean | null;
+  /** That manifest names the expected hash. null = not reported (no manifest). */
+  tcManifestHash: boolean | null;
+  /** Byte sizes of the installed claude binary / MCP bundle / codex entrypoint; null = missing or not reported. */
+  tcClaudeSize: number | null;
+  tcMcpSize: number | null;
+  tcCodexSize: number | null;
   /** The script reached its last line (output not truncated by a timeout or a dropped connection). */
   complete: boolean;
 }
@@ -59,8 +76,28 @@ const EMPTY_PROBE: ProbeRecord = {
   sockPathBytes: null, unameS: null, unameM: null, osVersion: null, xcodeClt: null, gitVersion: null,
   nodePath: null, nodeVersion: null, claudePath: null, claudeVersion: null, codexPath: null,
   codexVersion: null, codexAuth: null, envExists: null, envMode: null, envWellformed: null, envLines: null,
-  sleepValue: null, sleepPrevented: null, diskFreeKb: null, complete: false,
+  sleepValue: null, sleepPrevented: null, diskFreeKb: null, tcHash: null, tcManifest: null, tcManifestHash: null,
+  tcClaudeSize: null, tcMcpSize: null, tcCodexSize: null, complete: false,
 };
+
+/** What the toolchain section looks for: the expected hash and (when the bundle has codex) its entrypoint path. */
+export interface ToolchainProbeSpec {
+  hash: string;
+  /** e.g. `codex/aarch64-apple-darwin/bin/codex`; null for a claude-only toolchain. */
+  codexBinRel: string | null;
+}
+
+/** A codex entrypoint path as the toolchain lays it out; nothing else may enter the probe text. */
+export const CODEX_BIN_REL_RE = /^codex\/[A-Za-z0-9._-]+\/bin\/codex$/;
+
+export class InvalidToolchainProbeSpecError extends Error {
+  constructor() {
+    super('Invalid toolchain probe input.');
+    this.name = 'InvalidToolchainProbeSpecError';
+  }
+}
+
+const KV_FN = 'kv() { printf \'%s=%s\\n\' "$1" "$(printf \'%s\' "$2" | head -n 1 | tr -d \'\\r\')"; }';
 
 /**
  * A shell expression for the remote root: `~/x` becomes `"$HOME"/'x'` (tilde expansion never happens
@@ -79,12 +116,32 @@ export function expandRemoteRoot(remoteRoot: string, home: string | null): strin
   return remoteRoot;
 }
 
-/** Build the probe script for one host. Pure. */
-export function buildProbeScript(remoteRoot: string): string {
+/** The token env file's presence / mode / line counts — never its value. Expects `kv`, `$root`, `$uname_s`. */
+const ENV_FILE_LINES: readonly string[] = [
+  'envf="$root/env"',
+  'if [ -f "$envf" ]; then',
+  '  kv env_exists 1',
+  '  if [ "$uname_s" = Darwin ]; then',
+  '    kv env_mode "$(stat -f %Lp "$envf" 2>/dev/null)"',
+  '  else',
+  '    kv env_mode "$(stat -c %a "$envf" 2>/dev/null)"',
+  '  fi',
+  '  kv env_wellformed "$(grep -c \'^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-[A-Za-z0-9_-]*$\' "$envf" 2>/dev/null)"',
+  '  kv env_lines "$(grep -c \'^CLAUDE_CODE_OAUTH_TOKEN=\' "$envf" 2>/dev/null)"',
+  'else',
+  '  kv env_exists 0',
+  'fi',
+];
+
+/**
+ * Build the probe script for one host. Pure. `opts.toolchain` adds the installed-toolchain section for that
+ * expected hash (see buildToolchainProbeFragment).
+ */
+export function buildProbeScript(remoteRoot: string, opts: { toolchain?: ToolchainProbeSpec | null } = {}): string {
   const candidates = (bin: string): string =>
     `"$HOME/.local/bin/${bin}" /opt/homebrew/bin/${bin} /usr/local/bin/${bin} /usr/bin/${bin}`;
   return [
-    'kv() { printf \'%s=%s\\n\' "$1" "$(printf \'%s\' "$2" | head -n 1 | tr -d \'\\r\')"; }',
+    KV_FN,
     'kv home "$HOME"',
     'u=$(id -un 2>/dev/null)',
     'kv user "$u"',
@@ -148,25 +205,87 @@ export function buildProbeScript(remoteRoot: string): string {
     'kv remote_root "$root"',
     // The orch forward's remote socket must fit sun_path (104 on macOS): `wc -c` counts bytes.
     'kv sock_path_bytes "$(printf \'%s\' "$root/s/o.sock" | wc -c | tr -d \' \')"',
-    'envf="$root/env"',
-    'if [ -f "$envf" ]; then',
-    '  kv env_exists 1',
-    '  if [ "$uname_s" = Darwin ]; then',
-    '    kv env_mode "$(stat -f %Lp "$envf" 2>/dev/null)"',
-    '  else',
-    '    kv env_mode "$(stat -c %a "$envf" 2>/dev/null)"',
-    '  fi',
-    '  kv env_wellformed "$(grep -c \'^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-[A-Za-z0-9_-]*$\' "$envf" 2>/dev/null)"',
-    '  kv env_lines "$(grep -c \'^CLAUDE_CODE_OAUTH_TOKEN=\' "$envf" 2>/dev/null)"',
-    'else',
-    '  kv env_exists 0',
-    'fi',
+    ...ENV_FILE_LINES,
     'if [ "$uname_s" = Darwin ]; then',
     '  sl=$(pmset -g 2>/dev/null | sed -n \'s/^ *sleep *//p\' | head -n 1)',
     '  kv sleep_value "${sl%% *}"',
     '  case "$sl" in *"prevented by"*) kv sleep_prevented 1 ;; *) kv sleep_prevented 0 ;; esac',
     'fi',
     'kv disk_free_kb "$(df -Pk "$HOME" 2>/dev/null | awk \'NR==2{print $4}\')"',
+    ...(opts.toolchain ? buildToolchainProbeFragment(opts.toolchain) : []),
+    'kv probe_done 1',
+    '',
+  ].join('\n');
+}
+
+/**
+ * The toolchain section. Expects `kv`, `$root` and `$uname_s` to be defined. Throws (caller bug) for a hash
+ * that is not lowercase sha256 hex or a codex path of another shape.
+ */
+export function buildToolchainProbeFragment(spec: ToolchainProbeSpec): string[] {
+  if (!TOOLCHAIN_HASH_RE.test(spec.hash)) throw new InvalidToolchainProbeSpecError();
+  if (spec.codexBinRel !== null && (!CODEX_BIN_REL_RE.test(spec.codexBinRel) || spec.codexBinRel.includes('..'))) {
+    throw new InvalidToolchainProbeSpecError();
+  }
+  return [
+    `tc_h=${shQuote(spec.hash)}`,
+    'kv tc_hash "$tc_h"',
+    'tcd="$root/toolchain/$tc_h"',
+    // stat, not a checksum: ~550 MB is never re-hashed on a preflight (the push verified every sha256).
+    'fsz() { if [ -f "$1" ]; then if [ "$uname_s" = Darwin ]; then stat -f %z -- "$1" 2>/dev/null; else stat -c %s -- "$1" 2>/dev/null; fi; fi; }',
+    `if [ -f "$tcd/${TOOLCHAIN_MANIFEST_NAME}" ]; then`,
+    '  kv tc_manifest 1',
+    // serializeToolchainManifest writes `"hash": "<hex>"` (2-space JSON); files carry "sha256", never "hash".
+    `  if grep -q -F "\\"hash\\": \\"$tc_h\\"" "$tcd/${TOOLCHAIN_MANIFEST_NAME}" 2>/dev/null; then kv tc_manifest_hash 1; else kv tc_manifest_hash 0; fi`,
+    `  kv tc_claude_size "$(fsz "$tcd/${TOOLCHAIN_CLAUDE_REL}")"`,
+    `  kv tc_mcp_size "$(fsz "$tcd/${TOOLCHAIN_MCP_REL}")"`,
+    ...(spec.codexBinRel !== null ? [`  kv tc_codex_size "$(fsz "$tcd"/${shQuote(spec.codexBinRel)})"`] : []),
+    'else',
+    '  kv tc_manifest 0',
+    'fi',
+  ];
+}
+
+/**
+ * A toolchain-only probe (used when the full probe ran without the right expected hash: the first check of a
+ * machine, or an arch that changed). Prints the toolchain keys then `probe_done=1`.
+ */
+export function buildToolchainProbeScript(remoteRoot: string, spec: ToolchainProbeSpec): string {
+  return [
+    KV_FN,
+    'uname_s=$(uname -s 2>/dev/null)',
+    `root=${remoteRootShellExpr(remoteRoot)}`,
+    ...buildToolchainProbeFragment(spec),
+    'kv probe_done 1',
+    '',
+  ].join('\n');
+}
+
+/**
+ * The trimmed probe of a PRELAUNCH preflight (a launch-time liveness check under a 2 s budget): the remote home,
+ * the token env file's shape (same rules as the full probe), node (the last known path first) and the installed
+ * toolchain. Nothing else.
+ */
+export function buildPrelaunchProbeScript(
+  remoteRoot: string,
+  opts: { toolchain: ToolchainProbeSpec | null; nodePath: string | null },
+): string {
+  const nodeFirst = opts.nodePath !== null && opts.nodePath.startsWith('/') ? `${shQuote(opts.nodePath)} ` : '';
+  return [
+    KV_FN,
+    'kv home "$HOME"',
+    'uname_s=$(uname -s 2>/dev/null)',
+    'kv uname_s "$uname_s"',
+    'nv=; np=',
+    `for c in ${nodeFirst}"$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do`,
+    '  if [ -x "$c" ]; then nv=$("$c" --version 2>/dev/null); if [ -n "$nv" ]; then np=$c; break; fi; fi',
+    'done',
+    'kv node_path "$np"',
+    'kv node_version "$nv"',
+    `root=${remoteRootShellExpr(remoteRoot)}`,
+    'kv remote_root "$root"',
+    ...ENV_FILE_LINES,
+    ...(opts.toolchain !== null ? buildToolchainProbeFragment(opts.toolchain) : []),
     'kv probe_done 1',
     '',
   ].join('\n');
@@ -233,6 +352,12 @@ export function parseProbeOutput(stdout: string): ProbeRecord {
     sleepValue: str(g('sleep_value')),
     sleepPrevented: flag(g('sleep_prevented')),
     diskFreeKb: int(g('disk_free_kb')),
+    tcHash: str(g('tc_hash')),
+    tcManifest: flag(g('tc_manifest')),
+    tcManifestHash: flag(g('tc_manifest_hash')),
+    tcClaudeSize: int(g('tc_claude_size')),
+    tcMcpSize: int(g('tc_mcp_size')),
+    tcCodexSize: int(g('tc_codex_size')),
     complete: flag(g('probe_done')) === true,
   };
 }

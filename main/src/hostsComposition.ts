@@ -12,6 +12,10 @@
  * local socket path defaults to the one orchSocketComposition binds (`<cyboflow dir>/sockets/orch.sock`, POSIX
  * only — a Windows named pipe cannot be forwarded); boot may inject a live getter instead.
  *
+ * Full tier (spec A5/A6): the toolchain module (resolve → hash → push) is wired into the service, and every SshHost
+ * the registry builds gets `preflightExtras` from the service (expected toolchain + link handle), through a late-
+ * bound closure: the registry is constructed before the service it calls back into.
+ *
  * Host terminal lifecycle guards (the renderer modal owns a terminal, but cannot always close it):
  *  - a config change that leaves the feature not running (or remote hosts kill-switched) destroys every terminal;
  *  - the first terminal opened against a main-window webContents attaches (once per webContents id) a main-frame
@@ -28,6 +32,8 @@ import { HostStore } from './orchestrator/hosts/hostStore';
 import { captureSeamError } from './services/telemetry';
 import { HostRegistry } from './services/hosts/hostRegistry';
 import { HostsService, type HostTerminalsLike } from './services/hosts/hostsService';
+import { SshHost } from './services/hosts/sshHost';
+import { buildToolchainManifest, pushToolchain, resolveToolchainSources } from './services/hosts/toolchain';
 import { HostTerminalManager, type OwnedHostShell } from './services/hosts/hostTerminalManager';
 import { LocalHost } from './services/hosts/localHost';
 import { PreflightScheduler } from './services/hosts/preflightScheduler';
@@ -67,7 +73,15 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
   const store = new HostStore(db, { logger });
   const transport = new SshTransport({ logger });
   const local = new LocalHost({ appVersion, captureError: captureSeamError, logger });
-  const registry = new HostRegistry({ store, transport, local, appVersion, captureError: captureSeamError, logger });
+  // Late-bound: SshHosts are only built (and preflighted) after the service below exists.
+  let serviceRef: HostsService | null = null;
+  const registry = new HostRegistry({
+    store, transport, local, appVersion, captureError: captureSeamError, logger,
+    createSshHost: (d) => new SshHost({
+      ...d,
+      preflightExtras: (mode) => (serviceRef ? serviceRef.preflightExtras(d.id, mode) : Promise.resolve({})),
+    }),
+  });
   const terminals = new HostTerminalManager(
     (terminalId, chunk) => {
       getMainWindow()?.webContents.send(`cyboflow:shell:${terminalId}`, chunk);
@@ -128,7 +142,14 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
     captureError: captureSeamError,
     links: { transport, getOrchSocketPath: deps.getOrchSocketPath ?? (() => defaultOrchSocketPath()) },
+    toolchain: {
+      resolveSources: (arch) => resolveToolchainSources(arch),
+      buildManifest: (resolved, opts) => buildToolchainManifest(resolved, opts),
+      push: (input) => pushToolchain(input),
+      transport,
+    },
   });
+  serviceRef = service;
   const scheduler = new PreflightScheduler({
     listHosts: () => store.list({ includeArchived: false }),
     runPreflight: (hostId) => service.runPreflight(hostId),

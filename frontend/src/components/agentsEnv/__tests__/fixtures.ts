@@ -250,6 +250,7 @@ export function makeHost(over: Partial<HostView> = {}): HostView {
     preflightRunning: false,
     remoteReady: false,
     linkState: 'idle',
+    installRunning: false,
     runningSessions: 0,
     runningRuns: 0,
     archivedAt: null,

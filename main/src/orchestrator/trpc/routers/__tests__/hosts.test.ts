@@ -12,9 +12,11 @@ import {
   emitHostsChanged,
   emitHostTerminalExit,
   emitPreflightProgress,
+  emitToolchainProgress,
   hostEvents,
   hostPreflightChannel,
   hostTerminalChannel,
+  hostToolchainChannel,
   HOSTS_CHANNEL,
   setHostsFacade,
   type HostsFacade,
@@ -27,6 +29,7 @@ import {
   type HostView,
   type PreflightProgressEvent,
   type PreflightResult,
+  type ToolchainProgressEvent,
 } from '../../../../../../shared/types/hosts';
 
 const COLD_ROUTER_IMPORT_TIMEOUT_MS = 30_000;
@@ -59,6 +62,7 @@ class FakeFacade implements HostsFacade {
   async runPreflight(id: string): Promise<PreflightResult> { return this.rec('runPreflight', [id], { hostId: id } as PreflightResult); }
   async archive(id: string): Promise<void> { this.rec('archive', [id], undefined); }
   async setProjectDefault(projectId: number, hostId: string | null): Promise<void> { this.rec('setProjectDefault', [projectId, hostId], undefined); }
+  async installToolchain(id: string): Promise<void> { this.rec('installToolchain', [id], undefined); }
   async terminalOpen(hostId: string): Promise<{ terminalId: string }> { return this.rec('terminalOpen', [hostId], { terminalId: 't1' }); }
   terminalInput(terminalId: string, text: string): void { this.rec('terminalInput', [terminalId, text], undefined); }
   terminalResize(terminalId: string, cols: number, rows: number): void { this.rec('terminalResize', [terminalId, cols, rows], undefined); }
@@ -165,6 +169,36 @@ describe('happy paths', () => {
   });
 });
 
+describe('installToolchain', () => {
+  it('delegates and answers ok', async () => {
+    expect(await caller().installToolchain({ id: 'h1' })).toEqual({ ok: true });
+    expect(fake.calls).toEqual([{ method: 'installToolchain', args: ['h1'] }]);
+  });
+
+  it('maps the toolchain / needs-check errors by name, with their message', async () => {
+    for (const [name, error] of [
+      [HOSTS_ERROR_NAMES.needsPreflight, 'needs_preflight'],
+      [HOSTS_ERROR_NAMES.toolchainUnavailable, 'toolchain_unavailable'],
+      [HOSTS_ERROR_NAMES.toolchainPushFailed, 'toolchain_push_failed'],
+      [HOSTS_ERROR_NAMES.killed, 'remote_hosts_disabled'],
+    ] as const) {
+      fake.failWith = named(name, 'Run a check first.');
+      expect(await caller().installToolchain({ id: 'h1' })).toEqual({ ok: false, error, message: 'Run a check first.' });
+    }
+  });
+
+  it('answers feature_disabled when not running, without calling the facade', async () => {
+    fake.statusValue = { ...RUNNING, enabled: false, running: false };
+    expect(await caller().installToolchain({ id: 'h1' })).toMatchObject({ ok: false, error: 'feature_disabled' });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('rejects bad input', async () => {
+    expect(await codeOf(caller().installToolchain({ id: '' }))).toBe('BAD_REQUEST');
+    expect(await codeOf(caller().installToolchain({ id: 'h1', extra: 1 } as never))).toBe('BAD_REQUEST');
+  });
+});
+
 describe('input validation', () => {
   it('rejects unknown keys (.strict)', async () => {
     expect(await codeOf(caller().add({ label: 'a', sshTarget: 'h', extra: 1 } as never))).toBe('BAD_REQUEST');
@@ -212,6 +246,9 @@ describe('error conversion by name', () => {
     terminalUnavailable: 'terminal_unavailable',
     invalidLabel: 'invalid_label',
     disabled: 'feature_disabled',
+    toolchainUnavailable: 'toolchain_unavailable',
+    toolchainPushFailed: 'toolchain_push_failed',
+    needsPreflight: 'needs_preflight',
   };
 
   for (const key of Object.keys(HOSTS_ERROR_NAMES) as Array<keyof typeof HOSTS_ERROR_NAMES>) {
@@ -278,6 +315,26 @@ describe('subscriptions', () => {
     await done;
     expect(received).toEqual([{ hostId: 'h1', check: null, done: true }]);
     expect(hostEvents.listenerCount(hostPreflightChannel('h1'))).toBe(0);
+  });
+
+  it('onToolchainProgress yields only its host until done and detaches on abort', async () => {
+    const ac = new AbortController();
+    const sub = await caller(ac.signal).onToolchainProgress({ id: 'h1' });
+    const received: ToolchainProgressEvent[] = [];
+    const done = (async () => {
+      for await (const ev of sub as AsyncIterable<ToolchainProgressEvent>) {
+        received.push(ev);
+        if (ev.phase === 'done' || ev.phase === 'failed') ac.abort();
+      }
+    })();
+    setImmediate(() => {
+      emitToolchainProgress({ hostId: 'h2', phase: 'uploading', bytesSent: 1, bytesTotal: 2, message: null });
+      emitToolchainProgress({ hostId: 'h1', phase: 'uploading', bytesSent: 5, bytesTotal: 10, message: null });
+      emitToolchainProgress({ hostId: 'h1', phase: 'done', bytesSent: 10, bytesTotal: 10, message: null });
+    });
+    await done;
+    expect(received.map((e) => [e.hostId, e.phase])).toEqual([['h1', 'uploading'], ['h1', 'done']]);
+    expect(hostEvents.listenerCount(hostToolchainChannel('h1'))).toBe(0);
   });
 
   it('onTerminalExit yields the pushed exit once, ends, and detaches', async () => {

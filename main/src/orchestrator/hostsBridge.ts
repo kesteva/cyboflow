@@ -15,6 +15,7 @@ import type {
   HostView,
   PreflightProgressEvent,
   PreflightResult,
+  ToolchainProgressEvent,
 } from '../../../shared/types/hosts';
 
 /** Implemented by HostsService. Methods THROW named errors; the router converts them. */
@@ -31,6 +32,12 @@ export interface HostsFacade {
   runPreflight(id: string): Promise<PreflightResult>;
   archive(id: string): Promise<void>;
   setProjectDefault(projectId: number, hostId: string | null): Promise<void>;
+  /**
+   * "Install cyboflow tools": push the toolchain for the machine's arch, then kick a full preflight. One install
+   * per host — a call while one runs returns the running promise. Progress goes out on hostToolchainChannel.
+   * @throws HostNeedsPreflightError without a complete check; ToolchainUnavailableError / ToolchainPushError.
+   */
+  installToolchain(id: string): Promise<void>;
   /** A new terminal on every call. */
   terminalOpen(hostId: string): Promise<{ terminalId: string }>;
   terminalInput(terminalId: string, text: string): void;
@@ -80,6 +87,10 @@ export function hostPreflightChannel(id: string): string {
   return `host-preflight-${id}`;
 }
 
+export function hostToolchainChannel(id: string): string {
+  return `host-toolchain-${id}`;
+}
+
 export function hostTerminalChannel(terminalId: string): string {
   return `host-terminal-${terminalId}`;
 }
@@ -94,4 +105,8 @@ export function emitHostsChanged(ev: HostsChangedEvent): void {
 
 export function emitPreflightProgress(ev: PreflightProgressEvent): void {
   hostEvents.emit(hostPreflightChannel(ev.hostId), ev);
+}
+
+export function emitToolchainProgress(ev: ToolchainProgressEvent): void {
+  hostEvents.emit(hostToolchainChannel(ev.hostId), ev);
 }

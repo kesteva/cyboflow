@@ -125,6 +125,8 @@ export interface HostView {
    * reconnecting after an unexpected drop, 'idle' otherwise (none needed yet / closed). Always 'idle' for This Mac.
    */
   linkState: HostLinkViewState;
+  /** SSH only: an "Install cyboflow tools" push is running for this machine (in memory). */
+  installRunning: boolean;
   runningSessions: number;
   runningRuns: number;
   archivedAt: string | null;
@@ -163,12 +165,19 @@ export const HOSTS_ERROR_NAMES = {
   terminalUnavailable: 'HostTerminalUnavailableError',
   invalidLabel: 'InvalidHostLabelError',
   disabled: 'HostsDisabledError',
+  /** This build of cyboflow has no tools for the machine's architecture (or its MCP bundle is not built). */
+  toolchainUnavailable: 'ToolchainUnavailableError',
+  /** Installing cyboflow tools on the machine failed (upload / verify / install). */
+  toolchainPushFailed: 'ToolchainPushError',
+  /** The action needs a complete check of the machine first (its remote folder and architecture). */
+  needsPreflight: 'HostNeedsPreflightError',
 } as const;
 
 export type HostsFailureCode =
   | 'not_found' | 'label_taken' | 'invalid_target'
   | 'invalid_label' | 'cap_above_detected' | 'local_immutable'
-  | 'has_active_work' | 'terminal_unavailable' | 'feature_disabled' | 'remote_hosts_disabled' | 'unknown';
+  | 'has_active_work' | 'terminal_unavailable' | 'feature_disabled' | 'remote_hosts_disabled'
+  | 'toolchain_unavailable' | 'toolchain_push_failed' | 'needs_preflight' | 'unknown';
 
 export type HostsResult<T> = ({ ok: true } & T) | { ok: false; error: HostsFailureCode; message: string };
 
@@ -181,6 +190,22 @@ export interface PreflightProgressEvent {
   hostId: string;
   check: PreflightCheckResult | null;
   done: boolean;
+}
+
+export const TOOLCHAIN_PROGRESS_PHASES = ['hashing', 'uploading', 'verifying', 'done', 'failed'] as const;
+export type ToolchainProgressPhase = (typeof TOOLCHAIN_PROGRESS_PHASES)[number];
+
+/**
+ * "Install cyboflow tools" progress for one machine. Bytes are SOURCE bytes (hashing: bytes hashed; uploading /
+ * verifying: uncompressed bytes sent), so `bytesTotal` is known up front (0 while hashing has not sized the
+ * bundle yet). `done` / `failed` end an install; `message` is set (redacted, user-presentable) only on `failed`.
+ */
+export interface ToolchainProgressEvent {
+  hostId: string;
+  phase: ToolchainProgressPhase;
+  bytesSent: number;
+  bytesTotal: number;
+  message: string | null;
 }
 
 /** A host terminal's ssh process exited (pushed so an open terminal view can show "Disconnected (exit N)"). */

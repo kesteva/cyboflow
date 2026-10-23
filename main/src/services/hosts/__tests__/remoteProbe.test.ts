@@ -4,11 +4,20 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, realpathSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  InvalidToolchainProbeSpecError,
+  buildPrelaunchProbeScript,
   buildProbeScript,
+  buildToolchainProbeFragment,
+  buildToolchainProbeScript,
   expandRemoteRoot,
   parseProbeOutput,
   remoteRootShellExpr,
 } from '../remoteProbe';
+import { serializeToolchainManifest } from '../toolchain/toolchainHash';
+import type { ToolchainManifest } from '../toolchain/types';
+
+const TC_HASH = 'c'.repeat(64);
+const TC_CODEX_REL = 'codex/aarch64-apple-darwin/bin/codex';
 
 const posix = process.platform !== 'win32';
 
@@ -199,4 +208,102 @@ describe.skipIf(!posix)('buildProbeScript run by a local /bin/sh (no ssh)', () =
     if (process.platform !== 'darwin') expect(p.tmpdir).toBe('/probe/tmp/');
     else expect(p.tmpdir).toMatch(/^\//);
   }, 60_000);
+});
+
+describe('toolchain probe section', () => {
+  it('parses the toolchain keys', () => {
+    const p = parseProbeOutput(`tc_hash=${TC_HASH}\ntc_manifest=1\ntc_manifest_hash=1\ntc_claude_size=10\ntc_mcp_size=20\ntc_codex_size=30\nprobe_done=1\n`);
+    expect(p).toMatchObject({ tcHash: TC_HASH, tcManifest: true, tcManifestHash: true, tcClaudeSize: 10, tcMcpSize: 20, tcCodexSize: 30 });
+    expect(parseProbeOutput('probe_done=1\n')).toMatchObject({ tcHash: null, tcManifest: null, tcClaudeSize: null });
+  });
+
+  it('is absent without a spec, present (hash single-quoted) with one; never checksums', () => {
+    expect(buildProbeScript('~/cf-remote/abc')).not.toContain('tc_hash');
+    const script = buildProbeScript('~/cf-remote/abc', { toolchain: { hash: TC_HASH, codexBinRel: TC_CODEX_REL } });
+    expect(script).toContain(`tc_h='${TC_HASH}'`);
+    expect(script).toContain(`'${TC_CODEX_REL}'`);
+    expect(script).not.toMatch(/shasum|sha256sum/);
+    expect(script.indexOf('tc_hash')).toBeLessThan(script.indexOf('probe_done'));
+  });
+
+  it('refuses a hash or codex path that is not of the expected shape (nothing reaches the script)', () => {
+    for (const spec of [
+      { hash: `${TC_HASH.slice(1)}'`, codexBinRel: null },
+      { hash: TC_HASH.toUpperCase(), codexBinRel: null },
+      { hash: TC_HASH, codexBinRel: "codex/x'; rm -rf ~; '/bin/codex" },
+      { hash: TC_HASH, codexBinRel: 'codex/../bin/codex' },
+      { hash: TC_HASH, codexBinRel: '/etc/passwd' },
+    ]) {
+      expect(() => buildToolchainProbeFragment(spec)).toThrow(InvalidToolchainProbeSpecError);
+    }
+  });
+});
+
+describe.skipIf(!posix)('toolchain + prelaunch probes run by a local /bin/sh (no ssh)', () => {
+  let home: string | null = null;
+  afterEach(() => {
+    if (home) rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  function install(root: string, opts: { hash?: string; claude?: string } = {}): void {
+    const dir = join(root, 'toolchain', TC_HASH);
+    mkdirSync(join(dir, 'codex', 'aarch64-apple-darwin', 'bin'), { recursive: true });
+    writeFileSync(join(dir, 'claude'), opts.claude ?? 'x'.repeat(1234));
+    writeFileSync(join(dir, 'cyboflowMcpServer.js'), 'y'.repeat(56));
+    writeFileSync(join(dir, 'codex', 'aarch64-apple-darwin', 'bin', 'codex'), 'z'.repeat(7));
+    const manifest: ToolchainManifest = {
+      layout: 1, hash: opts.hash ?? TC_HASH, arch: 'arm64', claudeVersion: null, codexVersion: null, codexTarget: null, files: [],
+    };
+    writeFileSync(join(dir, 'manifest.json'), serializeToolchainManifest(manifest));
+  }
+
+  const run = (script: string): string => execFileSync('/bin/sh', ['-s'], {
+    input: script, encoding: 'utf8', env: { HOME: home ?? '', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, timeout: 60_000,
+  });
+
+  it('reports manifest presence, the hash match and the three sizes', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-probe-')));
+    install(join(home, 'cf-remote', 'abc'));
+    const p = parseProbeOutput(run(buildToolchainProbeScript('~/cf-remote/abc', { hash: TC_HASH, codexBinRel: TC_CODEX_REL })));
+    expect(p).toMatchObject({
+      complete: true, tcHash: TC_HASH, tcManifest: true, tcManifestHash: true, tcClaudeSize: 1234, tcMcpSize: 56, tcCodexSize: 7,
+    });
+  });
+
+  it('a manifest naming another hash reads as not matching; no install reads as absent', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-probe-')));
+    install(join(home, 'cf-remote', 'abc'), { hash: 'd'.repeat(64) });
+    const spec = { hash: TC_HASH, codexBinRel: null };
+    expect(parseProbeOutput(run(buildToolchainProbeScript('~/cf-remote/abc', spec)))).toMatchObject({ tcManifest: true, tcManifestHash: false });
+    expect(parseProbeOutput(run(buildToolchainProbeScript('~/cf-remote/other', spec))))
+      .toMatchObject({ complete: true, tcManifest: false, tcManifestHash: null, tcClaudeSize: null });
+  });
+
+  it('the full probe carries the same section', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-probe-')));
+    install(join(home, 'cf-remote', 'abc'));
+    const p = parseProbeOutput(run(buildProbeScript('~/cf-remote/abc', { toolchain: { hash: TC_HASH, codexBinRel: null } })));
+    expect(p).toMatchObject({ complete: true, tcManifest: true, tcManifestHash: true, tcClaudeSize: 1234, tcCodexSize: null });
+  }, 60_000);
+
+  it('prelaunch probe: home, env shape, node and toolchain only — never the token', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-probe-')));
+    const root = join(home, 'cf-remote', 'abc');
+    install(root);
+    const token = `sk-ant-oat01-${'Q'.repeat(40)}`;
+    writeFileSync(join(root, 'env'), `CLAUDE_CODE_OAUTH_TOKEN=${token}\n`);
+    chmodSync(join(root, 'env'), 0o600);
+    const out = run(buildPrelaunchProbeScript('~/cf-remote/abc', {
+      toolchain: { hash: TC_HASH, codexBinRel: TC_CODEX_REL }, nodePath: process.execPath,
+    }));
+    expect(out).not.toContain('QQQQ');
+    const p = parseProbeOutput(out);
+    expect(p).toMatchObject({
+      complete: true, home, envExists: true, envMode: '600', envLines: 1, envWellformed: 1,
+      nodePath: process.execPath, tcManifest: true, tcManifestHash: true, tcClaudeSize: 1234,
+    });
+    expect(p.nodeVersion).toMatch(/^v\d+/);
+    expect(p.gitVersion).toBeNull(); // not part of the trimmed probe
+  });
 });
