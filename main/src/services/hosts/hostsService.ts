@@ -310,10 +310,26 @@ export class HostsService implements HostsFacade {
   private readonly installs = new Map<string, InstallInFlight>();
   /** In-flight manifest builds per arch (a preflight and an install share one). */
   private readonly toolchainBuilds = new Map<ToolchainArch, Promise<BuiltToolchain>>();
+  /** Per-host in-memory generation (see generation()). Absent = 0. */
+  private readonly generations = new Map<string, number>();
 
   constructor(private readonly deps: HostsServiceDeps) {
     const linkDeps = deps.links;
     this.linkPool = linkDeps ? new HostLinkPool((hostId) => this.createLink(hostId, linkDeps)) : null;
+  }
+
+  /**
+   * A per-host counter bumped whenever what was learned about the machine stops applying: an sshTarget change and
+   * an archive. App-lifetime caches of remote writes (run tokens, role files, artifact dirs, the installed
+   * manifest) include it in their keys, so a cache entry made for the old machine is never trusted for the new one.
+   * In memory only: every cache it guards is in memory too.
+   */
+  generation(hostId: string): number {
+    return this.generations.get(hostId) ?? 0;
+  }
+
+  private bumpGeneration(hostId: string): void {
+    this.generations.set(hostId, this.generation(hostId) + 1);
   }
 
   // ---------------------------------------------------------------- gates
@@ -413,6 +429,7 @@ export class HostsService implements HostsFacade {
     // A label-only edit needs no teardown: the registry's cache key includes the label, so the next get() builds
     // a fresh SshHost, and the shared master (keyed by target) keeps serving any probe that is running now.
     if (!before || patch.sshTarget === undefined || patch.sshTarget === before.sshTarget) return;
+    this.bumpGeneration(id);
     // A new destination invalidates everything learned about the old one. Cancel a preflight still talking to
     // the OLD machine and drop it from the coalescing map FIRST, so the re-check below starts a fresh run
     // instead of coalescing onto (and recording) the old one.
@@ -439,6 +456,7 @@ export class HostsService implements HostsFacade {
     this.guard();
     this.guardRemoteFor(id);
     await this.deps.store.archive(id);
+    this.bumpGeneration(id);
     this.inflight.get(id)?.controller.abort();
     this.installs.get(id)?.controller.abort();
     this.lastAttempts.delete(id);

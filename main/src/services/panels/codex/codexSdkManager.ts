@@ -461,7 +461,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private modelCatalog: CodexModelCatalog | null = null;
   private modelCatalogFetchedAt = 0;
   private modelCatalogRequest: Promise<CodexModelCatalog> | null = null;
-  /** Role files already written on SSH environments this app session (`<hostId>\0<path>`). */
+  /** Role files already written on SSH environments this app session (`<hostId>\0<generation>\0<path>`). */
   private readonly remoteRoleFiles = new Set<string>();
 
   constructor(
@@ -960,6 +960,7 @@ export class CodexSdkManager extends AbstractCliManager {
       if (agents.length === 0) return none;
       const roles = await materializeCodexAgentRolesOnHost(agents, {
         hostId: session.hostId,
+        generation: session.generation,
         rolesDir: remoteCodexAgentRolesDir(session.remoteRoot),
         fs: session.fs,
         written: this.remoteRoleFiles,

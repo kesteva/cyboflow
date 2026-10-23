@@ -350,6 +350,23 @@ describe('update / archive / terminals / shutdown', () => {
     expect(hostFor(id).host.preflight).toHaveBeenCalledTimes(2);
   });
 
+  it('generation(): bumped by a target change and by archive, never by a label edit', async () => {
+    const id = await addSettled();
+    expect(service.generation(id)).toBe(0);
+    await service.update(id, { label: 'Renamed' });
+    expect(service.generation(id)).toBe(0);
+    await service.update(id, { sshTarget: 'box2' });
+    expect(service.generation(id)).toBe(1);
+    await flush();
+    hostFor(id).runs.at(-1)?.d.resolve(result(id));
+    await flush();
+    await service.update(id, { sshTarget: 'box2' }); // unchanged target: no bump
+    expect(service.generation(id)).toBe(1);
+    await service.archive(id);
+    expect(service.generation(id)).toBe(2);
+    expect(service.generation('never-seen')).toBe(0);
+  });
+
   it('a label-only edit neither invalidates the connection nor cancels a running preflight', async () => {
     const id = await addSettled();
     const p = service.runPreflight(id);

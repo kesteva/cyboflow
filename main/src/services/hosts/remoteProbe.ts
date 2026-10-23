@@ -134,6 +134,26 @@ const ENV_FILE_LINES: readonly string[] = [
 ];
 
 /**
+ * nvm installs are common on dev machines: the NUMERICALLY highest `v<major>.<minor>.<patch>` dir (a `-suffix` on
+ * the patch is ignored; a non-numeric name is skipped) with an executable bin/node is the fallback candidate, left
+ * in `$nvm_node` (empty when none). Lexical order would rank v9 above v22.
+ */
+export const NVM_NODE_PICK_LINES: readonly string[] = [
+  'nvm_node=; nb1=-1; nb2=-1; nb3=-1',
+  'nvm_isnum() { case "$1" in ""|*[!0-9]*) return 1 ;; esac; return 0; }',
+  'for c in "$HOME"/.nvm/versions/node/v*/bin/node; do',
+  '  [ -x "$c" ] || continue',
+  '  nv=${c%/bin/node}; nv=${nv##*/v}',
+  '  case "$nv" in *.*.*) ;; *) continue ;; esac',
+  '  n1=${nv%%.*}; nr=${nv#*.}; n2=${nr%%.*}; n3=${nr#*.}; n3=${n3%%[-+]*}',
+  '  nvm_isnum "$n1" && nvm_isnum "$n2" && nvm_isnum "$n3" || continue',
+  '  if [ "$n1" -gt "$nb1" ] || { [ "$n1" -eq "$nb1" ] && { [ "$n2" -gt "$nb2" ] || { [ "$n2" -eq "$nb2" ] && [ "$n3" -gt "$nb3" ]; }; }; }; then',
+  '    nvm_node=$c; nb1=$n1; nb2=$n2; nb3=$n3',
+  '  fi',
+  'done',
+];
+
+/**
  * Build the probe script for one host. Pure. `opts.toolchain` adds the installed-toolchain section for that
  * expected hash (see buildToolchainProbeFragment).
  */
@@ -192,9 +212,7 @@ export function buildProbeScript(remoteRoot: string, opts: { toolchain?: Toolcha
     '  done',
     '  return 1',
     '}',
-    // nvm installs are common on dev machines: the lexically last version dir is the fallback candidate.
-    'nvm_node=',
-    'for c in "$HOME"/.nvm/versions/node/v*/bin/node; do if [ -x "$c" ]; then nvm_node=$c; fi; done',
+    ...NVM_NODE_PICK_LINES,
     `if probe_bin node ${candidates('node')} "$(command -v node 2>/dev/null)" "$nvm_node"; then`,
     '  PATH="${probe_found%/*}:$PATH"; export PATH',
     'fi',

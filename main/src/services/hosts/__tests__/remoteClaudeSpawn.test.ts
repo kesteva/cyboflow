@@ -304,6 +304,17 @@ describe('prepareRemoteClaudeSpawn', () => {
     expect(session.mkdirs).toEqual([`${FAKE_REMOTE_ROOT}/artifacts/runs/run-1`]);
   });
 
+  it('a new host generation (target change / archive) creates the artifacts dir again', async () => {
+    const before = createFakeRemoteSession({ runId: 'run-1', generation: 0 });
+    const after = createFakeRemoteSession({ runId: 'run-1', generation: 1 });
+    const prepare = vi.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after);
+    setRemoteRuntime(fakeRuntime({ prepare }));
+    await prepareRemoteClaudeSpawn('host-1', { runId: 'run-1', spawnKey: 'k' });
+    await prepareRemoteClaudeSpawn('host-1', { runId: 'run-1', spawnKey: 'k' });
+    expect(before.mkdirs).toEqual([`${FAKE_REMOTE_ROOT}/artifacts/runs/run-1`]);
+    expect(after.mkdirs).toEqual([`${FAKE_REMOTE_ROOT}/artifacts/runs/run-1`]);
+  });
+
   it('a failed remote mkdir is not fatal (and is retried next time)', async () => {
     const failing = createFakeRemoteSession({ runId: 'run-1', mkdirpError: new Error('Permission denied') });
     setRemoteRuntime(fakeRuntime({ prepare: vi.fn(async () => failing) }));

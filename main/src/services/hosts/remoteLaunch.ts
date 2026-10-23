@@ -57,7 +57,8 @@ export const SPAWN_WRAPPER =
 /**
  * Signals the process group recorded in a wrapper pidfile ($1), signal name in $2 (TERM | KILL). A missing or
  * unreadable pidfile is success (nothing to kill); a pgid ≤ 1 is never signalled; without a pgid it falls back to
- * the pid. The pidfile is left in place (run teardown removes it).
+ * the pid. The pidfile is left in place (PIDFILE_REAP_PROGRAM removes it once the process is gone). Every spawn has
+ * its OWN pidfile (`<spawnKey>.<nonce>.pid`), so a dying process's escalation can never signal its replacement.
  */
 export const KILL_PROGRAM =
   'f=$1; case "$f" in "~/"*) f="$HOME/${f#??}" ;; esac; [ -f "$f" ] || exit 0; ' +
@@ -66,8 +67,20 @@ export const KILL_PROGRAM =
   'if [ -n "$g" ] && [ "$g" -gt 1 ]; then kill -s "$2" -- "-$g" 2>/dev/null && exit 0; fi; ' +
   'if [ -n "$p" ] && [ "$p" -gt 1 ]; then kill -s "$2" "$p" 2>/dev/null; fi; exit 0';
 
+/**
+ * $1 = a spawn's pidfile. Removes it unless the pid it records is still alive (a process that outlived a dropped
+ * connection keeps its pidfile, which is how F1 finds and fences it). Always exits 0 on a missing file.
+ */
+export const PIDFILE_REAP_PROGRAM =
+  'f=$1; case "$f" in "~/"*) f="$HOME/${f#??}" ;; esac; [ -f "$f" ] || exit 0; p=; read p g < "$f"; ' +
+  'if [ "$p" -gt 1 ] 2>/dev/null && kill -0 "$p" 2>/dev/null; then exit 0; fi; exec rm -f -- "$f"';
+
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SPAWN_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/** A per-spawn pidfile nonce: lowercase hex (SshHost mints 16 chars from node:crypto). */
+const SPAWN_NONCE_RE = /^[0-9a-f]{8,64}$/;
+/** The nonce width SshHost mints; remotePidFileGlob matches exactly this many hex digits. */
+export const SPAWN_NONCE_HEX_CHARS = 16;
 
 /** Keys that never travel in a prelude: the orch token goes by file, the agent token by the env file. */
 const PRELUDE_DENIED_KEYS: ReadonlySet<string> = new Set([
@@ -80,6 +93,13 @@ export class InvalidRemoteEnvError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidRemoteEnvError';
+  }
+}
+
+export class InvalidSpawnNonceError extends Error {
+  constructor() {
+    super('A remote spawn nonce must be 8-64 lowercase hex characters.');
+    this.name = 'InvalidSpawnNonceError';
   }
 }
 
@@ -179,11 +199,35 @@ export interface RemoteSpawnCommandInput {
   /** Export the agent token from `<remoteRoot>/env`. */
   withTokenEnvFile?: boolean;
   spawnKey: string;
+  /** This spawn's pidfile nonce (see remotePidFile). */
+  spawnNonce: string;
   argv: readonly string[];
 }
 
-export function remotePidFile(remoteRoot: string, spawnKey: string): string {
-  return `${remoteRoot}/run/${assertSpawnKey(spawnKey)}.pid`;
+/**
+ * `<remoteRoot>/run/<spawnKey>.<nonce>.pid` — ONE pidfile per spawn. Two spawns of the same spawnKey (a
+ * replacement started while the old process is still dying) never share a pidfile, so each kill program only
+ * ever reads the pgid of the process it belongs to.
+ */
+export function remotePidFile(remoteRoot: string, spawnKey: string, nonce: string): string {
+  if (!SPAWN_NONCE_RE.test(nonce)) throw new InvalidSpawnNonceError();
+  return `${remoteRoot}/run/${assertSpawnKey(spawnKey)}.${nonce}.pid`;
+}
+
+/**
+ * A shell glob matching every pidfile of ONE spawnKey (any nonce SshHost mints), for fencing orphans before the
+ * spawnKey is re-dispatched (F1). The nonce part is exactly SPAWN_NONCE_HEX_CHARS `[0-9a-f]` classes, so key `a`
+ * never matches key `a.b`'s pidfiles. Spawn keys carry no glob metacharacters (assertSpawnKey).
+ */
+export function remotePidFileGlob(remoteRoot: string, spawnKey: string): string {
+  return `${remoteRoot}/run/${assertSpawnKey(spawnKey)}.${'[0-9a-f]'.repeat(SPAWN_NONCE_HEX_CHARS)}.pid`;
+}
+
+/** True when a pidfile BASENAME belongs to `spawnKey` (the JS twin of remotePidFileGlob, any valid nonce width). */
+export function isPidFileOfSpawnKey(fileName: string, spawnKey: string): boolean {
+  const prefix = `${assertSpawnKey(spawnKey)}.`;
+  if (!fileName.startsWith(prefix) || !fileName.endsWith('.pid')) return false;
+  return SPAWN_NONCE_RE.test(fileName.slice(prefix.length, -'.pid'.length));
 }
 
 export function remoteTokenEnvFile(remoteRoot: string): string {
@@ -198,7 +242,7 @@ export function buildRemoteSpawnCommand(input: RemoteSpawnCommandInput): string 
     ...wrapperArgv({
       cwd: input.cwd ?? '',
       envFile: input.withTokenEnvFile ? remoteTokenEnvFile(root) : '',
-      pidFile: remotePidFile(root, input.spawnKey),
+      pidFile: remotePidFile(root, input.spawnKey, input.spawnNonce),
       argv: input.argv,
     }),
   ]);
@@ -207,6 +251,11 @@ export function buildRemoteSpawnCommand(input: RemoteSpawnCommandInput): string 
 /** Remote argv running KILL_PROGRAM against a pidfile. */
 export function killArgv(pidFile: string, signal: 'TERM' | 'KILL'): string[] {
   return ['/bin/sh', '-c', KILL_PROGRAM, 'sh', pidFile, signal];
+}
+
+/** Remote argv running PIDFILE_REAP_PROGRAM against a spawn's pidfile. */
+export function reapPidFileArgv(pidFile: string): string[] {
+  return ['/bin/sh', '-c', PIDFILE_REAP_PROGRAM, 'sh', pidFile];
 }
 
 /** Human-readable reason for a wrapper exit code, or null for the program's own codes. */

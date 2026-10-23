@@ -152,8 +152,9 @@ export class HostLink {
     if (this.linkState === 'reconnecting') {
       this.cancelReconnect?.();
       this.cancelReconnect = null;
-      this.linkState = 'idle';
-      this.attempt = 0;
+      // A reconnect attempt may be in flight (handle set, ready pending): close it, or it would come up with no
+      // reference and never be idle-closed.
+      this.closeHandle();
       return;
     }
     if (this.linkState === 'up') this.startIdle();
@@ -192,6 +193,12 @@ export class HostLink {
   }
 
   private startForward(sock: string): ForwardHandle {
+    // Defensive: never orphan a previous forward (its exit is ignored once it is no longer `this.handle`).
+    const previous = this.handle;
+    if (previous !== null) {
+      this.handle = null;
+      previous.close();
+    }
     const handle = this.deps.transport.openForward(this.deps.sshTarget, { remoteSock: sock, localSock: this.deps.localSock() });
     this.handle = handle;
     handle.on('exit', (code, stderrTail) => this.onExit(handle, code, stderrTail));

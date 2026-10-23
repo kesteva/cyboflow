@@ -342,9 +342,15 @@ export interface CodexAgentRoleHostTarget {
   /** The machine's fs (ExecutionHost.fs): writeFile is atomic there (temp file + rename). */
   fs: Pick<MachineFs, 'mkdirp' | 'writeFile'>;
   /**
-   * `<hostId>\0<file>` keys already written this app session — skipped, and
-   * added to on a successful write. The files are content-addressed, so a key
-   * that was written once still holds exactly that content.
+   * The host's generation (RemoteRuntimeSession.generation; default 0) — part of
+   * every `written` key, so an address change or an archive invalidates them.
+   */
+  generation?: number;
+  /**
+   * `<hostId>\0<generation>\0<file>` keys already written this app session —
+   * skipped, and added to on a successful write. The files are content-addressed,
+   * so a key that was written once (to that machine) still holds exactly that
+   * content.
    */
   written?: Set<string>;
 }
@@ -383,7 +389,7 @@ export async function materializeCodexAgentRolesOnHost(
   }
   if (planned.length === 0) return roles;
 
-  const key = (file: string): string => `${target.hostId}\0${file}`;
+  const key = (file: string): string => `${target.hostId}\0${target.generation ?? 0}\0${file}`;
   if (planned.some((p) => !target.written?.has(key(`${dir}/${p.fileName}`)))) {
     try {
       await target.fs.mkdirp({ hostId: target.hostId, path: dir });

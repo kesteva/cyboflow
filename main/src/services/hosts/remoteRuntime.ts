@@ -206,6 +206,12 @@ export interface RemoteSessionSpawnOptions {
 /** What prepare() returns; one per spawn (or warm process). Call release() exactly when the process is gone. */
 export interface RemoteRuntimeSession {
   readonly hostId: string;
+  /**
+   * The host's generation when this session was prepared (HostsService.generation). Callers that cache remote
+   * writes for the app's lifetime (role files, artifact dirs) include it in their keys, so an address change or an
+   * archive invalidates them.
+   */
+  readonly generation: number;
   /** Probe facts (expanded remote root, home, env base). */
   readonly facts: RemoteHostFacts;
   /** Absolute, expanded. */
@@ -254,6 +260,8 @@ export interface RemoteRuntimeHostsLike {
   get(id: string): Pick<HostView, 'id' | 'kind' | 'archivedAt' | 'remoteReady' | 'preflight'>;
   /** @throws for gates / unknown host; acquire() rejects when the forward cannot open (and self-releases). */
   linkFor(hostId: string): HostLinkHandle;
+  /** HostsService.generation: bumped on a target change / archive. Every remote-write cache key includes it. */
+  generation(hostId: string): number;
 }
 
 export interface RemoteRuntimeDeps {
@@ -293,7 +301,10 @@ function readableMessage(err: unknown): string {
 }
 
 export class RemoteRuntime {
-  /** Token files written this app session: key → in-flight/settled write. A failed write is forgotten (retry). */
+  /**
+   * Token files written this app session: `<hostId>\0<generation>\0<file>` → in-flight/settled write. A failed write
+   * is forgotten (retry); a target change / archive bumps the generation, so the new machine is written afresh.
+   */
   private readonly tokenWrites = new Map<string, Promise<void>>();
   /** The installed manifest's codex target per host + hash (read once from the remote). */
   private readonly installed = new Map<string, Promise<InstalledToolchain>>();
@@ -326,6 +337,7 @@ export class RemoteRuntime {
     }
     const hostId = normalizeHostId(hostIdIn);
     if (hostId === null) throw new RemoteRuntimeError('not-remote', 'This Mac does not run remote processes.');
+    const generation = hosts.generation(hostId);
     const runId = assertRunId(opts.runId);
     const spawnKey = remoteSpawnKey(opts.spawnKey);
 
@@ -346,7 +358,7 @@ export class RemoteRuntime {
       throw new RemoteRuntimeError('no-node', 'Node.js 22 was not found on this environment.');
     }
     const host = this.deps.getHost(hostId);
-    const toolchain = await this.installedToolchain(hostId, host, facts.remoteRoot, hash);
+    const toolchain = await this.installedToolchain(hostId, generation, host, facts.remoteRoot, hash);
     const tc = remoteToolchainPaths(facts.remoteRoot, toolchain);
     const paths: RemoteRuntimePaths = {
       claude: tc.claude,
@@ -368,7 +380,7 @@ export class RemoteRuntime {
 
     const tokenFile = remoteRunTokenFile(facts.remoteRoot, runId);
     try {
-      await this.writeRunToken(hostId, host, facts.remoteRoot, runId, tokenFile);
+      await this.writeRunToken(hostId, generation, host, facts.remoteRoot, runId, tokenFile);
     } catch (err) {
       link.release();
       logger.warn('[hosts] could not write the run token on the environment', { hostId, runId, error: errorName(err) });
@@ -378,7 +390,7 @@ export class RemoteRuntime {
 
     logger.info('[hosts] remote runtime prepared', { hostId, runId });
     return this.createSession({
-      hostId, host, facts, paths, remoteSock, tokenFile, runId, spawnKey, link,
+      hostId, generation, host, facts, paths, remoteSock, tokenFile, runId, spawnKey, link,
       codexAvailable: tc.codexBin !== null && preflight.runtimes.codexSdk,
     });
   }
@@ -395,16 +407,22 @@ export class RemoteRuntime {
       const root = host.info.remoteRoot;
       if (root === null || !root.startsWith('/')) return;
       const file = remoteRunTokenFile(root, runId);
-      this.tokenWrites.delete(tokenKey(hostId, file));
+      this.tokenWrites.delete(tokenKey(hostId, this.deps.hosts.generation(hostId), file));
       await host.fs.unlink({ hostId, path: file });
     } catch (err) {
       this.deps.logger.warn('[hosts] could not remove a run token on the environment', { hostId, runId, error: errorName(err) });
     }
   }
 
-  /** The installed toolchain's codex target, from `<hash>/manifest.json` on the remote (once per host + hash). */
-  private installedToolchain(hostId: string, host: ExecutionHost, remoteRoot: string, hash: string): Promise<InstalledToolchain> {
-    const key = `${hostId}\0${remoteRoot}\0${hash}`;
+  /** The installed toolchain's codex target, from `<hash>/manifest.json` on the remote (once per host generation + hash). */
+  private installedToolchain(
+    hostId: string,
+    generation: number,
+    host: ExecutionHost,
+    remoteRoot: string,
+    hash: string,
+  ): Promise<InstalledToolchain> {
+    const key = `${hostId}\0${generation}\0${remoteRoot}\0${hash}`;
     const hit = this.installed.get(key);
     if (hit) return hit;
     const dir = remoteToolchainPaths(remoteRoot, { hash, codexTarget: null }).dir;
@@ -436,9 +454,16 @@ export class RemoteRuntime {
     return read;
   }
 
-  /** `<remoteRoot>/run` (0700) then the token (0600, over stdin) — once per host + token file this app session. */
-  private writeRunToken(hostId: string, host: ExecutionHost, remoteRoot: string, runId: string, tokenFile: string): Promise<void> {
-    const key = tokenKey(hostId, tokenFile);
+  /** `<remoteRoot>/run` (0700) then the token (0600, over stdin) — once per host generation + token file. */
+  private writeRunToken(
+    hostId: string,
+    generation: number,
+    host: ExecutionHost,
+    remoteRoot: string,
+    runId: string,
+    tokenFile: string,
+  ): Promise<void> {
+    const key = tokenKey(hostId, generation, tokenFile);
     const hit = this.tokenWrites.get(key);
     if (hit) return hit;
     const mint = this.deps.mintToken ?? mintOrchToken;
@@ -459,6 +484,7 @@ export class RemoteRuntime {
 
   private createSession(input: {
     hostId: string;
+    generation: number;
     host: ExecutionHost;
     facts: RemoteHostFacts;
     paths: RemoteRuntimePaths;
@@ -469,7 +495,7 @@ export class RemoteRuntime {
     link: HostLinkHandle;
     codexAvailable: boolean;
   }): RemoteRuntimeSession {
-    const { hostId, host, facts, paths, remoteSock, tokenFile, runId, spawnKey, link, codexAvailable } = input;
+    const { hostId, generation, host, facts, paths, remoteSock, tokenFile, runId, spawnKey, link, codexAvailable } = input;
     const logger = this.deps.logger;
     let released = false;
     const nodeDir = remoteDirOf(paths.nodePath);
@@ -490,6 +516,7 @@ export class RemoteRuntime {
     };
     return {
       hostId,
+      generation,
       facts,
       remoteRoot: facts.remoteRoot,
       paths,
@@ -526,6 +553,6 @@ export class RemoteRuntime {
   }
 }
 
-function tokenKey(hostId: string, tokenFile: string): string {
-  return `${hostId}\0${tokenFile}`;
+function tokenKey(hostId: string, generation: number, tokenFile: string): string {
+  return `${hostId}\0${generation}\0${tokenFile}`;
 }

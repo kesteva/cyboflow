@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   InvalidRemoteEnvError,
   InvalidSpawnKeyError,
+  InvalidSpawnNonceError,
   KILL_PROGRAM,
+  PIDFILE_REAP_PROGRAM,
   SPAWN_WRAPPER,
   TOKEN_ENV_FILE_PATTERN,
   WRAPPER_EXIT,
@@ -16,8 +18,11 @@ import {
   describeWrapperExit,
   encodeEnvPrelude,
   envIBase,
+  isPidFileOfSpawnKey,
   killArgv,
+  reapPidFileArgv,
   remotePidFile,
+  remotePidFileGlob,
   wrapperArgv,
   type RemoteHostFacts,
 } from '../remoteLaunch';
@@ -41,6 +46,8 @@ const GOLDEN_WRAPPER =
   'case "$k" in ""|[!A-Za-z_]*|*[!A-Za-z0-9_]*) exit 98 ;; esac; ' +
   'export "$l"; done; ' +
   '[ $# -gt 0 ] || exit 96; exec "$@"';
+
+const NONCE = '0123456789abcdef';
 
 const HOSTILE_DIR = `-d it's "q" $HOME \`x\` sp ace`;
 
@@ -100,22 +107,37 @@ describe('remote command builders', () => {
     ]);
     expect(() => wrapperArgv({ cwd: '', envFile: '', pidFile: '', argv: [] })).toThrow(/empty/);
     const cmd = buildRemoteSpawnCommand({
-      facts: facts(), cwd: HOSTILE_DIR, withTokenEnvFile: true, spawnKey: 'run-1', argv: ['/t/claude', '--x', "a'b"],
+      facts: facts(), cwd: HOSTILE_DIR, withTokenEnvFile: true, spawnKey: 'run-1', spawnNonce: NONCE, argv: ['/t/claude', '--x', "a'b"],
     });
     expect(cmd).toBe(quoteRemoteArgv([
       ...envIBase(facts()),
-      '/bin/sh', '-c', SPAWN_WRAPPER, 'sh', HOSTILE_DIR, '/Users/me/cf-remote/h1/env', '/Users/me/cf-remote/h1/run/run-1.pid',
+      '/bin/sh', '-c', SPAWN_WRAPPER, 'sh', HOSTILE_DIR, '/Users/me/cf-remote/h1/env', '/Users/me/cf-remote/h1/run/run-1.0123456789abcdef.pid',
       '/t/claude', '--x', "a'b",
     ]));
-    const noToken = buildRemoteSpawnCommand({ facts: facts(), spawnKey: 'k', argv: ['x'] });
-    expect(noToken).toContain(`'sh' '' '' '/Users/me/cf-remote/h1/run/k.pid' 'x'`);
+    const noToken = buildRemoteSpawnCommand({ facts: facts(), spawnKey: 'k', spawnNonce: NONCE, argv: ['x'] });
+    expect(noToken).toContain(`'sh' '' '' '/Users/me/cf-remote/h1/run/k.0123456789abcdef.pid' 'x'`);
   });
 
-  it('spawn keys are filename-safe', () => {
-    expect(remotePidFile('/r', 'run_1.a-b')).toBe('/r/run/run_1.a-b.pid');
+  it('spawn keys are filename-safe; the pidfile is per spawn (<key>.<nonce>.pid)', () => {
+    expect(remotePidFile('/r', 'run_1.a-b', NONCE)).toBe(`/r/run/run_1.a-b.${NONCE}.pid`);
     for (const bad of ['', '..', '.', 'a/b', 'a b', '$x', 'x'.repeat(129)]) {
-      expect(() => remotePidFile('/r', bad)).toThrow(InvalidSpawnKeyError);
+      expect(() => remotePidFile('/r', bad, NONCE)).toThrow(InvalidSpawnKeyError);
     }
+    for (const bad of ['', 'abc', 'ABCDEF0123', '0123456789abcdeg', '../../x1234567', 'a'.repeat(65)]) {
+      expect(() => remotePidFile('/r', 'k', bad)).toThrow(InvalidSpawnNonceError);
+    }
+  });
+
+  it('isPidFileOfSpawnKey matches one key exactly (key `a` never claims key `a.b`)', () => {
+    expect(isPidFileOfSpawnKey(`a.${NONCE}.pid`, 'a')).toBe(true);
+    expect(isPidFileOfSpawnKey(`a.b.${NONCE}.pid`, 'a')).toBe(false);
+    expect(isPidFileOfSpawnKey(`a.b.${NONCE}.pid`, 'a.b')).toBe(true);
+    expect(isPidFileOfSpawnKey('a.pid', 'a')).toBe(false);
+    expect(isPidFileOfSpawnKey(`ab.${NONCE}.pid`, 'a')).toBe(false);
+  });
+
+  it('reapPidFileArgv passes the pidfile positionally', () => {
+    expect(reapPidFileArgv('/r/run/k.x.pid')).toEqual(['/bin/sh', '-c', PIDFILE_REAP_PROGRAM, 'sh', '/r/run/k.x.pid']);
   });
 
   it('killArgv passes the pidfile and signal positionally', () => {
@@ -232,7 +254,7 @@ describe.skipIf(!posix)('wrapper run by a local /bin/sh (what sshd does with the
     writeFileSync(join(root, 'env'), '# comment\nexport FOO=1\nCLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-Ab_9\n$(touch /tmp/never)\n', { mode: 0o600 });
     const command = buildRemoteSpawnCommand({
       facts: { remoteRoot: root, home: h, path: '/usr/bin:/bin' },
-      cwd: work, withTokenEnvFile: true, spawnKey: 'k1', argv: ['/bin/sh', '-c', PROBE],
+      cwd: work, withTokenEnvFile: true, spawnKey: 'k1', spawnNonce: NONCE, argv: ['/bin/sh', '-c', PROBE],
     });
     const r = await runRemote(command, `${encodeEnvPrelude({ A: "va'l $x `y`" })}payload-bytes`, { PATH: '/usr/bin:/bin', LEAK: 'yes' });
     expect(r.code).toBe(0);
@@ -242,7 +264,7 @@ describe.skipIf(!posix)('wrapper run by a local /bin/sh (what sshd does with the
     expect(r.stdout).toContain(`TOKLEN=${'sk-ant-oat01-Ab_9'.length}\n`);
     expect(r.stdout).toContain('REST=payload-bytes');
     const pid = /PID=(\d+)/.exec(r.stdout)?.[1];
-    const pidfile = readFileSync(join(root, 'run', 'k1.pid'), 'utf8');
+    const pidfile = readFileSync(join(root, 'run', `k1.${NONCE}.pid`), 'utf8');
     // The program kept the wrapper's pid (exec), and a pgid was recorded (the session's group: whether the
     // outer `sh -c` execs or forks its one command is the shell's business).
     expect(pidfile).toMatch(/^\d+ \d+\n$/);
@@ -254,7 +276,7 @@ describe.skipIf(!posix)('wrapper run by a local /bin/sh (what sshd does with the
     const { home: h, root } = setup();
     writeFileSync(join(root, 'env'), 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-ok; echo pwned\n', { mode: 0o600 });
     const run = (withTokenEnvFile: boolean) => runRemote(
-      buildRemoteSpawnCommand({ facts: { remoteRoot: root, home: h }, withTokenEnvFile, spawnKey: 'k', argv: ['/bin/sh', '-c', PROBE] }),
+      buildRemoteSpawnCommand({ facts: { remoteRoot: root, home: h }, withTokenEnvFile, spawnKey: 'k', spawnNonce: NONCE, argv: ['/bin/sh', '-c', PROBE] }),
       '\n',
       {},
     );
@@ -267,7 +289,7 @@ describe.skipIf(!posix)('wrapper run by a local /bin/sh (what sshd does with the
 
   it('exits 98 on a bad prelude line or EOF before the terminator, 97 on a missing cwd', async () => {
     const { home: h, root } = setup();
-    const cmd = (cwd?: string) => buildRemoteSpawnCommand({ facts: { remoteRoot: root, home: h }, cwd, spawnKey: 'k', argv: ['/usr/bin/true'] });
+    const cmd = (cwd?: string) => buildRemoteSpawnCommand({ facts: { remoteRoot: root, home: h }, cwd, spawnKey: 'k', spawnNonce: NONCE, argv: ['/usr/bin/true'] });
     expect((await runRemote(cmd(), 'A B=1\n\n', {})).code).toBe(WRAPPER_EXIT.prelude);
     expect((await runRemote(cmd(), '1A=x\n\n', {})).code).toBe(WRAPPER_EXIT.prelude);
     expect((await runRemote(cmd(), 'novalue\n\n', {})).code).toBe(WRAPPER_EXIT.prelude);
@@ -291,5 +313,43 @@ describe.skipIf(!posix)('wrapper run by a local /bin/sh (what sshd does with the
     writeFileSync(pidfile, `${victim.pid} ${victim.pid}\n`);
     expect((await spawnCapture('/bin/sh', ['-c', quoteRemoteArgv(killArgv(pidfile, 'TERM'))], { env, timeoutMs: 5000 })).code).toBe(0);
     expect(await exited).toBe('SIGTERM');
+  });
+
+  it('PIDFILE_REAP_PROGRAM keeps the pidfile of a live pid and removes a dead / malformed one', async () => {
+    const { root } = setup();
+    const env = { PATH: '/usr/bin:/bin' };
+    const run = (f: string) => spawnCapture('/bin/sh', ['-c', quoteRemoteArgv(reapPidFileArgv(f))], { env, timeoutMs: 5000 });
+    mkdirSync(join(root, 'run'), { recursive: true });
+    const victim = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
+    try {
+      const live = join(root, 'run', `live.${NONCE}.pid`);
+      writeFileSync(live, `${victim.pid} ${victim.pid}\n`);
+      expect((await run(live)).code).toBe(0);
+      expect(existsSync(live)).toBe(true);
+      const dead = join(root, 'run', `dead.${NONCE}.pid`);
+      writeFileSync(dead, '999999 999999\n');
+      expect((await run(dead)).code).toBe(0);
+      expect(existsSync(dead)).toBe(false);
+      const junk = join(root, 'run', `junk.${NONCE}.pid`);
+      writeFileSync(junk, '-1 x\n');
+      expect((await run(junk)).code).toBe(0);
+      expect(existsSync(junk)).toBe(false);
+      expect((await run(join(root, 'run', 'absent.pid'))).code).toBe(0);
+    } finally {
+      victim.kill('SIGKILL');
+    }
+  });
+
+  it('remotePidFileGlob, expanded by a real /bin/sh, lists exactly one spawn key\'s pidfiles', async () => {
+    const { root } = setup();
+    const run = join(root, 'run');
+    mkdirSync(run, { recursive: true });
+    const names = [`a.${NONCE}.pid`, 'a.fedcba9876543210.pid', `a.b.${NONCE}.pid`, `ab.${NONCE}.pid`, 'a.pid', 'a.0123.pid'];
+    for (const n of names) writeFileSync(join(run, n), '1 1\n');
+    const r = await spawnCapture('/bin/sh', ['-c', `for f in ${remotePidFileGlob(root, 'a')}; do [ -e "$f" ] && printf '%s\\n' "\${f##*/}"; done`], {
+      env: { PATH: '/usr/bin:/bin' }, timeoutMs: 5000,
+    });
+    expect(r.stdout.trim().split('\n').sort()).toEqual([`a.${NONCE}.pid`, 'a.fedcba9876543210.pid']);
+    expect(readdirSync(run).filter((n) => isPidFileOfSpawnKey(n, 'a')).sort()).toEqual([`a.${NONCE}.pid`, 'a.fedcba9876543210.pid']);
   });
 });

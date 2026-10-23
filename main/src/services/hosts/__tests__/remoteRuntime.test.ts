@@ -97,7 +97,7 @@ interface Harness {
   calls: ExecCall[];
   streams: string[];
   link: { acquires: number; releases: number; fail: Error | null };
-  hostsState: { running: boolean; killed: boolean; view: View | null; linkForThrows: Error | null };
+  hostsState: { running: boolean; killed: boolean; view: View | null; linkForThrows: Error | null; generation: number };
   mint: ReturnType<typeof vi.fn>;
   env: NodeJS.ProcessEnv;
 }
@@ -115,9 +115,11 @@ function harness(opts: { answer?: (argv: readonly string[]) => Partial<ExecResul
     killed: false,
     view: { id: 'h1', kind: 'ssh', archivedAt: null, remoteReady: true, preflight: preflight() } as View | null,
     linkForThrows: null as Error | null,
+    generation: 0,
   };
   const hosts: RemoteRuntimeHostsLike = {
     status: () => ({ running: hostsState.running, killed: hostsState.killed }),
+    generation: () => hostsState.generation,
     get: (id) => {
       if (id !== 'h1' || hostsState.view === null) throw new HostNotFoundError();
       return hostsState.view;
@@ -432,7 +434,7 @@ describe('RemoteRuntime.prepare success', () => {
     expect(proc.pid).toBeUndefined();
     expect(h.streams).toHaveLength(1);
     expect(h.streams[0]).toContain(SPAWN_WRAPPER.slice(0, 20));
-    expect(h.streams[0]).toContain(`${ROOT}/run/${s.spawnKey}.pid`);
+    expect(h.streams[0]).toMatch(new RegExp(`${ROOT}/run/${s.spawnKey}\\.[0-9a-f]{16}\\.pid`));
     expect(h.streams[0]).not.toContain(TOKEN);
     expect(h.streams[0]).not.toContain('CYBOFLOW_ORCH_TOKEN_FILE');
     proc.emit('exit', 0, null);
@@ -445,6 +447,22 @@ describe('RemoteRuntime.prepare success', () => {
 });
 
 describe('RemoteRuntime.removeRunToken', () => {
+  it('a host generation bump (target change / archive) forgets the token write and the manifest read', async () => {
+    const h = harness();
+    const tokenWrites = () => h.calls.filter((c) => c.argv.includes(`${ROOT}/run/run-1.token`) && c.opts?.stdin === `${TOKEN}\n`).length;
+    const manifestReads = () => h.calls.filter((c) => c.argv.some((a) => a.endsWith('/manifest.json'))).length;
+    const s1 = await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    expect(s1.generation).toBe(0);
+    await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    expect(tokenWrites()).toBe(1);
+    expect(manifestReads()).toBe(1);
+    h.hostsState.generation = 1;
+    const s2 = await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    expect(s2.generation).toBe(1);
+    expect(tokenWrites()).toBe(2);
+    expect(manifestReads()).toBe(2);
+  });
+
   it('unlinks the token file, forgets it (next prepare rewrites), and never throws', async () => {
     const h = harness();
     await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });

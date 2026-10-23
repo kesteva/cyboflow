@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   InvalidToolchainProbeSpecError,
+  NVM_NODE_PICK_LINES,
   buildPrelaunchProbeScript,
   buildProbeScript,
   buildToolchainProbeFragment,
@@ -208,6 +209,41 @@ describe.skipIf(!posix)('buildProbeScript run by a local /bin/sh (no ssh)', () =
     if (process.platform !== 'darwin') expect(p.tmpdir).toBe('/probe/tmp/');
     else expect(p.tmpdir).toMatch(/^\//);
   }, 60_000);
+});
+
+describe.skipIf(!posix)('nvm node fallback run by a local /bin/sh', () => {
+  let home: string | null = null;
+  afterEach(() => {
+    if (home) rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  const pick = (h: string): string => execFileSync('/bin/sh', ['-s'], {
+    input: `${NVM_NODE_PICK_LINES.join('\n')}\nprintf '%s' "$nvm_node"\n`,
+    encoding: 'utf8',
+    env: { HOME: h, PATH: '/usr/bin:/bin' },
+  });
+
+  function nvmDir(h: string, version: string, executable = true): void {
+    const bin = join(h, '.nvm', 'versions', 'node', version, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\necho x\n');
+    chmodSync(join(bin, 'node'), executable ? 0o755 : 0o644);
+  }
+
+  it('picks the numerically highest major, then minor, then patch (never the lexically last)', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-nvm-')));
+    for (const v of ['v9.11.2', 'v22.3.0', 'v22.12.1', 'v22.12.0', 'v18.20.4', 'vfoo', 'v23.1']) nvmDir(home, v);
+    nvmDir(home, 'v99.0.0', false); // not executable: ignored
+    expect(pick(home)).toBe(join(home, '.nvm/versions/node/v22.12.1/bin/node'));
+    nvmDir(home, 'v22.12.10-nightly');
+    expect(pick(home)).toBe(join(home, '.nvm/versions/node/v22.12.10-nightly/bin/node'));
+  });
+
+  it('is empty without an nvm install', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-nvm-')));
+    expect(pick(home)).toBe('');
+  });
 });
 
 describe('toolchain probe section', () => {

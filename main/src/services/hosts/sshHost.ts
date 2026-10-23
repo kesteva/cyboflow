@@ -5,7 +5,7 @@
  * programs whose PATH is a positional argument ($1), so a caller path is never spliced into shell text:
  *   exists -> `test -e`, readFile -> `head -c`, writeFile -> stdin into a 0600 temp file, chmod, rename,
  *   mkdirp -> `mkdir -p`, readdir -> a NUL-separated glob listing, unlink -> `rm -f` (directories refused),
- *   rmrf -> `rm -rf` behind the remote-root check, stat -> `stat -L` (BSD format, GNU fallback),
+ *   rmrf -> `rm -rf` behind the remote-root check, stat -> `stat -L` (BSD or GNU format by `uname -s`),
  *   git -> `git -C <path> …`.
  * A leading `~/` is expanded against the REMOTE $HOME inside the program.
  *
@@ -18,6 +18,7 @@
  *  - the path must be absolute or start with `~/`, and an absolute path that EXISTS on this Mac is refused
  *    (RemotePathIsLocalError): a local path must never be operated on remotely by mistake.
  */
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { redactSecrets, type PreflightCheckResult, type PreflightResult } from '../../../../shared/types/hosts';
 import {
@@ -42,7 +43,9 @@ import {
   buildRemoteSpawnCommand,
   encodeEnvPrelude,
   killArgv,
+  reapPidFileArgv,
   remotePidFile,
+  SPAWN_NONCE_HEX_CHARS,
   wrapperArgv,
   type RemoteHostFacts,
 } from './remoteLaunch';
@@ -126,10 +129,33 @@ const RMRF_PROGRAM =
   'case "$d/" in "$rr"/*) ;; *) exit 3 ;; esac; ' +
   'exec rm -rf -- "$p"';
 
-/** `<type>|<size>|<octal perms>`; exit 1 when nothing is there. BSD stat first, GNU stat as the fallback. */
+/**
+ * `<type>|<size>|<octal perms>`; exit 1 when nothing is there. The stat dialect is chosen by `uname -s` (BSD
+ * userland: Darwin and the BSDs; GNU / busybox otherwise) — never by trying BSD first: GNU `stat -f` is the
+ * FILESYSTEM mode and would "succeed" with the wrong output.
+ */
 const STAT_PROGRAM =
   'if [ ! -e "$p" ]; then exit 1; fi; ' +
-  'stat -L -f "%HT|%z|%Mp%Lp" -- "$p" 2>/dev/null || exec stat -L -c "%F|%s|%a" -- "$p"';
+  'case "$(uname -s 2>/dev/null)" in Darwin|*BSD|DragonFly) exec stat -L -f "%HT|%z|%Mp%Lp" -- "$p" ;; ' +
+  '*) exec stat -L -c "%F|%s|%a" -- "$p" ;; esac';
+
+/** writeFile: stdin into a 0600 temp file next to the target, the mode ($1), then an atomic rename. */
+const WRITE_PROGRAM =
+  'umask 077; t="$p.cf-tmp.$$"; if cat > "$t" && chmod "$1" "$t" && mv -f "$t" "$p"; then exit 0; fi; rm -f "$t"; exit 1';
+
+/** The fixed remote programs (PATH_PRELUDE is prepended to each at call time) — exported for shell tests. */
+export const SSH_HOST_PROGRAMS = {
+  pathPrelude: PATH_PRELUDE,
+  exists: 'test -e "$p"',
+  readFile: 'exec head -c "$1" -- "$p"',
+  write: WRITE_PROGRAM,
+  mkdirp: 'exec mkdir -p -- "$p"',
+  readdir: READDIR_PROGRAM,
+  unlink: UNLINK_PROGRAM,
+  rmrf: RMRF_PROGRAM,
+  stat: STAT_PROGRAM,
+  git: 'exec git -C "$p" "$@"',
+} as const;
 
 /** Parse STAT_PROGRAM output. Throws on a shape it does not recognise. */
 export function parseStatLine(line: string): MachineStat {
@@ -161,6 +187,8 @@ export interface SshHostDeps {
   remoteFacts?: () => RemoteHostFacts | null;
   /** HostProcess kill timers (tests). */
   processTimers?: HostProcessTimers;
+  /** Per-spawn pidfile nonce (tests). Default: SPAWN_NONCE_HEX_CHARS hex chars from node:crypto. */
+  spawnNonce?: () => string;
   /**
    * The full-tier inputs of a preflight (expected toolchain, orch link, prelaunch node path), resolved per run by
    * the hosts service. Absent (or rejecting) ⇒ the M1 checks: sdk-binary-hash / mcp-roundtrip skipped.
@@ -238,14 +266,14 @@ export class SshHost implements ExecutionHost {
 
     this.fs = {
       exists: async (p: HostPath): Promise<boolean> => {
-        const r = await t.exec(target, remoteSh('test -e "$p"', guard(p)));
+        const r = await t.exec(target, remoteSh(SSH_HOST_PROGRAMS.exists, guard(p)));
         if (r.code === 0) return true;
         if (r.code === 1) return false;
         throw new RemoteOperationError('exists', r);
       },
       readFile: async (p: HostPath, maxBytes = DEFAULT_READ_MAX_BYTES): Promise<string> => {
         const n = Math.max(0, Math.floor(maxBytes));
-        const r = await t.exec(target, remoteSh('exec head -c "$1" -- "$p"', guard(p), String(n)));
+        const r = await t.exec(target, remoteSh(SSH_HOST_PROGRAMS.readFile, guard(p), String(n)));
         if (r.code !== 0) throw new RemoteOperationError('read', r);
         return r.stdout;
       },
@@ -255,17 +283,13 @@ export class SshHost implements ExecutionHost {
         // target (umask 077 before any byte lands), the requested mode, then an atomic rename.
         const r = await t.exec(
           target,
-          remoteSh(
-            'umask 077; t="$p.cf-tmp.$$"; if cat > "$t" && chmod "$1" "$t" && mv -f "$t" "$p"; then exit 0; fi; rm -f "$t"; exit 1',
-            guard(p),
-            mode.toString(8),
-          ),
+          remoteSh(WRITE_PROGRAM, guard(p), mode.toString(8)),
           { stdin: data },
         );
         if (r.code !== 0) throw new RemoteOperationError('write', r);
       },
       mkdirp: async (p: HostPath): Promise<void> => {
-        const r = await t.exec(target, remoteSh('exec mkdir -p -- "$p"', guard(p)));
+        const r = await t.exec(target, remoteSh(SSH_HOST_PROGRAMS.mkdirp, guard(p)));
         if (r.code !== 0) throw new RemoteOperationError('mkdir', r);
       },
       readdir: async (p: HostPath): Promise<string[]> => {
@@ -300,7 +324,7 @@ export class SshHost implements ExecutionHost {
     const gitRun = (cwd: HostPath, args: string[], opts: ExecOptions = {}): Promise<ExecResult> => {
       const dir = guard(cwd);
       if (opts.env === undefined) {
-        return t.exec(target, remoteSh('exec git -C "$p" "$@"', dir, ...args), {
+        return t.exec(target, remoteSh(SSH_HOST_PROGRAMS.git, dir, ...args), {
           timeoutMs: opts.timeoutMs, signal: opts.signal, stdin: opts.stdin,
         });
       }
@@ -324,7 +348,10 @@ export class SshHost implements ExecutionHost {
   spawn(spec: HostSpawnSpec): HostProcess {
     const facts = this.deps.remoteFacts?.() ?? null;
     if (!facts || !facts.remoteRoot.startsWith('/') || !facts.home) throw new RemoteHostNotReadyError();
-    const pidFile = remotePidFile(facts.remoteRoot, spec.spawnKey);
+    // A fresh nonce per spawn: this process's wrapper and its kill / reap programs share ONE pidfile no other
+    // spawn (a replacement under the same spawnKey) ever writes.
+    const spawnNonce = this.deps.spawnNonce?.() ?? randomBytes(SPAWN_NONCE_HEX_CHARS / 2).toString('hex');
+    const pidFile = remotePidFile(facts.remoteRoot, spec.spawnKey, spawnNonce);
     const prelude = encodeEnvPrelude(spec.env ?? {});
     if (spec.cwd !== undefined && (spec.cwd.includes('\0') || !(spec.cwd.startsWith('/') || spec.cwd.startsWith('~/')))) {
       throw new InvalidRemotePathError();
@@ -334,12 +361,13 @@ export class SshHost implements ExecutionHost {
       cwd: spec.cwd,
       withTokenEnvFile: spec.withTokenEnvFile,
       spawnKey: spec.spawnKey,
+      spawnNonce,
       argv: [spec.command, ...spec.args],
     });
     const t = this.deps.transport;
     const target = this.deps.sshTarget;
     const child = t.spawnStreaming(target, command, { stdin: 'pipe', dedicated: true });
-    return new RemoteHostProcess({
+    const proc = new RemoteHostProcess({
       child,
       prelude,
       signal: spec.signal,
@@ -352,6 +380,11 @@ export class SshHost implements ExecutionHost {
         }
       },
     });
+    // Best-effort pidfile cleanup over the shared master once the process is gone (kept while its pid is alive).
+    proc.once('exit', () => {
+      void t.exec(target, reapPidFileArgv(pidFile), { timeoutMs: REMOTE_KILL_TIMEOUT_MS }).catch(() => undefined);
+    });
+    return proc;
   }
 
   async preflight(

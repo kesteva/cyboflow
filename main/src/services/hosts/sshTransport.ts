@@ -159,13 +159,22 @@ export function shQuote(word: string): string {
   return `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The remote command string ssh sends: every word single-quoted, joined by spaces. */
+/**
+ * One word for a REMOTE login shell: single-quoted, with every `'` as `'\''` and every `!` emitted OUTSIDE the
+ * quotes as `\!` (`'ab'\!'cd'`). csh/tcsh history-expand `!` even inside single quotes; `\!` is a literal `!` in
+ * sh, bash, zsh, fish and csh/tcsh alike.
+ */
+function remoteShellWord(word: string): string {
+  return `'${word.replace(/'/g, `'\\''`).replace(/!/g, `'\\!'`)}'`;
+}
+
+/** The remote command string ssh sends: every word quoted (remoteShellWord), joined by spaces. */
 export function quoteRemoteArgv(argv: readonly string[]): string {
   if (argv.length === 0) throw new Error('remote argv is empty');
   for (const word of argv) {
     if (word.includes('\0')) throw new Error('remote argv contains a NUL byte');
   }
-  return argv.map(shQuote).join(' ');
+  return argv.map(remoteShellWord).join(' ');
 }
 
 export function assertValidSshTarget(target: string): void {

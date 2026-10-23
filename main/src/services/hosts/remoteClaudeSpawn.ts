@@ -111,7 +111,10 @@ export function remoteSpawnFailureMessage(err: unknown): string {
   return raw;
 }
 
-/** Remote artifacts dirs already created this app session (`<hostId>\0<dir>`): skip the ssh round trip per turn. */
+/**
+ * Remote artifacts dirs already created this app session (`<hostId>\0<generation>\0<dir>`): skip the ssh round
+ * trip per turn. The host generation makes a target change / archive forget them.
+ */
 const artifactDirsMade = new Set<string>();
 
 /**
@@ -135,7 +138,7 @@ export async function prepareRemoteClaudeSpawn(
     throw new Error(message, { cause: err });
   }
   const dir = session.artifactsDir(opts.runId);
-  const key = `${hostId}\0${dir}`;
+  const key = `${hostId}\0${session.generation}\0${dir}`;
   if (!artifactDirsMade.has(key)) {
     try {
       await session.fs.mkdirp({ hostId, path: dir });

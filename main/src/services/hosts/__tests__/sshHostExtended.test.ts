@@ -2,11 +2,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostGitCommandError, type ExecResult } from '../../../orchestrator/trpc/contracts/executionHost';
-import { InvalidRemoteEnvError, KILL_PROGRAM, SPAWN_WRAPPER, type RemoteHostFacts } from '../remoteLaunch';
+import { InvalidRemoteEnvError, KILL_PROGRAM, PIDFILE_REAP_PROGRAM, SPAWN_WRAPPER, type RemoteHostFacts } from '../remoteLaunch';
 import { InvalidRemotePathError, RemoteHostNotReadyError, SshHost, UnsafeRemoveError, parseStatLine } from '../sshHost';
 import { quoteRemoteArgv, spawnCapture, type SshExecOptions, type SshTransportLike } from '../sshTransport';
 
@@ -20,7 +20,7 @@ interface ExecCall {
 interface Recording {
   transport: SshTransportLike;
   calls: ExecCall[];
-  streams: Array<{ target: string; command: string; dedicated: boolean }>;
+  streams: Array<{ target: string; command: string; dedicated: boolean; child: EventEmitter }>;
 }
 
 function recording(answer: (argv: readonly string[]) => Partial<ExecResult> = () => ({})): Recording {
@@ -35,10 +35,10 @@ function recording(answer: (argv: readonly string[]) => Partial<ExecResult> = ()
     closeMaster: () => undefined,
     controlArgs: () => [],
     spawnStreaming: (target, command, opts) => {
-      streams.push({ target, command, dedicated: opts.dedicated });
       const child = Object.assign(new EventEmitter(), {
         stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true,
       });
+      streams.push({ target, command, dedicated: opts.dedicated, child });
       return child as unknown as ChildProcess;
     },
     openForward: () => { throw new Error('not used'); },
@@ -47,10 +47,13 @@ function recording(answer: (argv: readonly string[]) => Partial<ExecResult> = ()
   return { transport, calls, streams };
 }
 
-function host(transport: SshTransportLike, over: { remoteRoot?: string; facts?: RemoteHostFacts | null } = {}): SshHost {
+function host(
+  transport: SshTransportLike,
+  over: { remoteRoot?: string; facts?: RemoteHostFacts | null; spawnNonce?: () => string } = {},
+): SshHost {
   return new SshHost({
     id: 'h1', label: 'Box', sshTarget: 'box', remoteRoot: over.remoteRoot ?? '~/cf-remote/h1', appVersion: '1.0.0', transport,
-    localExists: () => false, remoteFacts: () => over.facts ?? null,
+    localExists: () => false, remoteFacts: () => over.facts ?? null, spawnNonce: over.spawnNonce,
   });
 }
 
@@ -144,7 +147,7 @@ describe('SshHost spawn', () => {
   it('refuses before a complete probe; never puts the env on the command line', () => {
     const { transport, streams } = recording();
     expect(() => host(transport).spawn({ command: 'x', args: [], spawnKey: 'k' })).toThrow(RemoteHostNotReadyError);
-    const p = host(transport, { facts: FACTS }).spawn({
+    const p = host(transport, { facts: FACTS, spawnNonce: () => '0123456789abcdef' }).spawn({
       command: '/r/tc/claude', args: ['--output-format', 'stream-json'], cwd: '/Users/me/cf-remote/h1/wt/s1',
       env: { CYBOFLOW_RUN_ID: 'r1', SECRETISH: 'value-only-on-stdin' }, spawnKey: 'r1', withTokenEnvFile: true,
     });
@@ -153,13 +156,47 @@ describe('SshHost spawn', () => {
     expect(streams[0].dedicated).toBe(true);
     expect(streams[0].command).not.toContain('value-only-on-stdin');
     expect(streams[0].command).toContain(quoteRemoteArgv([
-      'sh', '/Users/me/cf-remote/h1/wt/s1', '/Users/me/cf-remote/h1/env', '/Users/me/cf-remote/h1/run/r1.pid',
+      'sh', '/Users/me/cf-remote/h1/wt/s1', '/Users/me/cf-remote/h1/env', '/Users/me/cf-remote/h1/run/r1.0123456789abcdef.pid',
       '/r/tc/claude', '--output-format', 'stream-json',
     ]));
     expect(() => host(transport, { facts: FACTS }).spawn({ command: 'x', args: [], spawnKey: '../k' })).toThrow();
     expect(() => host(transport, { facts: FACTS }).spawn({ command: 'x', args: [], spawnKey: 'k', env: { A: 'x\ny' } })).toThrow(InvalidRemoteEnvError);
   });
+
+  it('mints a fresh 16-hex nonce per spawn and binds it into the wrapper, the kill and the exit reap', async () => {
+    const { transport, streams, calls } = recording();
+    const h = host(transport, { facts: FACTS });
+    const a = h.spawn({ command: 'x', args: [], spawnKey: 'r1' });
+    const b = h.spawn({ command: 'x', args: [], spawnKey: 'r1' });
+    const pidOf = (cmd: string): string => {
+      const m = /'(\/Users\/me\/cf-remote\/h1\/run\/r1\.([0-9a-f]+)\.pid)'/.exec(cmd);
+      if (!m) throw new Error(`no pidfile in ${cmd}`);
+      expect(m[2]).toHaveLength(16);
+      return m[1];
+    };
+    const pa = pidOf(streams[0].command);
+    const pb = pidOf(streams[1].command);
+    expect(pa).not.toBe(pb);
+    expect(a.kill('SIGKILL')).toBe(true);
+    await new Promise<void>((r) => setImmediate(r));
+    expect(calls.map((c) => [c.argv[2], c.argv[4]])).toEqual([[KILL_PROGRAM, pa]]);
+    // The process exits: its OWN pidfile is reaped; the replacement's is never touched.
+    streams[0].child.emit('exit', null, 'SIGKILL');
+    await new Promise<void>((r) => setImmediate(r));
+    expect(calls.map((c) => [c.argv[2], c.argv[4]])).toEqual([[KILL_PROGRAM, pa], [PIDFILE_REAP_PROGRAM, pa]]);
+    expect(b.kill('SIGKILL')).toBe(true);
+    await new Promise<void>((r) => setImmediate(r));
+    expect(calls.at(-1)?.argv[4]).toBe(pb);
+  });
 });
+
+async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error('condition not met in time');
+    await new Promise<void>((r) => setTimeout(r, 25));
+  }
+}
 
 describe.skipIf(!posix)('SshHost against a local /bin/sh loopback (no ssh)', () => {
   let home: string | null = null;
@@ -269,11 +306,43 @@ describe.skipIf(!posix)('SshHost against a local /bin/sh loopback (no ssh)', () 
       });
     });
     expect(out).toBe(`${wt}|r 1|unset\ngot:hello\n`);
-    expect(readFileSync(join(root, 'run', 'r1.pid'), 'utf8')).toMatch(/^\d+ \d+\n$/);
+    const pidFiles = readdirSync(join(root, 'run'));
+    expect(pidFiles).toHaveLength(1);
+    expect(pidFiles[0]).toMatch(/^r1\.[0-9a-f]{16}\.pid$/);
+    expect(readFileSync(join(root, 'run', pidFiles[0]), 'utf8')).toMatch(/^\d+ \d+\n$/);
     const exited = new Promise<NodeJS.Signals | null>((resolve) => p.once('exit', (_c: number | null, s: NodeJS.Signals | null) => resolve(s)));
     expect(p.kill('SIGTERM')).toBe(true);
     // stdin EOF does not stop `sleep`: the remote group kill after the 2 s grace does.
     expect(await exited).toBe('SIGTERM');
     expect(p.killed).toBe(true);
+    // The exit reaps this spawn's pidfile (its pid is gone).
+    await waitFor(() => !existsSync(join(root, 'run', pidFiles[0])));
+  }, 15_000);
+
+  it('two spawns of one spawnKey: killing the old one never signals its replacement', async () => {
+    const { root, h } = setup();
+    const start = (): ReturnType<SshHost['spawn']> =>
+      h.spawn({ command: '/bin/sh', args: ['-c', 'echo up; exec sleep 30'], env: { PATH: '/usr/bin:/bin' }, spawnKey: 'r1' });
+    const up = (p: ReturnType<SshHost['spawn']>): Promise<void> =>
+      new Promise<void>((resolve) => p.stdout.on('data', (b: Buffer) => { if (b.toString('utf8').includes('up')) resolve(); }));
+    const old = start();
+    await up(old);
+    const replacement = start();
+    await up(replacement);
+    const files = readdirSync(join(root, 'run')).sort();
+    expect(files).toHaveLength(2);
+    const oldExit = new Promise<void>((resolve) => old.once('exit', () => resolve()));
+    let replacementExited = false;
+    replacement.once('exit', () => { replacementExited = true; });
+    expect(old.kill('SIGKILL')).toBe(true);
+    await oldExit;
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(replacementExited).toBe(false);
+    expect(replacement.exitCode).toBeNull();
+    // Only the old spawn's pidfile is reaped.
+    await waitFor(() => readdirSync(join(root, 'run')).length === 1);
+    const replacementExit = new Promise<void>((resolve) => replacement.once('exit', () => resolve()));
+    replacement.kill('SIGKILL');
+    await replacementExit;
   }, 15_000);
 });

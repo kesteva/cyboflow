@@ -96,6 +96,7 @@ export function createFakeRemoteSession(opts: {
   spawnKey?: string;
   timers?: HostProcessTimers;
   mkdirpError?: Error;
+  generation?: number;
 } = {}): FakeRemoteSession {
   const hostId = opts.hostId ?? 'host-1';
   const runId = opts.runId ?? 'run-1';
@@ -132,6 +133,7 @@ export function createFakeRemoteSession(opts: {
   const git: GitExecutor = { run: async () => notUsed(), capture: async () => notUsed() };
   return {
     hostId,
+    generation: opts.generation ?? 0,
     facts: FAKE_FACTS,
     remoteRoot: FAKE_REMOTE_ROOT,
     paths,

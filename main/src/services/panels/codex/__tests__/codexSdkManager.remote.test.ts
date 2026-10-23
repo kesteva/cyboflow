@@ -122,7 +122,7 @@ interface FakeSession {
   mkdirp: ReturnType<typeof vi.fn>;
 }
 
-function fakeSession(events: string[], codexBin: string | null = CODEX_BIN): FakeSession {
+function fakeSession(events: string[], codexBin: string | null = CODEX_BIN, generation = 0): FakeSession {
   let released = false;
   const release = vi.fn(() => {
     released = true;
@@ -136,6 +136,7 @@ function fakeSession(events: string[], codexBin: string | null = CODEX_BIN): Fak
   const path = composeRemotePath({ codexPathDir: codexBin ? CODEX_PATH_DIR : null, nodeDir: '/opt/homebrew/bin' });
   const session: RemoteRuntimeSession = {
     hostId: 'h1',
+    generation,
     facts,
     remoteRoot: ROOT,
     paths: { claude: `${TC}/claude`, mcpBundle: `${TC}/cyboflowMcpServer.js`, codexBin, codexPathDir: codexBin ? CODEX_PATH_DIR : null, nodePath: NODE, gitPath: '/usr/bin/git' },
@@ -332,6 +333,29 @@ describe('CodexSdkManager on an SSH environment', () => {
       expect(String(write?.[1])).toMatch(/^developer_instructions = "/);
       expect(events.indexOf(`write:${file}`)).toBeLessThan(events.indexOf('thread/start'));
       await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('role files written once per host generation: a target change / archive (new generation) writes them again', async () => {
+    const db = createDb(true);
+    const events: string[] = [];
+    const first = fakeSession(events, CODEX_BIN, 0);
+    const sameGen = fakeSession(events, CODEX_BIN, 0);
+    const nextGen = fakeSession(events, CODEX_BIN, 1);
+    setRemoteRuntime(fakeRuntime([first, sameGen, nextGen], (l) => l.hostId ?? null).rt);
+    try {
+      const { manager } = makeManager(db, events);
+      await manager.spawnCliProcess(turn());
+      await manager.killAllProcesses();
+      expect(first.writeFile).toHaveBeenCalled();
+      await manager.spawnCliProcess(turn());
+      await manager.killAllProcesses();
+      expect(sameGen.writeFile).not.toHaveBeenCalled();
+      await manager.spawnCliProcess(turn());
+      await manager.killAllProcesses();
+      expect(nextGen.writeFile.mock.calls.length).toBe(first.writeFile.mock.calls.length);
     } finally {
       db.close();
     }

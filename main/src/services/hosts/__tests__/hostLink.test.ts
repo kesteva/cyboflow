@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
   HOST_LINK_BACKOFF_MS,
@@ -184,6 +184,67 @@ describe('HostLink', () => {
     link.release();
     expect(timers.pending()).toBe(0);
     expect(link.state).toBe('idle');
+  });
+
+  it('releasing the last reference while a reconnect attempt is in flight closes that forward (no leak)', async () => {
+    const { link, forwards, timers, events } = make();
+    const a = link.acquire();
+    forwards[0].up();
+    await a;
+    forwards[0].drop();
+    timers.fireNext(); // the reconnect attempt opens forwards[1]; its ready is still pending
+    expect(forwards).toHaveLength(2);
+    expect(forwards[1].closed).toBe(false);
+    link.release();
+    expect(forwards[1].closed).toBe(true);
+    expect(link.state).toBe('idle');
+    expect(timers.pending()).toBe(0);
+    // A late ready never resurrects it, and the next acquire opens a fresh forward.
+    forwards[1].up();
+    await flush();
+    expect(link.state).toBe('idle');
+    expect(events.filter((e) => e.type === 'link-up')).toHaveLength(1);
+    const b = link.acquire();
+    expect(forwards).toHaveLength(3);
+    forwards[2].up();
+    await expect(b).resolves.toEqual({ remoteSock: '/Users/me/cf-remote/h1/s/o.sock' });
+  });
+
+  describe('with real (faked) timers', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('an in-flight reconnect is closed on the last release and nothing fires afterwards', async () => {
+      vi.useFakeTimers();
+      const forwards: FakeForward[] = [];
+      const link = new HostLink({
+        hostId: 'h1',
+        sshTarget: 'box',
+        transport: {
+          openForward: (_t, spec) => {
+            const f = new FakeForward(spec);
+            forwards.push(f);
+            return f;
+          },
+        },
+        remoteRoot: () => '/Users/me/cf-remote/h1',
+        localSock: () => '/Users/me/.cyboflow/sockets/orch.sock',
+      });
+      const a = link.acquire();
+      forwards[0].up();
+      await a;
+      forwards[0].drop();
+      expect(link.state).toBe('reconnecting');
+      vi.advanceTimersByTime(HOST_LINK_BACKOFF_MS[0]);
+      expect(forwards).toHaveLength(2);
+      link.release();
+      expect(forwards[1].closed).toBe(true);
+      expect(link.state).toBe('idle');
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(120_000);
+      expect(forwards).toHaveLength(2);
+    });
   });
 
   it('an exit with no references (inside the idle window) just goes idle', async () => {

@@ -431,6 +431,12 @@ describe('materializeCodexAgentRolesOnHost', () => {
     // A different machine is a different key.
     await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h2', rolesDir: DIR, fs, written });
     expect(fs.writeFile).toHaveBeenCalledTimes(2);
+    // The same host after a target change / archive (a new generation) is written again; generation 0 = default.
+    await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', generation: 0, rolesDir: DIR, fs, written });
+    expect(fs.writeFile).toHaveBeenCalledTimes(2);
+    await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', generation: 1, rolesDir: DIR, fs, written });
+    expect(fs.writeFile).toHaveBeenCalledTimes(3);
+    expect(fs.mkdirp).toHaveBeenCalledTimes(3);
   });
 
   it('is fail-soft: an unwritable role is omitted, an unusable directory registers nothing', async () => {
