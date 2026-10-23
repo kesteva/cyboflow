@@ -29,6 +29,10 @@ function recordingTransport(result: Partial<ExecResult> = {}) {
     },
     runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     closeMaster: () => undefined,
+    controlArgs: () => [],
+    spawnStreaming: () => { throw new Error('not used'); },
+    openForward: () => { throw new Error('not used'); },
+    pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
   };
   return { transport, calls };
 }
@@ -131,6 +135,10 @@ describe.skipIf(!posix)('SshHost programs run by a local /bin/sh loopback (no ss
         spawnCapture('/bin/sh', ['-c', quoteRemoteArgv(argv)], { env, timeoutMs: 10_000, stdin: opts?.stdin }),
       runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
       closeMaster: () => undefined,
+      controlArgs: () => [],
+      spawnStreaming: () => { throw new Error('not used'); },
+      openForward: () => { throw new Error('not used'); },
+      pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     };
     const h = host(loopback);
     const dir = { hostId: 'h1', path: "~/cf remote/it's" };

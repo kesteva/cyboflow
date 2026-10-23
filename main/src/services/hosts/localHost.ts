@@ -1,14 +1,16 @@
 /**
  * LocalHost — the ExecutionHost for This Mac.
  *
- * exec via runToolCapture (execFile, login-shell PATH, no shell), fs via node:fs/promises, git via runGitExit.
- * Every HostPath must carry hostId 'local'.
+ * exec via runToolCapture (execFile, login-shell PATH, no shell; `cwd` default the home dir, `env` merged over
+ * the command env), fs via node:fs/promises, git via runGitExit / runGitCapture, spawn via node:child_process.
+ * Every HostPath must carry hostId 'local'. rmrf refuses `/` and the home directory.
  *
  * Preflight reuses the existing local detection and stays cheap: claude binary + credentials
  * (detectClaudeBinary / detectClaudeCredentials), codex = resolveCodexExecutablePath ONLY (never spawns an
  * app-server) plus the auth file's presence, git = resolveGitCommand + `--version`. This Mac's tier is fixed
  * `full` and it is always `online`; only git, claude-auth and codex-auth are reported, the rest are `na`.
  */
+import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,26 +22,31 @@ import {
   type PreflightResult,
 } from '../../../../shared/types/hosts';
 import type { ClaudeBinaryDetection, ClaudeCredentialDetection } from '../../../../shared/types/onboarding';
-import type {
-  ExecOptions,
-  ExecResult,
-  ExecutionHost,
-  ExecutionHostInfo,
-  GitExecutor,
-  HostPath,
-  MachineExec,
-  MachineFs,
+import {
+  HostGitCommandError,
+  type ExecOptions,
+  type ExecResult,
+  type ExecutionHost,
+  type ExecutionHostInfo,
+  type GitCaptureOutput,
+  type GitExecutor,
+  type HostPath,
+  type HostProcess,
+  type HostSpawnSpec,
+  type MachineExec,
+  type MachineFs,
+  type MachineStat,
 } from '../../orchestrator/trpc/contracts/executionHost';
 import { LOCAL_HOST_ID } from '../../orchestrator/hosts/hostStore';
 import type { LoggerLike } from '../../orchestrator/types';
 import { detectClaudeBinary } from '../../utils/claudeBinaryDetection';
 import { detectClaudeCredentials } from '../../utils/claudeCredentials';
 import { resolveGitCommand } from '../../utils/gitExeFinder';
-import { buildCommandEnv, runGitExit, runToolCapture } from '../../utils/runGit';
+import { buildCommandEnv, runGitCapture, runGitExit, runToolCapture } from '../../utils/runGit';
 import { resolveCodexExecutablePath } from '../panels/codex/codexExecutablePath';
 import { CHECK_LABELS, naCheck, type CheckOutcome } from './preflight/checks';
 import type { CaptureErrorFn } from './preflight/preflightEngine';
-import { HostPathMismatchError } from './sshHost';
+import { HostPathMismatchError, UnsafeRemoveError } from './sshHost';
 import { spawnCapture, type ProcessRunner } from './sshTransport';
 
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
@@ -59,6 +66,10 @@ export interface LocalHostDeps {
   gitVersion?: () => Promise<string | null>;
   /** Used for exec calls that pass stdin (runToolCapture has no stdin). */
   stdinRunner?: ProcessRunner;
+  /** spawn() seam (tests). Default node:child_process.spawn with piped stdio. */
+  spawnProcess?: (command: string, args: readonly string[], opts: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+  /** Home directory rmrf refuses. Default os.homedir(). */
+  homeDir?: () => string;
   now?: () => Date;
   clock?: () => number;
   captureError?: CaptureErrorFn;
@@ -122,6 +133,33 @@ function localOsVersion(): string {
   return `${os.type()} ${os.release()}`;
 }
 
+function isMissing(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+/** Map a rejected runGitCapture into HostGitCommandError (non-zero exit / timeout); anything else is rethrown. */
+function gitCaptureError(args: readonly string[], err: unknown): unknown {
+  const e = (typeof err === 'object' && err !== null ? err : {}) as {
+    code?: unknown; stdout?: unknown; stderr?: unknown; killed?: unknown; signal?: unknown;
+  };
+  const timedOut = e.killed === true && e.signal === 'SIGTERM';
+  if (typeof e.code !== 'number' && !timedOut) return err;
+  return new HostGitCommandError(args, {
+    code: typeof e.code === 'number' ? e.code : null,
+    stdout: typeof e.stdout === 'string' ? e.stdout : '',
+    stderr: typeof e.stderr === 'string' ? e.stderr : '',
+    timedOut,
+  });
+}
+
+/** Drop `undefined` values (HostSpawnSpec env allows them). */
+function definedEnv(env: Readonly<Record<string, string | undefined>> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env ?? {})) if (v !== undefined) out[k] = v;
+  return out;
+}
+
 export class LocalHost implements ExecutionHost {
   readonly info: ExecutionHostInfo;
   readonly exec: MachineExec;
@@ -129,8 +167,9 @@ export class LocalHost implements ExecutionHost {
   readonly git: GitExecutor;
 
   constructor(private readonly deps: LocalHostDeps) {
-    this.info = { id: LOCAL_HOST_ID, kind: 'local', label: deps.label ?? 'This Mac' };
+    this.info = { id: LOCAL_HOST_ID, kind: 'local', label: deps.label ?? 'This Mac', remoteRoot: null };
     const stdinRunner = deps.stdinRunner ?? spawnCapture;
+    const homeDir = deps.homeDir ?? (() => os.homedir());
 
     const assertLocal = (p: HostPath): string => {
       if (p.hostId !== LOCAL_HOST_ID) throw new HostPathMismatchError();
@@ -141,13 +180,17 @@ export class LocalHost implements ExecutionHost {
       exec: async (argv: string[], opts: ExecOptions = {}): Promise<ExecResult> => {
         if (argv.length === 0) throw new Error('argv is empty');
         const timeoutMs = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+        const cwd = opts.cwd ?? os.homedir();
         if (opts.stdin !== undefined) {
-          return stdinRunner(argv[0], argv.slice(1), { stdin: opts.stdin, timeoutMs, signal: opts.signal, env: buildCommandEnv() });
+          return stdinRunner(argv[0], argv.slice(1), {
+            stdin: opts.stdin, cwd, timeoutMs, signal: opts.signal, env: buildCommandEnv(opts.env),
+          });
         }
         try {
-          const { stdout, stderr } = await runToolCapture(argv[0], os.homedir(), argv.slice(1), {
+          const { stdout, stderr } = await runToolCapture(argv[0], cwd, argv.slice(1), {
             timeout: timeoutMs,
             signal: opts.signal,
+            env: opts.env,
           });
           return { code: 0, stdout, stderr, timedOut: false };
         } catch (err) {
@@ -184,19 +227,72 @@ export class LocalHost implements ExecutionHost {
       mkdirp: async (p: HostPath): Promise<void> => {
         await fsp.mkdir(assertLocal(p), { recursive: true });
       },
+      readdir: async (p: HostPath): Promise<string[]> => fsp.readdir(assertLocal(p)),
+      unlink: async (p: HostPath): Promise<void> => {
+        const file = assertLocal(p);
+        let st: Awaited<ReturnType<typeof fsp.lstat>>;
+        try {
+          st = await fsp.lstat(file);
+        } catch (err) {
+          if (isMissing(err)) return;
+          throw err;
+        }
+        if (st.isDirectory()) throw new UnsafeRemoveError('Refusing to unlink a directory.');
+        try {
+          await fsp.unlink(file);
+        } catch (err) {
+          if (!isMissing(err)) throw err;
+        }
+      },
+      rmrf: async (p: HostPath): Promise<void> => {
+        const raw = assertLocal(p);
+        if (!path.isAbsolute(raw)) throw new UnsafeRemoveError('Refusing to delete a relative path.');
+        const target = path.resolve(raw);
+        if (target === path.parse(target).root || target === path.resolve(homeDir())) throw new UnsafeRemoveError();
+        await fsp.rm(target, { recursive: true, force: true });
+      },
+      stat: async (p: HostPath): Promise<MachineStat | null> => {
+        try {
+          const st = await fsp.stat(assertLocal(p));
+          return { isFile: st.isFile(), isDir: st.isDirectory(), size: st.size, mode: st.mode & 0o7777 };
+        } catch (err) {
+          if (err instanceof HostPathMismatchError) throw err;
+          if (isMissing(err)) return null;
+          throw err;
+        }
+      },
     };
 
     this.git = {
       run: async (cwd: HostPath, args: string[], opts: ExecOptions = {}): Promise<ExecResult> => {
         const dir = assertLocal(cwd);
         try {
-          const r = await runGitExit(dir, args, { timeout: opts.timeoutMs, signal: opts.signal });
+          const r = await runGitExit(dir, args, { timeout: opts.timeoutMs, signal: opts.signal, env: opts.env });
           return { code: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: false };
         } catch (err) {
           return execErrorToResult(err);
         }
       },
+      capture: async (cwd: HostPath, args: string[], opts: ExecOptions = {}): Promise<GitCaptureOutput> => {
+        const dir = assertLocal(cwd);
+        try {
+          return await runGitCapture(dir, args, { timeout: opts.timeoutMs, signal: opts.signal, env: opts.env });
+        } catch (err) {
+          throw gitCaptureError(args, err);
+        }
+      },
     };
+  }
+
+  /** A local child with piped stdio; `env` is merged over the command env (login-shell PATH). */
+  spawn(spec: HostSpawnSpec): HostProcess {
+    const run = this.deps.spawnProcess ?? ((command, args, opts) => nodeSpawn(command, [...args], opts));
+    return run(spec.command, spec.args, {
+      ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
+      env: buildCommandEnv(definedEnv(spec.env)),
+      ...(spec.signal ? { signal: spec.signal } : {}),
+      windowsHide: true,
+    });
   }
 
   async preflight(

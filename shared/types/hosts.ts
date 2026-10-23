@@ -148,6 +148,14 @@ export interface HostTerminalExitEvent {
   exitCode: number | null;
 }
 
+/**
+ * The ONE test for "this session/run lives on a remote environment". The canonical local value is NULL in
+ * `sessions.host_id` / `workflow_runs.host_id`; the literal 'local' is tolerated on read but never stamped.
+ */
+export function isRemoteHostId(id: string | null | undefined): id is string {
+  return id != null && id !== 'local';
+}
+
 /** ssh destination: no leading '-', a conservative charset, bounded length. */
 export const SSH_TARGET_RE = /^(?!-)[A-Za-z0-9._%+@:\[\]-]{1,253}$/;
 export const HOST_LABEL_MAX = 48;

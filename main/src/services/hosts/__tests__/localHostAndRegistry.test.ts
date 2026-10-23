@@ -140,6 +140,10 @@ describe('HostRegistry', () => {
     exec: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     closeMaster: vi.fn(),
+    controlArgs: () => [],
+    spawnStreaming: () => { throw new Error('not used'); },
+    openForward: () => { throw new Error('not used'); },
+    pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
   };
 
   function registry(rows: Map<string, HostRow>) {
@@ -154,7 +158,7 @@ describe('HostRegistry', () => {
     const a = reg.get('h1');
     expect(a).toBeInstanceOf(SshHost);
     expect(reg.get('h1')).toBe(a);
-    expect(a.info).toEqual({ id: 'h1', kind: 'ssh', label: 'Box' });
+    expect(a.info).toEqual({ id: 'h1', kind: 'ssh', label: 'Box', remoteRoot: null });
   });
 
   it('rebuilds when the target changes and on invalidate (closing the old master)', () => {
