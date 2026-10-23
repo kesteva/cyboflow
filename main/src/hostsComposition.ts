@@ -20,6 +20,10 @@
  * (host resolution) is published on services/hosts/remoteRuntimeBridge at start() and cleared at stop(), so the
  * agent managers reach it without a constructor change.
  *
+ * Remote checkouts (spec C2): the ONE MergeBackStore (sole writer of session_merge_backs — its write queue only
+ * serializes within one instance) and a RemoteCheckout over it, the HostStore, the registry and the transport; the
+ * checkout is published on services/hosts/remoteCheckoutBridge alongside the runtime (taskQueue reaches it there).
+ *
  * Host terminal lifecycle guards (the renderer modal owns a terminal, but cannot always close it):
  *  - a config change that leaves the feature not running (or remote hosts kill-switched) destroys every terminal;
  *  - the first terminal opened against a main-window webContents attaches (once per webContents id) a main-frame
@@ -33,6 +37,7 @@ import type { DatabaseLike, LoggerLike } from './orchestrator/types';
 import { emitHostsChanged, emitHostTerminalExit, setHostsFacade } from './orchestrator/hostsBridge';
 import { getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { HostStore } from './orchestrator/hosts/hostStore';
+import { MergeBackStore } from './orchestrator/hosts/mergeBackStore';
 import { captureSeamError } from './services/telemetry';
 import { HostRegistry } from './services/hosts/hostRegistry';
 import { HostsService, type HostTerminalsLike } from './services/hosts/hostsService';
@@ -41,6 +46,8 @@ import { buildToolchainManifest, pushToolchain, resolveToolchainSources } from '
 import { HostTerminalManager, type OwnedHostShell } from './services/hosts/hostTerminalManager';
 import { LocalHost } from './services/hosts/localHost';
 import { PreflightScheduler } from './services/hosts/preflightScheduler';
+import { RemoteCheckout } from './services/hosts/remoteCheckout';
+import { getRemoteCheckout, setRemoteCheckout } from './services/hosts/remoteCheckoutBridge';
 import { RemoteRuntime } from './services/hosts/remoteRuntime';
 import { getRemoteRuntime, setRemoteRuntime } from './services/hosts/remoteRuntimeBridge';
 import { SshTransport } from './services/hosts/sshTransport';
@@ -67,6 +74,10 @@ export interface HostsComposition {
   service: HostsService;
   /** Published on remoteRuntimeBridge while started. */
   remoteRuntime: RemoteRuntime;
+  /** The single session_merge_backs writer (merge-back reuses it). */
+  mergeBackStore: MergeBackStore;
+  /** Published on remoteCheckoutBridge while started. */
+  remoteCheckout: RemoteCheckout;
   /** PTY shells owned by open host terminals (System view). */
   terminalShells: () => OwnedHostShell[];
   /** Idempotent. */
@@ -173,6 +184,16 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
     captureError: captureSeamError,
   });
+  const mergeBackStore = new MergeBackStore(db, { logger });
+  const remoteCheckout = new RemoteCheckout({
+    status: () => service.status(),
+    store,
+    getHost: (hostId) => registry.get(hostId),
+    transport,
+    mergeBacks: mergeBackStore,
+    logger,
+    captureError: captureSeamError,
+  });
 
   const onConfig = (): void => {
     // Turned off (or remote hosts kill-switched): no terminal may outlive the feature.
@@ -185,17 +206,21 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
   return {
     service,
     remoteRuntime,
+    mergeBackStore,
+    remoteCheckout,
     terminalShells: () => terminals.listOwnedShells(),
     start(): void {
       if (started) return;
       started = true;
       setRemoteRuntime(remoteRuntime);
+      setRemoteCheckout(remoteCheckout);
       scheduler.start();
       configManager.on('config-updated', onConfig);
     },
     stop(): void {
       started = false;
       if (getRemoteRuntime() === remoteRuntime) setRemoteRuntime(null);
+      if (getRemoteCheckout() === remoteCheckout) setRemoteCheckout(null);
       scheduler.stop();
       configManager.off('config-updated', onConfig);
       service.shutdown();

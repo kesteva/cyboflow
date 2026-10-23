@@ -212,3 +212,36 @@ describe('HostStore writes', () => {
     }
   });
 });
+
+describe('HostStore checkouts (host_project_checkouts)', () => {
+  it('getCheckout is null until upsertCheckout writes it; a second upsert replaces path and time', async () => {
+    raw.exec(`INSERT INTO projects (id,name) VALUES (1,'p'),(2,'q')`);
+    const id = await store.addSsh({ label: 'Box', sshTarget: 'box' });
+    expect(store.getCheckout(id, 1)).toBeNull();
+    events.length = 0;
+    const first = await store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '/home/u/cf-remote/h1/repos/1.git' });
+    expect(first.initializedAt).toMatch(ISO_RE);
+    expect(store.getCheckout(id, 1)).toEqual(first);
+    expect(store.getCheckout(id, 2)).toBeNull();
+    await store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '/srv/x/1.git', initializedAt: '2026-10-22T00:00:00.000Z' });
+    expect(store.getCheckout(id, 1)).toEqual({
+      hostId: id, projectId: 1, remoteRepoPath: '/srv/x/1.git', initializedAt: '2026-10-22T00:00:00.000Z',
+    });
+    await store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '/srv/x/1.git', initializedAt: null });
+    expect(store.getCheckout(id, 1)?.initializedAt).toBeNull();
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM host_project_checkouts').get()).toEqual({ n: 1 });
+    expect(events).toEqual([]);
+  });
+
+  it('refuses a relative / multi-line path, an unknown or archived host, and This Mac', async () => {
+    raw.exec(`INSERT INTO projects (id,name) VALUES (1,'p')`);
+    const id = await store.addSsh({ label: 'Box', sshTarget: 'box' });
+    await expect(store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '~/repos/1.git' })).rejects.toThrow(/absolute/);
+    await expect(store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '/a\nb' })).rejects.toThrow(/absolute/);
+    await expect(store.upsertCheckout({ hostId: 'nope', projectId: 1, remoteRepoPath: '/a' })).rejects.toBeInstanceOf(HostNotFoundError);
+    await expect(store.upsertCheckout({ hostId: 'local', projectId: 1, remoteRepoPath: '/a' })).rejects.toBeInstanceOf(LocalHostImmutableError);
+    await store.archive(id);
+    await expect(store.upsertCheckout({ hostId: id, projectId: 1, remoteRepoPath: '/a' })).rejects.toBeInstanceOf(HostNotFoundError);
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM host_project_checkouts').get()).toEqual({ n: 0 });
+  });
+});

@@ -40,6 +40,7 @@ import {
 } from '../orchestrator/hostsBridge';
 import { HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../services/hosts/flags';
 import { getRemoteRuntime, setRemoteRuntime } from '../services/hosts/remoteRuntimeBridge';
+import { getRemoteCheckout, setRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
 import type { HostsChangedEvent } from '../../../shared/types/hosts';
 import type { LoggerLike } from '../orchestrator/types';
 
@@ -114,6 +115,7 @@ afterEach(() => {
   hostEvents.off(HOSTS_CHANNEL, onEvent);
   _resetHostsFacadeForTesting();
   setRemoteRuntime(null);
+  setRemoteCheckout(null);
   raw.close();
   vi.unstubAllEnvs();
 });
@@ -249,6 +251,31 @@ describe('composeHosts remote runtime bridge', () => {
     expect(comp.remoteRuntime.resolveHostId({ hostId: 'h1' })).toBe('h1');
     config.enabled = false;
     await expect(comp.remoteRuntime.prepare('h1', { runId: 'r1', spawnKey: 'r1' })).rejects.toThrow(/turned off/);
+  });
+});
+
+describe('composeHosts remote checkout bridge', () => {
+  it('publishes the remote checkout at start() and clears it at stop(), leaving a foreign one in place', () => {
+    expect(getRemoteCheckout()).toBeNull();
+    comp.start();
+    expect(getRemoteCheckout()).toBe(comp.remoteCheckout);
+    comp.stop();
+    expect(getRemoteCheckout()).toBeNull();
+    comp.start();
+    const other = { ...comp.remoteCheckout } as typeof comp.remoteCheckout;
+    setRemoteCheckout(other);
+    comp.stop();
+    expect(getRemoteCheckout()).toBe(other);
+  });
+
+  it('the composed checkout gates on the live service and reads hosts from the store', async () => {
+    insertHost();
+    config.enabled = false;
+    await expect(comp.remoteCheckout.worktreeExists('h1', 'k')).rejects.toThrow(/turned off/);
+    config.enabled = true;
+    // h1 has no completed check, so there is no remote root to name a path under.
+    expect(() => comp.remoteCheckout.plannedWorktreePath('h1', 'k')).toThrow(/no completed check/);
+    expect(() => comp.remoteCheckout.plannedWorktreePath('nope', 'k')).toThrow();
   });
 });
 

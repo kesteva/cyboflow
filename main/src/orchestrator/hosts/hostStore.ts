@@ -81,6 +81,27 @@ interface RawHostRow {
   updated_at: string;
 }
 
+/** One host_project_checkouts row: the bare repo a project's remote sessions branch from on that host. */
+export interface HostCheckoutRow {
+  hostId: string;
+  projectId: number;
+  /** Absolute path of the bare repo on the host (`<remoteRoot>/repos/<projectId>.git`). */
+  remoteRepoPath: string;
+  initializedAt: string | null;
+}
+
+export interface UpsertCheckoutInput {
+  hostId: string;
+  projectId: number;
+  remoteRepoPath: string;
+  /** ISO timestamp; default now. */
+  initializedAt?: string | null;
+}
+
+/** A checkout path must be absolute, single-line and NUL-free: it is stored once and reused verbatim. */
+// eslint-disable-next-line no-control-regex
+const CHECKOUT_PATH_BAD_RE = /[\u0000\n\r]/;
+
 export interface HostStoreOptions {
   now?: () => Date;
   newId?: () => string;
@@ -245,6 +266,17 @@ export class HostStore {
     return r?.h ?? null;
   }
 
+  getCheckout(hostId: string, projectId: number): HostCheckoutRow | null {
+    const r = this.stmt(
+      'SELECT host_id, project_id, remote_repo_path, initialized_at FROM host_project_checkouts WHERE host_id = ? AND project_id = ?',
+    ).get(hostId, projectId) as
+      | { host_id: string; project_id: number; remote_repo_path: string; initialized_at: string | null }
+      | undefined;
+    return r
+      ? { hostId: r.host_id, projectId: r.project_id, remoteRepoPath: r.remote_repo_path, initializedAt: r.initialized_at }
+      : null;
+  }
+
   // ----------------------------------------------------------------- writes
 
   private requireLive(id: string): HostRow {
@@ -343,6 +375,30 @@ export class HostStore {
       this.stmt('UPDATE hosts SET archived_at = ?, updated_at = ? WHERE id = ?').run(at, at, id);
       this.stmt('UPDATE projects SET default_host_id = NULL WHERE default_host_id = ?').run(id);
       return { result: undefined, emits: [{ kind: 'hosts', hostId: id }] };
+    });
+  }
+
+  /**
+   * Insert or replace the (host, project) checkout. The host must be a live SSH machine; the path absolute.
+   * @throws HostNotFoundError, LocalHostImmutableError, Error (bad path)
+   */
+  async upsertCheckout(input: UpsertCheckoutInput): Promise<HostCheckoutRow> {
+    const { hostId, projectId, remoteRepoPath } = input;
+    if (!remoteRepoPath.startsWith('/') || CHECKOUT_PATH_BAD_RE.test(remoteRepoPath)) {
+      throw new Error('A remote checkout path must be absolute and on one line.');
+    }
+    return this.write(() => {
+      const row = this.requireLive(hostId);
+      if (row.kind === 'local') throw new LocalHostImmutableError();
+      const initializedAt = input.initializedAt === undefined ? this.iso() : input.initializedAt;
+      this.stmt(
+        `INSERT INTO host_project_checkouts (host_id, project_id, remote_repo_path, initialized_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(host_id, project_id) DO UPDATE SET remote_repo_path = excluded.remote_repo_path,
+           initialized_at = excluded.initialized_at`,
+      ).run(hostId, projectId, remoteRepoPath, initializedAt);
+      const result: HostCheckoutRow = { hostId, projectId, remoteRepoPath, initializedAt };
+      // No view shows checkouts, so nothing to tell the renderer.
+      return { result, emits: [] };
     });
   }
 

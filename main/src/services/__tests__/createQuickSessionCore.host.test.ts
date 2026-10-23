@@ -3,7 +3,7 @@
  * session-create job. Pins the precedence (explicit > project default while the feature runs > This Mac), every
  * refusal (readable, decided before any enqueue), and that a LOCAL launch threads nothing (job payload unchanged).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createQuickSessionCore,
   resolveQuickSessionHost,
@@ -15,6 +15,7 @@ import {
   type QuickSessionJobData,
 } from '../createQuickSessionCore';
 import type { HostsFeatureStatus, HostView, PreflightResult } from '../../../../shared/types/hosts';
+import { setRemoteCheckout } from '../hosts/remoteCheckoutBridge';
 
 const RUNNING: HostsFeatureStatus = { available: true, enabled: true, killed: false, scheduleKilled: false, running: true };
 
@@ -219,5 +220,70 @@ describe('createQuickSessionCore — hostId threading into the session-create jo
     for (const hostId of [undefined, null, 'local']) {
       expect(Object.keys(await enqueued(hostId))).not.toContain('hostId');
     }
+  });
+});
+
+describe('createQuickSessionCore — half-created compensation of a remote session (M2-C2)', () => {
+  beforeEach(() => {
+    _resetClaimedQuickSessionIdsForTesting();
+  });
+  afterEach(() => {
+    setRemoteCheckout(null);
+  });
+
+  async function failAfterCreate(hostId: string | null): Promise<string[]> {
+    const order: string[] = [];
+    setRemoteCheckout({
+      worktreeExists: async () => false,
+      resolveBase: async () => ({ baseCommit: 'a'.repeat(40), baseBranch: 'HEAD', baseRef: 'HEAD' }),
+      plannedWorktreePath: () => '/home/me/cf-remote/h-ssh/wt/q',
+      ensureSessionWorktree: async () => ({ remoteWorktreePath: '/home/me/cf-remote/h-ssh/wt/q', baseSha: 'a'.repeat(40), baseBranch: 'HEAD' }),
+      removeSessionWorktree: async (sessionId) => {
+        order.push(`remote:${sessionId}`);
+        return true;
+      },
+    });
+    let listener: ((s: { id: string; worktreePath: string }) => void) | null = null;
+    const deps: CreateQuickSessionCoreDeps = {
+      taskQueue: {
+        createSession: async () => {
+          setTimeout(() => listener?.({ id: 's-9', worktreePath: '/home/me/cf-remote/h-ssh/wt/q' }), 0);
+          return { id: 'job-1' };
+        },
+        onSessionJobFailed: () => () => {},
+      },
+      sessionManager: {
+        on: (_e, l) => {
+          listener = l;
+        },
+        removeListener: () => {
+          listener = null;
+        },
+      },
+      workflowRegistry: {
+        ensureQuickWorkflow: () => 'wf',
+        createRun: () => {
+          throw new Error('bad combo');
+        },
+      },
+      getDb: () => {
+        throw new Error('unused');
+      },
+      dismissHalfCreatedSession: async (sessionId) => {
+        order.push(`dismiss:${sessionId}`);
+      },
+    };
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'q', ...(hostId !== null ? { hostId } : {}) }),
+    ).rejects.toThrow('bad combo');
+    return order;
+  }
+
+  it('removes the remote worktree before the local dismiss', async () => {
+    expect(await failAfterCreate('h-ssh')).toEqual(['remote:s-9', 'dismiss:s-9']);
+  });
+
+  it('a local session never touches the remote checkout', async () => {
+    expect(await failAfterCreate(null)).toEqual(['dismiss:s-9']);
   });
 });

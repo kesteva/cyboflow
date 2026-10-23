@@ -33,6 +33,7 @@ import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachi
 import { isPtyLane } from './panelLane';
 import { normalizePathSeparators } from '../utils/posixPath';
 import { isRemoteHostId, type HostsFeatureStatus, type HostView } from '../../../shared/types/hosts';
+import { getRemoteCheckout } from './hosts/remoteCheckoutBridge';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -328,6 +329,11 @@ export async function createQuickSessionCore(
 
     return { session, runId, resolvedSubstrate, jobId: job.id };
   } catch (err) {
+    // A remote session's worktree lives on its environment: remove it there first (best-effort; the merge-back
+    // row records any failure). The local dismiss below then only finds the session row to retire.
+    if (isRemoteHostId(opts.hostId)) {
+      await getRemoteCheckout()?.removeSessionWorktree(session.id).catch(() => false);
+    }
     if (deps.dismissHalfCreatedSession) {
       await deps.dismissHalfCreatedSession(session.id).catch(() => {});
     }

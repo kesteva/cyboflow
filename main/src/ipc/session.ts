@@ -36,6 +36,8 @@ import {
   resolveQuickSessionHost,
 } from '../services/createQuickSessionCore';
 import { peekHostsFacade } from '../orchestrator/hostsBridge';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { getRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
 import { isOrchSockAuthDisabled } from '../orchestrator/orchAuthToken';
 import { isPermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
@@ -1855,7 +1857,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // (singleton dashboard) or in-place sessions (migration 047) — an in-place
         // session's worktree_path IS the user's real checkout, which must never be
         // torn down by `git worktree remove`.
-        if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
+        // M2: a remote session's worktree and branch live on the environment, never in the local repo (a local
+        // `branch -D <name>` could delete the user's own branch of that name).
+        if (isRemoteHostId(dbSession.host_id)) {
+          if (!(await getRemoteCheckout()?.removeSessionWorktree(sessionId))) cleanupMessage += `\x1b[33m⚠ The environment's worktree was not fully removed\x1b[0m\r\n`;
+        } else if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
           const project = databaseService.getProject(dbSession.project_id);
           if (project) {
             try {

@@ -13,6 +13,8 @@ import type { Project } from '../database/models';
 import { getCurrentBranch } from './gitPlumbingCommands';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { isRemoteHostId } from '../../../shared/types/hosts';
+import { requireRemoteCheckout } from './hosts/remoteCheckoutBridge';
+import type { RemoteCheckoutLike } from './hosts/remoteCheckout';
 
 /**
  * Generate a deterministic session name from a prompt string.
@@ -89,9 +91,6 @@ interface CreateSessionJob {
   hostId?: string | null;
 }
 
-/** Thrown by the session-creation processor for a remote job until remote worktrees land (M2-C2). */
-export const REMOTE_SESSIONS_UNAVAILABLE_MESSAGE = 'Remote sessions are not available yet';
-
 export class TaskQueue {
   private sessionQueue: SimpleQueue<CreateSessionJob>;
 
@@ -148,11 +147,14 @@ export class TaskQueue {
       // Processing session creation job - verbose debug logging removed
 
       try {
-        // TODO(M2-C2): replace this guard with the remote worktree branch (services/hosts/remoteCheckout.ts).
-        // Until then a remote job must fail BEFORE anything is provisioned — never cut a LOCAL worktree for a
-        // session that claims to live on another machine.
-        if (isRemoteHostId(hostId)) {
-          throw new Error(REMOTE_SESSIONS_UNAVAILABLE_MESSAGE);
+        // Remote environment (M2-C2): the worktree lives on the environment (services/hosts/remoteCheckout.ts).
+        // A remote job never cuts a LOCAL worktree, runs no build script here and never falls back to This Mac:
+        // with no checkout service wired it fails before anything is provisioned.
+        const remote: { checkout: RemoteCheckoutLike; hostId: string } | null = isRemoteHostId(hostId)
+          ? { checkout: requireRemoteCheckout(), hostId }
+          : null;
+        if (remote !== null && inPlace) {
+          throw new Error('In-place sessions run on This Mac only; pick This Mac or turn off in-place.');
         }
 
         const targetProject = sessionManager.getProjectById(projectId);
@@ -193,7 +195,13 @@ export class TaskQueue {
 
         // Ensure uniqueness for both names
         const { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName } =
-          await this.ensureUniqueNames(sessionName, worktreeName, targetProject, index);
+          await this.ensureUniqueNames(
+            sessionName,
+            worktreeName,
+            targetProject,
+            index,
+            remote !== null ? (name) => remote.checkout.worktreeExists(remote.hostId, name) : undefined,
+          );
         sessionName = uniqueSessionName;
         worktreeName = uniqueWorktreeName;
 
@@ -216,6 +224,19 @@ export class TaskQueue {
             baseCommit = undefined;
           }
           actualBaseBranch = getCurrentBranch(targetProject.path) ?? undefined;
+        } else if (remote !== null) {
+          // The base is resolved LOCALLY (worktreeManager's rules) and the session row is written with the planned
+          // remote path BEFORE the environment work: session_merge_backs keys on the session row, so every step
+          // there is tracked (and compensable) from the first one.
+          try {
+            ({ baseCommit, baseBranch: actualBaseBranch } = await remote.checkout.resolveBase(targetProject.path, {
+              baseBranch,
+              baseCommittish,
+            }));
+          } catch (error) {
+            throw new Error(`Could not resolve the session's base commit: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          worktreePath = remote.checkout.plannedWorktreePath(remote.hostId, worktreeName);
         } else {
           // A/B experiment arms (migration 049) pin the arm's worktree to a fixed
           // baseCommittish so every arm branches from the SAME base commit; undefined
@@ -240,6 +261,29 @@ export class TaskQueue {
           job.data.agentModel,
           hostId !== undefined ? { hostId } : undefined
         );
+
+        if (remote !== null) {
+          try {
+            await remote.checkout.ensureSessionWorktree({
+              sessionId: session.id,
+              hostId: remote.hostId,
+              projectId: targetProject.id,
+              projectPath: targetProject.path,
+              sessionKey: worktreeName,
+              branch: worktreeName,
+              baseBranch,
+              baseCommittish,
+              ...(baseCommit !== undefined ? { baseSha: baseCommit } : {}),
+            });
+          } catch (error) {
+            // Never surfaced (session-created has not fired): undo the environment work, then hide the row.
+            await remote.checkout.removeSessionWorktree(session.id).catch(() => false);
+            await sessionManager.archiveSession(session.id).catch((archiveError: unknown) => {
+              console.warn(`[TaskQueue] Could not archive half-created remote session ${session.id}:`, archiveError);
+            });
+            throw error;
+          }
+        }
 
         // Attach claudeConfig to the session object for the panel creation in events.ts
         if (claudeConfig) {
@@ -272,8 +316,8 @@ export class TaskQueue {
         // Emit the session-created event BEFORE running build script so UI shows immediately
         sessionManager.emitSessionCreated(session);
 
-        // Run build script after session is visible in UI
-        if (targetProject.build_script) {
+        // Run build script after session is visible in UI (a remote worktree is not on this Mac: no build here)
+        if (targetProject.build_script && remote === null) {
           console.log(`[TaskQueue] Running build script for session ${session.id}`);
 
           // Update status message
@@ -443,7 +487,17 @@ export class TaskQueue {
     return Promise.all(jobs);
   }
 
-  private async ensureUniqueNames(baseSessionName: string, baseWorktreeName: string, project: Project, index?: number): Promise<{ sessionName: string; worktreeName: string }> {
+  /**
+   * `remoteWorktreeExists` (remote sessions) replaces the LOCAL worktree-folder probe with one on the environment
+   * (`<remoteRoot>/wt/<name>`); its errors propagate — an unreachable environment fails the create readably.
+   */
+  private async ensureUniqueNames(
+    baseSessionName: string,
+    baseWorktreeName: string,
+    project: Project,
+    index?: number,
+    remoteWorktreeExists?: (name: string) => Promise<boolean>,
+  ): Promise<{ sessionName: string; worktreeName: string }> {
     const { sessionManager } = this.options;
     const db = sessionManager.db;
 
@@ -471,16 +525,20 @@ export class TaskQueue {
       // Check if worktree directory exists on filesystem
       // This handles cases where a worktree was created outside of Cyboflow
       let worktreePathExists = false;
-      try {
-        if (project) {
-          const path = require('path');
-          const fs = require('fs');
-          const worktreeFolder = project.worktree_folder || 'worktrees';
-          const worktreePath = path.join(project.path, worktreeFolder, uniqueWorktreeName);
-          worktreePathExists = fs.existsSync(worktreePath);
+      if (remoteWorktreeExists) {
+        worktreePathExists = await remoteWorktreeExists(uniqueWorktreeName);
+      } else {
+        try {
+          if (project) {
+            const path = require('path');
+            const fs = require('fs');
+            const worktreeFolder = project.worktree_folder || 'worktrees';
+            const worktreePath = path.join(project.path, worktreeFolder, uniqueWorktreeName);
+            worktreePathExists = fs.existsSync(worktreePath);
+          }
+        } catch (e) {
+          // Ignore filesystem check errors
         }
-      } catch (e) {
-        // Ignore filesystem check errors
       }
 
       // All must be unique (session name, worktree name in DB, and no filesystem conflict)

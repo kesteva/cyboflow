@@ -31,6 +31,52 @@ function alreadyUpToDate(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: ALREADY_UP_TO_DATE_CODE });
 }
 
+/** What {@link resolveWorktreeBase} resolved: the base SHA, the session-row label, and the ref to cut from. */
+export interface ResolvedWorktreeBase {
+  baseCommit: string;
+  /** Human-facing label for the session row: the base branch, or 'HEAD'. */
+  baseBranch: string;
+  /** What `git worktree add -b` cuts the new branch at (the committish, the base branch, or HEAD). */
+  baseRef: string;
+}
+
+/**
+ * Resolve a NEW worktree branch's base in the LOCAL project repo — the rules `_createAtPath` applies:
+ *   - `baseCommittish` (A/B pin): an EXACT commit; no refs/heads guard (a raw SHA is not a branch); the label is the
+ *     caller's `baseBranch` or 'HEAD'; `rev-parse --verify` both validates it and records it.
+ *   - else `baseBranch` (must exist as refs/heads/<baseBranch>, else "Base branch '<x>' does not exist"), else HEAD.
+ * Also used by remote sessions (services/hosts/remoteCheckout.ts), which push that SHA to the environment.
+ */
+export async function resolveWorktreeBase(
+  projectPath: string,
+  opts: { baseBranch?: string; baseCommittish?: string },
+): Promise<ResolvedWorktreeBase> {
+  const { baseBranch, baseCommittish } = opts;
+  if (baseCommittish) {
+    const baseCommit = (
+      await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseCommittish])
+    ).stdout.trim();
+    return { baseCommit, baseBranch: baseBranch || 'HEAD', baseRef: baseCommittish };
+  }
+  // Create new branch from specified base branch (or current HEAD if not specified)
+  const baseRef = baseBranch || 'HEAD';
+  // Verify that the base branch exists if specified
+  if (baseBranch) {
+    try {
+      await runGitCapture(projectPath, [
+        'show-ref', '--verify', '--quiet', END_OF_OPTIONS, `refs/heads/${baseBranch}`,
+      ]);
+    } catch {
+      throw new Error(`Base branch '${baseBranch}' does not exist`);
+    }
+  }
+  // Capture the base commit before creating the worktree
+  const baseCommit = (
+    await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseRef])
+  ).stdout.trim();
+  return { baseCommit, baseBranch: baseBranch || 'HEAD', baseRef };
+}
+
 /**
  * Narrow seam for the Codex-broker reaper (see {@link CodexBrokerReaper}). Worktree
  * removal is the single chokepoint every dismiss/merge/delete path funnels through,
@@ -232,40 +278,14 @@ export class WorktreeManager {
           await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, branchName])
         ).stdout.trim();
         actualBaseBranch = branchName;
-      } else if (baseCommittish) {
-        // A/B pin: cut the branch at an EXACT commit. Skip the refs/heads guard (a
-        // raw SHA is not a branch); actualBaseBranch keeps the human-facing branch
-        // label the caller passed (or 'HEAD') for the session row.
-        actualBaseBranch = baseBranch || 'HEAD';
-        // rev-parse both validates the SHA (a bad committish fails loudly) and
-        // records the pinned base commit.
-        baseCommit = (
-          await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseCommittish])
-        ).stdout.trim();
-        await runGitCapture(projectPath, [
-          'worktree', 'add', '-b', branchName, END_OF_OPTIONS, worktreePath, baseCommittish,
-        ]);
       } else {
-        // Create new branch from specified base branch (or current HEAD if not specified)
-        const baseRef = baseBranch || 'HEAD';
-        actualBaseBranch = baseBranch || 'HEAD';
-
-        // Verify that the base branch exists if specified
-        if (baseBranch) {
-          try {
-            await runGitCapture(projectPath, [
-              'show-ref', '--verify', '--quiet', END_OF_OPTIONS, `refs/heads/${baseBranch}`,
-            ]);
-          } catch {
-            throw new Error(`Base branch '${baseBranch}' does not exist`);
-          }
-        }
-
-        // Capture the base commit before creating the worktree
-        baseCommit = (
-          await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseRef])
-        ).stdout.trim();
-
+        // A new branch: the base (an exact committish, the named base branch, or HEAD)
+        // is resolved by the shared helper, then the branch is cut at that ref.
+        let baseRef: string;
+        ({ baseCommit, baseBranch: actualBaseBranch, baseRef } = await resolveWorktreeBase(projectPath, {
+          baseBranch,
+          baseCommittish,
+        }));
         await runGitCapture(projectPath, [
           'worktree', 'add', '-b', branchName, END_OF_OPTIONS, worktreePath, baseRef,
         ]);
