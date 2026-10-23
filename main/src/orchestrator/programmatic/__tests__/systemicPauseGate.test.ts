@@ -11,6 +11,7 @@ import {
   ReviewQueueSystemicPauseGate,
   AUTO_RESUME_BUFFER_MS,
   systemicPauseSourceForStep,
+  describeSystemicReason,
   type SystemicPauseItemOps,
   type SystemicPauseParker,
 } from '../systemicPauseGate';
@@ -419,5 +420,21 @@ describe('ReviewQueueSystemicPauseGate — pause payload + body (switch runtime 
     await flush();
 
     expect(items.createCalls).toHaveLength(0);
+  });
+});
+
+describe('describeSystemicReason', () => {
+  it('buckets a remote-environment outage FIRST, even when ssh wording carries auth/rate words', () => {
+    expect(describeSystemicReason('host-unreachable: The environment is not reachable.')).toBe('environment unreachable');
+    expect(describeSystemicReason('ssh: connect to host box port 22: Operation timed out')).toBe('environment unreachable');
+    expect(describeSystemicReason('kex_exchange_identification: authenticity check rate limited')).toBe('environment unreachable');
+  });
+
+  it('keeps the existing buckets for everything else', () => {
+    expect(describeSystemicReason('Claude AI usage limit reached|1700003600')).toBe('usage limit');
+    expect(describeSystemicReason('Overloaded')).toBe('provider overload');
+    expect(describeSystemicReason('authentication_error')).toBe('authentication issue');
+    expect(describeSystemicReason('fetch failed')).toBe('systemic failure');
+    expect(describeSystemicReason(undefined)).toBe('systemic failure');
   });
 });

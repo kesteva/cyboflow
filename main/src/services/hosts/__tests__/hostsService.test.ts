@@ -452,6 +452,27 @@ describe('update / archive / terminals / shutdown', () => {
   });
 });
 
+describe('gitCapture (orchestrator facade)', () => {
+  it('runs git.capture on the host with a HostPath for that host and resolves stdout', async () => {
+    const id = await addSettled();
+    const capture = vi.fn(async () => ({ stdout: 'abc123\n', stderr: '' }));
+    (hostFor(id).host as unknown as { git: { capture: typeof capture } }).git = { capture };
+    await expect(service.gitCapture(id, '/home/u/cf-remote/wt/k', ['rev-parse', 'HEAD'])).resolves.toBe('abc123\n');
+    expect(capture).toHaveBeenCalledWith({ hostId: id, path: '/home/u/cf-remote/wt/k' }, ['rev-parse', 'HEAD'], undefined);
+  });
+
+  it('propagates a non-zero git exit (throw-on-nonzero) and refuses while off or killed', async () => {
+    const id = await addSettled();
+    const boom = Object.assign(new Error('Command failed: git rev-parse HEAD'), { name: 'HostGitCommandError' });
+    (hostFor(id).host as unknown as { git: { capture: () => Promise<never> } }).git = { capture: async () => { throw boom; } };
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toBe(boom);
+    env[REMOTE_HOSTS_KILL_SWITCH_ENV] = '1';
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toMatchObject({ name: HOSTS_ERROR_NAMES.killed });
+    enabled = false;
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toMatchObject({ name: HOSTS_ERROR_NAMES.disabled });
+  });
+});
+
 describe('summarizePreflight', () => {
   it('counts statuses, singularises one warning', () => {
     const r = result('h', { results: [check('arch', 'pass'), check('git', 'warn'), check('node22', 'fail')] });

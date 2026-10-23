@@ -204,7 +204,7 @@ describe('classifyErrorPattern', () => {
       'auth-authentication-error-type', 'auth-invalid-x-api-key',
       'auth-failed-to-authenticate', 'auth-session-expired', 'auth-token-refresh-failed',
       'net-connection-closed',
-      'net-connection-failure', 'net-econn-codes', 'net-fetch-failed',
+      'net-connection-failure', 'net-econn-codes', 'net-fetch-failed', 'host-unreachable',
       // non-systemic buckets
       'stream-closed', 'first-event-timeout', 'max-turns-or-execution-bound',
       'binary-missing', 'spawn-failed', 'nonzero-exit', 'timed-out',
@@ -405,5 +405,38 @@ describe('isSystemicErrorClass', () => {
     expect(isSystemicErrorClass('other')).toBe(false);
     expect(isSystemicErrorClass('unknown')).toBe(false);
     expect(isSystemicErrorClass(undefined)).toBe(false);
+  });
+});
+
+describe('host-unreachable (remote environment outage, M2 C3)', () => {
+  const unreachable: Array<[string, string]> = [
+    ['our launch-refusal prefix', 'host-unreachable: The environment is not reachable.'],
+    ['DNS failure', 'ssh: Could not resolve hostname box.local: nodename nor servname provided, or not known'],
+    ['no route', 'ssh: connect to host 10.0.0.9 port 22: No route to host'],
+    ['network down', 'connect: Network is unreachable'],
+    ['host down', 'ssh: connect to host box port 22: Host is down'],
+    ['macOS connect timeout', 'ssh: connect to host box port 22: Operation timed out'],
+    ['kex reset', 'kex_exchange_identification: read: Connection reset by peer'],
+    ['dropped session', 'Connection to box closed by remote host.'],
+    ['ssh exit 255', 'remote agent spawn failed: ssh exited with 255'],
+  ];
+
+  it.each(unreachable)('is systemic and classifies as host-unreachable: %s', (_label, error) => {
+    expect(isSystemicStepError(error)).toBe(true);
+    // A wording an earlier net-* pattern also claims keeps that class; ours still parks.
+    expect(classifyErrorPattern(error)).toMatch(/^(host-unreachable|net-connection-failure)$/);
+  });
+
+  it('labels the ssh-only wordings host-unreachable and the class is systemic', () => {
+    expect(classifyErrorPattern('ssh: Could not resolve hostname box')).toBe('host-unreachable');
+    expect(classifyErrorPattern('host-unreachable: link down')).toBe('host-unreachable');
+    expect(isSystemicErrorClass('host-unreachable')).toBe(true);
+  });
+
+  it('stays narrow: a bare permission denied or an ordinary host mention is not an outage', () => {
+    expect(isSystemicStepError('git@box: Permission denied (publickey).')).toBe(false);
+    expect(isSystemicStepError('EACCES: permission denied, open /tmp/x')).toBe(false);
+    expect(isSystemicStepError('edited src/hostResolver.ts to fix the localhost check')).toBe(false);
+    expect(isSystemicStepError('Connection to the database pool was configured')).toBe(false);
   });
 });

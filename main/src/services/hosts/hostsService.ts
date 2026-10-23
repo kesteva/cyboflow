@@ -705,6 +705,24 @@ export class HostsService implements HostsFacade {
   }
 
   /**
+   * `git -C <cwd> <args…>` on `hostId`, stdout on exit 0 (the orchestrator's handle on a remote session worktree;
+   * RunLauncher reads HEAD / the branch through it). Refused like any other host I/O while the feature is off or the
+   * kill switch is on.
+   * @throws HostsDisabledError / RemoteHostsDisabledError / HostNotFoundError / HostGitCommandError
+   */
+  async gitCapture(
+    hostId: string,
+    cwd: string,
+    args: string[],
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<string> {
+    this.guard();
+    this.guardRemoteFor(hostId);
+    const { stdout } = await this.deps.registry.get(hostId).git.capture({ hostId, path: cwd }, args, opts);
+    return stdout;
+  }
+
+  /**
    * "Install cyboflow tools" (≈550 MB): hash this Mac's toolchain for the machine's arch, push it, then kick a full
    * preflight. Needs a complete check (remote folder + arch): HostNeedsPreflightError otherwise. One install per
    * host: a call while one runs returns the running promise. Progress → emitToolchainProgress.

@@ -42,6 +42,34 @@ import {
 } from './sessionPermissionMode';
 import { assertIdeaNotBusy } from './ideaBusy';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { sdkRuntimeForProvider } from '../../../shared/types/agentRuntime';
+import type { FindingPayload } from '../../../shared/types/reviews';
+import { peekHostsFacade, type HostLaunchRuntime, type HostPrelaunchFailureCode } from './hostsBridge';
+import { ReviewItemRouter } from './reviewItemRouter';
+import { isOrchSockAuthDisabled } from './orchAuthToken';
+
+/**
+ * A launch into a session on a remote environment was refused before (or, for a
+ * runtime the pre-check could not predict, right after) its run was created.
+ * The message is the readable reason; an outage is prefixed `host-unreachable: `
+ * so the systemic classifier (programmatic/systemicError.ts) recognises it.
+ */
+export class HostLaunchRefusedError extends Error {
+  constructor(
+    readonly hostId: string,
+    readonly code: HostPrelaunchFailureCode,
+    reason: string,
+  ) {
+    super(code === 'unreachable' || code === 'link-down' ? `host-unreachable: ${reason}` : reason);
+    this.name = 'HostLaunchRefusedError';
+  }
+}
+
+/** The runtimes a remote environment can run (M2): the structured SDK ones. */
+function asHostLaunchRuntime(runtime: string): HostLaunchRuntime | null {
+  return runtime === 'claude-sdk' || runtime === 'codex-sdk' ? runtime : null;
+}
 
 /**
  * Decouples RunLauncher from the Electron layer by accepting a plain publisher
@@ -386,7 +414,12 @@ export class RunLauncher {
     requestedAgentProvider?: AgentProvider,
     requestedAgentRuntime?: WorkflowAgentRuntime,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
-    await this.ensureGitExcludeEntry(projectPath);
+    // The session's environment (M2): a run inherits sessions.host_id. Local
+    // (NULL / 'local') takes every path below byte-identically; a remote one is
+    // gated before createRun and reads its worktree's git through the host. The
+    // project-path exclude is a LOCAL write the remote worktree never sees.
+    const remoteHostId = sessionId ? this.readSessionRemoteHostId(sessionId) : null;
+    if (remoteHostId === null) await this.ensureGitExcludeEntry(projectPath);
 
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
@@ -653,6 +686,30 @@ export class RunLauncher {
               : {}),
           }
         : undefined;
+    // Remote environment gate (M2) — after the one-running guard, BEFORE createRun
+    // so a refusal leaves no run row. The runtime is the one this launch asks for
+    // (explicit, else the variant's, else Claude on the requested substrate);
+    // createRun's ladder can still land elsewhere (a saved runtime mix, a provider
+    // reroute), which the post-create check below catches.
+    let gatedRuntime: HostLaunchRuntime | null = null;
+    if (remoteHostId !== null) {
+      const explicitRuntime = requestedAgentRuntime ?? rv?.agentRuntime ?? undefined;
+      const explicitProvider = requestedAgentProvider ?? rv?.agentProvider ?? undefined;
+      const estimated =
+        explicitRuntime ??
+        (explicitProvider !== undefined && explicitProvider !== 'claude'
+          ? sdkRuntimeForProvider(explicitProvider)
+          : substrate === 'interactive'
+            ? 'claude-interactive'
+            : 'claude-sdk');
+      gatedRuntime = await this.assertRemoteLaunchable(
+        remoteHostId,
+        estimated,
+        projectId ?? workflow.project_id ?? null,
+        sessionId,
+      );
+    }
+
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
       workflowId,
       substrate,
@@ -670,7 +727,17 @@ export class RunLauncher {
       // Every run is session-hosted (slice 1b): the run executes inside the owning
       // session's EXISTING worktree. The legacy session-less createDeterministicWorktree
       // branch (and the `baseBranch` it consumed) was removed with the invariant.
-      const { worktreePath, branchName } = await this.resolveSessionHostedWorktree(runId, sessionId);
+      // A remote run whose stamped runtime differs from the one gated above is
+      // re-gated for what it will actually run (or refused when that is not an
+      // SDK runtime). Fails the just-created run through the catch below.
+      if (remoteHostId !== null && gatedRuntime !== null) {
+        const stamped = this.readRunAgentRuntime(runId);
+        if (stamped !== null && stamped !== gatedRuntime) {
+          await this.assertRemoteLaunchable(remoteHostId, stamped, projectId ?? workflow.project_id ?? null, sessionId);
+        }
+      }
+
+      const { worktreePath, branchName } = await this.resolveSessionHostedWorktree(runId, sessionId, remoteHostId);
 
       // Worktree columns first, UNGUARDED: they describe where the run's work
       // lives and stay true whatever the row's status is, so a run canceled during
@@ -711,7 +778,10 @@ export class RunLauncher {
       // sessions.run_id (e.g. useLifecycleSession.ts until Phase 3) keep working.
       // The forward link (workflow_runs.session_id) was stamped at createRun.
       // Always runs now — the session-less launch path was removed in slice 1b.
-      const baseSha = await this.worktreeManager.getHeadCommit(worktreePath);
+      const baseSha =
+        remoteHostId === null
+          ? await this.worktreeManager.getHeadCommit(worktreePath)
+          : await this.remoteGit(remoteHostId, worktreePath, ['rev-parse', 'HEAD']);
       this.db
         .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(baseSha, runId);
@@ -990,6 +1060,7 @@ export class RunLauncher {
   private async resolveSessionHostedWorktree(
     runId: string,
     sessionId: string,
+    remoteHostId: string | null,
   ): Promise<{ worktreePath: string; branchName: string }> {
     const sessionRow = this.db
       .prepare('SELECT worktree_path, base_branch, in_place, is_main_repo FROM sessions WHERE id = ?')
@@ -1027,7 +1098,10 @@ export class RunLauncher {
     // back to the session's recorded base_branch when the live ref is unreadable.
     let branchName: string | null = sessionRow.base_branch ?? null;
     try {
-      branchName = await this.worktreeManager.getProjectMainBranch(worktreePath);
+      branchName =
+        remoteHostId === null
+          ? await this.worktreeManager.getProjectMainBranch(worktreePath)
+          : await this.remoteCurrentBranch(remoteHostId, worktreePath);
     } catch (err) {
       this.logger.warn('RunLauncher: could not read session worktree branch; falling back to base_branch', {
         runId,
@@ -1171,6 +1245,145 @@ export class RunLauncher {
       }
     }
     return JSON.stringify(map);
+  }
+
+  /**
+   * The session's REMOTE host id, or null for a local session (NULL / 'local').
+   * Fail-soft: an unreadable row or a schema without `sessions.host_id` (pre-152,
+   * or a test fixture) reads as local, which is every pre-M2 launch.
+   */
+  private readSessionRemoteHostId(sessionId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT host_id FROM sessions WHERE id = ?').get(sessionId) as
+        | { host_id?: unknown }
+        | undefined;
+      return typeof row?.host_id === 'string' && isRemoteHostId(row.host_id) ? row.host_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The run's stamped agent_runtime (fail-soft null). */
+  private readRunAgentRuntime(runId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT agent_runtime FROM workflow_runs WHERE id = ?').get(runId) as
+        | { agent_runtime?: unknown }
+        | undefined;
+      return typeof row?.agent_runtime === 'string' ? row.agent_runtime : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Gate a launch onto remote environment `hostId` for `runtime`: Environments
+   * running (the facade is wired), orchestrator-socket auth on, an SDK runtime,
+   * and the host's prelaunch check passing. Refusal throws HostLaunchRefusedError;
+   * a failing prelaunch also files ONE pending notification per host and project
+   * (deduped on `host-launch-failed:<hostId>`), fail-soft.
+   * @returns the gated runtime.
+   */
+  private async assertRemoteLaunchable(
+    hostId: string,
+    runtime: string,
+    projectId: number | null,
+    sessionId: string,
+  ): Promise<HostLaunchRuntime> {
+    const facade = peekHostsFacade();
+    if (facade === null || facade.prelaunch === undefined) {
+      throw new HostLaunchRefusedError(hostId, 'disabled', 'Environments are not running, so this session cannot start a run.');
+    }
+    if (isOrchSockAuthDisabled()) {
+      throw new HostLaunchRefusedError(
+        hostId,
+        'disabled',
+        'Remote environments need orchestrator socket authentication, which is turned off (CYBOFLOW_DISABLE_ORCH_SOCK_AUTH).',
+      );
+    }
+    const launchRuntime = asHostLaunchRuntime(runtime);
+    if (launchRuntime === null) {
+      throw new HostLaunchRefusedError(
+        hostId,
+        'runtime-unavailable',
+        `This run would use ${runtime}, which cannot run on a remote environment. Use Claude or Codex (SDK).`,
+      );
+    }
+    const result = await facade.prelaunch(hostId, launchRuntime);
+    if (result.ok) return launchRuntime;
+
+    const err = new HostLaunchRefusedError(hostId, result.code, result.reason);
+    this.logger.warn('RunLauncher: remote launch refused by the environment check', {
+      hostId,
+      sessionId,
+      code: result.code,
+    });
+    await this.fileHostLaunchFailure(hostId, projectId ?? this.readSessionProjectId(sessionId), err.message);
+    throw err;
+  }
+
+  /** sessions.project_id (fail-soft null) — the notification's project when the launch named none. */
+  private readSessionProjectId(sessionId: string): number | null {
+    try {
+      const row = this.db.prepare('SELECT project_id FROM sessions WHERE id = ?').get(sessionId) as
+        | { project_id?: unknown }
+        | undefined;
+      return typeof row?.project_id === 'number' ? row.project_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The one human notification for a refused remote launch. Never throws. */
+  private async fileHostLaunchFailure(hostId: string, projectId: number | null, message: string): Promise<void> {
+    if (projectId === null) return;
+    let label = hostId;
+    try {
+      label = peekHostsFacade()?.get(hostId).label ?? hostId;
+    } catch {
+      // Unknown / archived host: keep the id.
+    }
+    const outage = message.startsWith('host-unreachable: ');
+    try {
+      await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: outage ? `Run not started: ${label} is unreachable` : `Run not started on ${label}`,
+        body:
+          `A run could not start on the environment **${label}**, so no run was created.\n\n` +
+          `${outage ? message.slice('host-unreachable: '.length) : message}\n\n` +
+          'Check the environment in Settings → Environments (run a check, or Install cyboflow tools), then launch again.',
+        blocking: false,
+        audience: 'human',
+        severity: 'warning',
+        source: `host-launch-failed:${hostId}`,
+        payload: { kind: 'finding', category: 'environment' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      this.logger.error('RunLauncher: host launch-failure notification failed (fail-soft)', {
+        hostId,
+        projectId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** `git -C <cwd> <args>` on remote host `hostId`, trimmed stdout (throws on a non-zero exit). */
+  private async remoteGit(hostId: string, cwd: string, args: string[]): Promise<string> {
+    const facade = peekHostsFacade();
+    if (facade === null || facade.gitCapture === undefined) {
+      throw new HostLaunchRefusedError(hostId, 'disabled', 'Environments are not running, so this session cannot start a run.');
+    }
+    return (await facade.gitCapture(hostId, cwd, args)).trim();
+  }
+
+  /** WorktreeManager.getProjectMainBranch over the host: the current branch, refusing a detached HEAD. */
+  private async remoteCurrentBranch(hostId: string, worktreePath: string): Promise<string> {
+    const branch = await this.remoteGit(hostId, worktreePath, ['branch', '--show-current']);
+    if (!branch) {
+      throw new Error(`Cannot determine main branch: repository at ${worktreePath} is in detached HEAD state`);
+    }
+    return branch;
   }
 
   /**
