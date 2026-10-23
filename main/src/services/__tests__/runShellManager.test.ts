@@ -125,6 +125,8 @@ describe('RunShellManager.open', () => {
     const seeded = {
       CYBOFLOW_RUN_ID: 'outer-run',
       CYBOFLOW_ORCH_SOCKET: '/tmp/outer.sock',
+      CYBOFLOW_ORCH_TOKEN: 'outer-token',
+      CYBOFLOW_ORCH_TOKEN_FILE: '/tmp/outer-token-file',
       CYBOFLOW_RUN_ARTIFACTS_DIR: '/tmp/outer-artifacts',
     } as const;
     const previous = new Map(Object.keys(seeded).map((k) => [k, process.env[k]] as const));
@@ -135,6 +137,8 @@ describe('RunShellManager.open', () => {
       const env = spawns[0].options.env ?? {};
       expect(env.CYBOFLOW_RUN_ID).toBeUndefined();
       expect(env.CYBOFLOW_ORCH_SOCKET).toBeUndefined();
+      expect(env.CYBOFLOW_ORCH_TOKEN).toBeUndefined();
+      expect(env.CYBOFLOW_ORCH_TOKEN_FILE).toBeUndefined();
       expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
     } finally {
       for (const [key, value] of previous) {

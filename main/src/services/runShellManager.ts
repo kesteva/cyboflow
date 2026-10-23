@@ -132,6 +132,7 @@ export class RunShellManager {
     // whole point of the token is that only processes cyboflow spawned FOR this
     // run can claim it.
     delete env.CYBOFLOW_ORCH_TOKEN;
+    delete env.CYBOFLOW_ORCH_TOKEN_FILE;
     delete env.CYBOFLOW_RUN_ARTIFACTS_DIR;
     const ptyProcess = this.spawn(shellInfo.path, shellInfo.args || [], {
       name: 'xterm-color',

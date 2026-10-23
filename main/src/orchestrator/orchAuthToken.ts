@@ -18,9 +18,13 @@
  *
  * INVARIANTS
  * ----------
- *  - **Memory only.** Tokens live in this process's heap for the app's lifetime
- *    and are never written to disk, never logged, and never sent to the
- *    renderer. Every transport that carries one (`claudeCodeManager`'s in-memory
+ *  - **Memory only on this machine.** Tokens live in this process's heap for the
+ *    app's lifetime and are never written to disk locally, never logged, and
+ *    never sent to the renderer. The one exception is a REMOTE run: the token
+ *    must not ride an ssh argv, so it is written (over ssh stdin) to a 0600
+ *    per-run file on the remote and the agent gets `CYBOFLOW_ORCH_TOKEN_FILE`;
+ *    clients read it via `readOrchToken`. Local spawns keep passing the env
+ *    var. Every transport that carries one (`claudeCodeManager`'s in-memory
  *    MCP entry, `interactiveClaudeManager`'s PTY env, the Codex app-server
  *    config, OMP's bare-name env indirection) is in-memory by construction —
  *    deliberately NOT the on-disk `.mcp.json` / `interactive-mcp.json` /
@@ -42,9 +46,19 @@
  * own. It is not a defense against an attacker who already controls this user.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { readFileSync } from 'fs';
 
 /** Env var carrying a spawned process's bearer token for its run. */
 export const ORCH_TOKEN_ENV_VAR = 'CYBOFLOW_ORCH_TOKEN';
+
+/**
+ * Env var naming a file that holds the token (remote runs only). Used by
+ * `readOrchToken` when `CYBOFLOW_ORCH_TOKEN` itself is unset.
+ */
+export const ORCH_TOKEN_FILE_ENV_VAR = 'CYBOFLOW_ORCH_TOKEN_FILE';
+
+/** A token is 64 hex chars; anything past this is not a token file. */
+const MAX_TOKEN_FILE_BYTES = 4096;
 
 /**
  * Emergency rollback: set to '1' to restore the legacy accept-all binding.
@@ -152,7 +166,17 @@ export function orchTokenEnv(runId: string): Record<string, string> {
 /** Read this process's own bearer token (client side). */
 export function readOrchToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const token = env[ORCH_TOKEN_ENV_VAR];
-  return typeof token === 'string' && token.length > 0 ? token : undefined;
+  if (typeof token === 'string' && token.length > 0) return token;
+  const file = env[ORCH_TOKEN_FILE_ENV_VAR];
+  if (typeof file !== 'string' || file.length === 0) return undefined;
+  try {
+    const raw = readFileSync(file);
+    if (raw.length > MAX_TOKEN_FILE_BYTES) return undefined;
+    const trimmed = raw.toString('utf8').trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Whether the emergency accept-all rollback is engaged. */

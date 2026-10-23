@@ -21,6 +21,7 @@ export const INHERITED_RUN_ENV_KEYS: readonly string[] = [
   // A hosting instance's bearer token is not only stale here, it is a live
   // credential for ANOTHER app instance's run — strip it hardest of all.
   'CYBOFLOW_ORCH_TOKEN',
+  'CYBOFLOW_ORCH_TOKEN_FILE',
   'CYBOFLOW_RUN_ARTIFACTS_DIR',
   'CYBOFLOW_SUBSTRATE',
   'CYBOFLOW_EXECUTION_MODEL',

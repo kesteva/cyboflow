@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as net from 'net';
+import { readOrchToken } from '../orchAuthToken';
 import { ASSISTANT_REFERENCE } from '../agentThread/assistantReference';
 import { startParentWatchdog, resolveWatchdogIntervalMs } from './parentWatchdog';
 import { declarationsForScope, findTool, type McpToolScope } from './toolRegistry';
@@ -23,7 +24,7 @@ const socketPath = process.env.CYBOFLOW_ORCH_SOCKET;
  * and a hard exit here would take down a session over a value the server may
  * not even be enforcing (see CYBOFLOW_DISABLE_ORCH_SOCK_AUTH).
  */
-const orchToken = process.env.CYBOFLOW_ORCH_TOKEN;
+const orchToken = readOrchToken();
 
 if (!runId || !socketPath) {
   process.stderr.write(

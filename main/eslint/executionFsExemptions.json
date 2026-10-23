@@ -18,6 +18,7 @@
   "src/orchestrator/mcpServer/orchSocketServer.ts",
   "src/orchestrator/omp/fleetRegistryReader.ts",
   "src/orchestrator/omp/ompBridgeConfig.ts",
+  "src/orchestrator/orchAuthToken.ts",
   "src/orchestrator/permissionRules.ts",
   "src/orchestrator/programmatic/defaultProgrammaticRunner.ts",
   "src/orchestrator/programmatic/environmentActions.ts",

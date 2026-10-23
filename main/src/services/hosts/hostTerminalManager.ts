@@ -86,6 +86,7 @@ export class HostTerminalManager {
     delete env.CYBOFLOW_RUN_ID;
     delete env.CYBOFLOW_ORCH_SOCKET;
     delete env.CYBOFLOW_ORCH_TOKEN;
+    delete env.CYBOFLOW_ORCH_TOKEN_FILE;
     delete env.CYBOFLOW_RUN_ARTIFACTS_DIR;
 
     const ptyProcess = this.spawn(

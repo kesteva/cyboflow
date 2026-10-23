@@ -78,6 +78,7 @@ describe('HostTerminalManager.open', () => {
     process.env.CYBOFLOW_RUN_ID = 'r';
     process.env.CYBOFLOW_ORCH_SOCKET = 's';
     process.env.CYBOFLOW_ORCH_TOKEN = 'cbt_secret';
+    process.env.CYBOFLOW_ORCH_TOKEN_FILE = '/tmp/tokfile';
     process.env.CYBOFLOW_RUN_ARTIFACTS_DIR = '/a';
     try {
       const { mgr, spawns } = harness();
@@ -86,6 +87,7 @@ describe('HostTerminalManager.open', () => {
       expect(env.CYBOFLOW_RUN_ID).toBeUndefined();
       expect(env.CYBOFLOW_ORCH_SOCKET).toBeUndefined();
       expect(env.CYBOFLOW_ORCH_TOKEN).toBeUndefined();
+      expect(env.CYBOFLOW_ORCH_TOKEN_FILE).toBeUndefined();
       expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
       expect(env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
       expect(env.PATH).toBe('/usr/bin:/bin');
