@@ -394,6 +394,29 @@ export function createRunEffectiveAgentsResolver(getDb: () => Database.Database)
 }
 
 /**
+ * The overlay files {@link installAgentOverlay} writes, as `{ name, content }` (the file is
+ * `.claude/agents/cyboflow-<name>.md`), in the same order. Shared with the remote install
+ * (workflowBundleInstall.installWorkflowBundleVia), which places them through a BundleFs port. Throws on a
+ * resolution error (callers are fail-soft).
+ */
+export function resolveAgentOverlayFiles(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): Array<{ name: string; content: string }> {
+  // Unoverridden builtins carry their verbatim `.md` (write byte-for-byte);
+  // overrides + custom agents have no rawContent and are rendered. A pinned
+  // model alias is resolved to its bare concrete snapshot id for the
+  // subagent `model:` frontmatter (null/inherit emits no model line); a
+  // guarded model that's been pulled (Fable 5.1) falls back to Opus so the `.md`
+  // never writes a dead model.
+  return resolveRunEffectiveAgents(db, runId, logger).map((agent) => ({
+    name: agent.agentKey,
+    content: agent.rawContent ?? renderAgentMarkdown({ ...agent, model: bareModelId(agent.model, isModelUsable) }),
+  }));
+}
+
+/**
  * Materialize the project's full effective agent set into `<worktreePath>/.claude/agents/`
  * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
  * Never removes anything; never throws — a failure here must not break a spawn.
@@ -405,25 +428,16 @@ export function installAgentOverlay(
   logger?: LoggerLike,
 ): void {
   try {
-    const effective = resolveRunEffectiveAgents(db, runId, logger);
-    if (effective.length === 0) return;
+    const files = resolveAgentOverlayFiles(db, runId, logger);
+    if (files.length === 0) return;
 
     const dir = path.join(worktreePath, ...AGENTS_DIR);
     fs.mkdirSync(dir, { recursive: true });
 
     let written = 0;
-    for (const agent of effective) {
-      // Unoverridden builtins carry their verbatim `.md` (write byte-for-byte);
-      // overrides + custom agents have no rawContent and are rendered. A pinned
-      // model alias is resolved to its bare concrete snapshot id for the
-      // subagent `model:` frontmatter (null/inherit emits no model line); a
-      // guarded model that's been pulled (Fable 5.1) falls back to Opus so the `.md`
-      // never writes a dead model.
-      const content =
-        agent.rawContent ??
-        renderAgentMarkdown({ ...agent, model: bareModelId(agent.model, isModelUsable) });
-      const target = path.join(dir, `${CYBOFLOW_PREFIX}${agent.agentKey}.md`);
-      fs.writeFileSync(target, content, 'utf8');
+    for (const file of files) {
+      const target = path.join(dir, `${CYBOFLOW_PREFIX}${file.name}.md`);
+      fs.writeFileSync(target, file.content, 'utf8');
       written += 1;
     }
 

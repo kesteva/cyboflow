@@ -97,6 +97,8 @@ export function createFakeRemoteSession(opts: {
   timers?: HostProcessTimers;
   mkdirpError?: Error;
   generation?: number;
+  /** Replace the default no-op MachineFs (e.g. an in-memory one); `mkdirs` then records nothing. */
+  fs?: MachineFs;
 } = {}): FakeRemoteSession {
   const hostId = opts.hostId ?? 'host-1';
   const runId = opts.runId ?? 'run-1';
@@ -171,7 +173,7 @@ export function createFakeRemoteSession(opts: {
       spawned.push({ spec: fullSpec, child, proc, remoteKills });
       return proc;
     },
-    fs,
+    fs: opts.fs ?? fs,
     git,
     release: () => {
       releaseCalls++;

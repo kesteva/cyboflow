@@ -10,7 +10,13 @@
  *  remoteClaudeMcpServers    the EXCLUSIVE cyboflow-only MCP map (remote node/bundle/socket, token as a FILE path —
  *                            this JSON lands on the claude argv as --mcp-config, so the token itself never does);
  *  remoteClaudeRunEnv        the allowlisted env (no `process.env` spread, remote PATH, remote artifacts dir);
- *  remoteClaudeSdkOptions    pathToClaudeCodeExecutable + the `spawnClaudeCodeProcess` factory below.
+ *  remoteClaudeSdkOptions    pathToClaudeCodeExecutable + the `spawnClaudeCodeProcess` factory below;
+ *  installRemoteWorkflowBundle / removeRemoteWorkflowBundle
+ *                            the `/cyboflow-<phase>` bundle + agent overlay placed in the REMOTE worktree through
+ *                            ExecutionHost.fs (spec M2 §5 D1), serialized per worktree;
+ *  loadRemoteSpawnPermissionRules
+ *                            the remote worktree's `.claude/settings{,.local}.json` (bounded host reads) merged with
+ *                            this Mac's user settings, fail-closed (spec M2 §5 D2).
  *
  * The spawn factory (createRemoteClaudeSpawn), given the SDK's SpawnOptions:
  *  - IGNORES `command` (a LOCAL path: the SDK's resolved binary, or the packaged one) and runs the pushed remote
@@ -29,9 +35,10 @@
  * The returned HostProcess satisfies the SDK's SpawnedProcess (pid undefined).
  */
 import type { McpServerConfig, Options, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import type Database from 'better-sqlite3';
 import { redactSecrets } from '../../../../shared/types/hosts';
 import { managedTestConcurrencyEnv } from '../../../../shared/types/testConcurrency';
-import type { MergedPermissionRules } from '../../orchestrator/permissionRules';
+import { loadMergedPermissionRulesFrom, type MergedPermissionRules } from '../../orchestrator/permissionRules';
 import type { HostProcess } from '../../orchestrator/trpc/contracts/executionHost';
 import type { DatabaseLike, LoggerLike } from '../../orchestrator/types';
 import { describeWrapperExit } from './remoteLaunch';
@@ -42,6 +49,9 @@ import {
   type RemoteRuntimeSession,
 } from './remoteRuntime';
 import { getRemoteRuntime, RemoteRuntimeNotComposedError } from './remoteRuntimeBridge';
+import { hostBundleFs, type BundleFs } from '../panels/claude/bundleFs';
+import { installWorkflowBundleVia } from '../panels/claude/workflowBundleInstall';
+import type { WorkflowBundleWriter } from '../panels/claude/workflowBundleWriter';
 
 export type { RemoteRuntimeSession };
 
@@ -156,7 +166,7 @@ export async function prepareRemoteClaudeSpawn(
 /** Test seam: forget which remote artifacts dirs were created. */
 export function _resetRemoteClaudeSpawnForTesting(): void {
   artifactDirsMade.clear();
-  localityGapLogged = false;
+  bundleQueue.clear();
 }
 
 /** A spawn's remote session and whether its ClaudeSdkRun record took ownership. */
@@ -170,30 +180,136 @@ export function releaseUnadoptedLease(lease: RemoteLease): void {
   if (lease.session !== null && !lease.adopted) lease.session.release();
 }
 
-let localityGapLogged = false;
-
 /**
- * TODO(M2-D) one-shot notice: a remote session's workflow bundle, agent overlay and project permission rules live in
- * the remote worktree, which this Mac's fs cannot reach; until they go through ExecutionHost.fs they are skipped
- * (never written into a same-named LOCAL directory).
- */
-export function noteRemoteLocalityGap(hostId: string, logger?: LoggerLike): void {
-  if (localityGapLogged) return;
-  localityGapLogged = true;
-  logger?.warn('[hosts] remote Claude session: workflow bundle, agent overlay and project permission rules are not installed on environments yet (M2 phase D)', { hostId });
-}
-
-/**
- * TODO(M2-D): the frozen permission-rule snapshot a REMOTE spawn's hook runs with until its project rules are read
- * from the environment. Empty allow = every gated call goes to the ApprovalRouter (fail-closed); the remote CLI still
- * applies the environment's own settings natively.
+ * The fail-closed permission-rule snapshot: empty allow = every gated call goes to the ApprovalRouter. What
+ * loadRemoteSpawnPermissionRules returns if loading itself throws (it never should).
  */
 export function emptyPermissionRules(): MergedPermissionRules {
-  const rules: MergedPermissionRules = { allow: [], deny: [], ask: [] };
+  return freezeRules({ allow: [], deny: [], ask: [] });
+}
+
+/** Freeze a per-spawn snapshot (the manager's local loadSpawnPermissionRules does the same). */
+function freezeRules(rules: MergedPermissionRules): MergedPermissionRules {
   Object.freeze(rules.allow);
   Object.freeze(rules.deny);
   Object.freeze(rules.ask);
   return Object.freeze(rules);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Permission rules (spec M2 §5 D2)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** A settings file larger than this is not trusted to be read whole (read as a failure → fail-closed). */
+export const REMOTE_SETTINGS_MAX_BYTES = 256 * 1024;
+
+/**
+ * The frozen per-spawn permission rules for a REMOTE worktree: `<worktree>/.claude/settings.json` and
+ * `settings.local.json` read through the environment's fs (stat, then a bounded read), merged with this Mac's
+ * `~/.claude/settings.json` exactly as permissionRules.loadMergedPermissionRules does locally. A missing file has no
+ * rules; any read failure (unreachable, oversized, a directory) drops every allow rule (fail-closed,
+ * loadMergedPermissionRulesFrom). Never rejects. Read fresh per spawn, never cached (a revoked allow must apply on
+ * the next turn — same contract as the local snapshot).
+ */
+export async function loadRemoteSpawnPermissionRules(
+  session: Pick<RemoteRuntimeSession, 'hostId' | 'fs'>,
+  worktreePath: string,
+  logger?: LoggerLike,
+  homeDir?: string,
+): Promise<MergedPermissionRules> {
+  const { hostId, fs } = session;
+  const read = async (p: string): Promise<string | null> => {
+    try {
+      const st = await fs.stat({ hostId, path: p });
+      if (st === null) return null;
+      if (!st.isFile || st.size > REMOTE_SETTINGS_MAX_BYTES) throw new Error('not a readable settings file');
+      const text = await fs.readFile({ hostId, path: p }, REMOTE_SETTINGS_MAX_BYTES + 1);
+      if (text.length > REMOTE_SETTINGS_MAX_BYTES) throw new Error('settings file too large');
+      return text;
+    } catch (err) {
+      logger?.warn('[hosts] could not read a project permission settings file on the environment; allow rules off for this spawn', {
+        hostId,
+        error: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
+      });
+      throw err;
+    }
+  };
+  try {
+    return freezeRules(await loadMergedPermissionRulesFrom(worktreePath, read, homeDir));
+  } catch {
+    return emptyPermissionRules();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Workflow bundle + agent overlay (spec M2 §5 D1)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Where a remote session's bundle lives: the host port plus the remote worktree (kept for teardown). */
+export interface RemoteBundleTarget {
+  readonly hostId: string;
+  readonly port: BundleFs;
+  readonly worktreePath: string;
+}
+
+/**
+ * The bundle target for a remote spawn. The port wraps the session's MachineFs, which is the ExecutionHost's own fs
+ * (it outlives the session's orch-link lease), so teardown after release() still reaches the environment.
+ */
+export function remoteBundleTarget(session: Pick<RemoteRuntimeSession, 'hostId' | 'fs'>, worktreePath: string): RemoteBundleTarget {
+  return { hostId: session.hostId, port: hostBundleFs(session.fs, session.hostId), worktreePath };
+}
+
+/**
+ * Per remote worktree (`<hostId>\0<path>`), the tail of the install/remove chain. Locally an install and a
+ * teardown are synchronous, so they can never interleave; over ssh both are many round trips, and a teardown that is
+ * fire-and-forget could otherwise land in the middle of (or after) the next spawn's install and strip the fresh
+ * bundle. Chaining keeps them in call order.
+ */
+const bundleQueue = new Map<string, Promise<void>>();
+
+function enqueueBundleOp(target: RemoteBundleTarget, op: () => Promise<void>): Promise<void> {
+  const key = `${target.hostId}\0${target.worktreePath}`;
+  const next = (bundleQueue.get(key) ?? Promise.resolve()).then(op).catch(() => undefined);
+  bundleQueue.set(key, next);
+  void next.then(() => {
+    if (bundleQueue.get(key) === next) bundleQueue.delete(key);
+  });
+  return next;
+}
+
+/**
+ * Install the run's workflow bundle + agent overlay into the REMOTE worktree (workflowBundleInstall
+ * .installWorkflowBundleVia, 'prose' dispatch: the SDK path renders no stage scripts). Resolves once the files are
+ * placed (the caller awaits it before query(), so the remote CLI discovers them at start). Never rejects.
+ */
+export function installRemoteWorkflowBundle(
+  db: Database.Database,
+  writer: WorkflowBundleWriter,
+  runId: string,
+  target: RemoteBundleTarget,
+  logger?: LoggerLike,
+): Promise<void> {
+  return enqueueBundleOp(target, () =>
+    installWorkflowBundleVia(target.port, db, writer, runId, target.worktreePath, logger, 'prose'));
+}
+
+/** Strip the cyboflow-* bundle files from the REMOTE worktree (user files untouched). Never rejects. */
+export function removeRemoteWorkflowBundle(
+  writer: WorkflowBundleWriter,
+  target: RemoteBundleTarget,
+  logger?: LoggerLike,
+): Promise<void> {
+  return enqueueBundleOp(target, async () => {
+    try {
+      await writer.removeVia(target.port, target.worktreePath);
+    } catch (err) {
+      logger?.warn('[hosts] could not remove the workflow bundle on the environment', {
+        hostId: target.hostId,
+        error: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
+      });
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------------------------------------------

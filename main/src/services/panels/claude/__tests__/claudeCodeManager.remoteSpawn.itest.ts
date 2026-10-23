@@ -7,12 +7,17 @@
  *  - a warm follow-up turn pushes into the live process and gives back the lease it prepared, while the live
  *    process keeps its own until it closes;
  *  - an environment outage fails the spawn with `host-unreachable:` and never reaches query();
- *  - a This Mac session is unchanged: no spawner, the local node + bundle, the token in the MCP env.
+ *  - a This Mac session is unchanged: no spawner, the local node + bundle, the token in the MCP env;
+ *  - M2 Phase D: the workflow bundle + agent overlay land in the REMOTE worktree through the environment's fs BEFORE
+ *    query() runs, and the teardown strips them there (user files untouched).
  * The remote runtime is a fake on the real bridge (no ssh).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import type Database from 'better-sqlite3';
+import type { WorkflowBundle } from '../../../../orchestrator/workflows/workflowBundle';
+import { createFakeMachineFs, cyboflowFilesUnder } from '../../../hosts/__tests__/fakeMachineFs';
+import { _resetRemoteClaudeSpawnForTesting } from '../../../hosts/remoteClaudeSpawn';
 import {
   createModuleFakeSdk,
   scenario,
@@ -36,10 +41,22 @@ import {
 } from '../../../hosts/__tests__/fakeRemoteRuntimeSession';
 
 const fakeSdk = createModuleFakeSdk();
+const hooks = vi.hoisted(() => ({
+  onQuery: null as (() => void) | null,
+  bundle: null as WorkflowBundle | null,
+}));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: (params: FakeQueryParams) => fakeSdk.query(params),
+  query: (params: FakeQueryParams) => {
+    hooks.onQuery?.();
+    return fakeSdk.query(params);
+  },
 }));
+// A fixed flow bundle for the Phase D case only (null = the real resolver: these sessions have no run row → empty).
+vi.mock('../../../../orchestrator/workflows/workflowBundle', async (orig) => {
+  const actual = await orig<typeof import('../../../../orchestrator/workflows/workflowBundle')>();
+  return { ...actual, resolveWorkflowBundle: (p: string | null) => hooks.bundle ?? actual.resolveWorkflowBundle(p) };
+});
 vi.mock('../../../../orchestrator/mcpServer/scriptPath', () => ({
   resolveMcpServerScriptPath: vi.fn(() => '/mock/mcp-server.js'),
 }));
@@ -73,14 +90,14 @@ interface FakeRuntime extends RemoteRuntimeLike {
   prepare: ReturnType<typeof vi.fn<RemoteRuntimeLike['prepare']>>;
 }
 
-function fakeRuntime(failWith?: Error): FakeRuntime {
+function fakeRuntime(failWith?: Error, fsOverride?: ReturnType<typeof createFakeMachineFs>): FakeRuntime {
   const sessions: FakeRemoteSession[] = [];
   return {
     sessions,
     resolveHostId: vi.fn(() => null),
     prepare: vi.fn<RemoteRuntimeLike['prepare']>(async (_hostId, opts) => {
       if (failWith) throw failWith;
-      const s = createFakeRemoteSession({ runId: opts.runId, spawnKey: opts.spawnKey });
+      const s = createFakeRemoteSession({ runId: opts.runId, spawnKey: opts.spawnKey, fs: fsOverride });
       sessions.push(s);
       return s;
     }),
@@ -103,6 +120,9 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
 
   afterEach(() => {
     setRemoteRuntime(null);
+    hooks.onQuery = null;
+    hooks.bundle = null;
+    _resetRemoteClaudeSpawnForTesting();
     ApprovalRouter._resetForTesting();
     QuestionRouter._resetForTesting();
     delete process.env.CYBOFLOW_DISABLE_WARM_SDK;
@@ -221,6 +241,39 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
 
     await expect(mgr.spawnClaudeCode('panel-x', 'session-x', REMOTE_WT, 'hello')).rejects.toThrow(/Remote environments are not available/);
     expect(fakeSdk.calls).toHaveLength(0);
+  });
+
+  it('installs the workflow bundle on the environment before query() and strips it at teardown', async () => {
+    process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
+    fakeSdk.setScenario(scenario().systemInit({ sessionId: SDK_SESSION }).assistantText('ok').resultSuccess());
+    hooks.bundle = {
+      commands: [{ name: 'plan', content: '# plan' }],
+      agents: [{ name: 'implement', content: '# implement' }],
+      scripts: [],
+    };
+    const remoteFs = createFakeMachineFs({ [`${REMOTE_WT}/.claude/commands/mine.md`]: 'user command' });
+    let atQuery: Record<string, string> | null = null;
+    hooks.onQuery = () => {
+      atQuery = cyboflowFilesUnder(remoteFs, REMOTE_WT);
+    };
+    setRemoteRuntime(fakeRuntime(undefined, remoteFs));
+    const mgr = new ClaudeCodeManager(makeSessionManager('host-1'), undefined, undefined, db);
+    mgr.setOrchSocketPath('/tmp/remote-itest.sock');
+
+    await mgr.spawnClaudeCode('panel-bundle', 'session-bundle', REMOTE_WT, 'hello');
+
+    expect(atQuery).toEqual({
+      '.claude/commands/cyboflow-plan.md': '# plan',
+      '.claude/agents/cyboflow-implement.md': '# implement',
+    });
+    expect([...remoteFs.hostIds]).toEqual(['host-1']);
+    // The project permission files were read on the environment, not on this Mac.
+    expect(remoteFs.ops).toContain(`stat:${REMOTE_WT}/.claude/settings.json`);
+    // Single-shot: the process ended, so the (queued) teardown strips the bundle on the environment.
+    for (let i = 0; i < 6; i++) await flush();
+    expect(cyboflowFilesUnder(remoteFs, REMOTE_WT)).toEqual({});
+    expect(remoteFs.files.get(`${REMOTE_WT}/.claude/commands/mine.md`)?.data).toBe('user command');
+    expect(fs.existsSync(REMOTE_WT)).toBe(false);
   });
 
   it('leaves a This Mac session unchanged (no spawner, local MCP entry, token in env)', async () => {

@@ -322,17 +322,36 @@ interface SettingsFileShape {
   };
 }
 
-function readRuleArray(filePath: string, key: 'allow' | 'deny' | 'ask'): string[] {
+type RuleKey = 'allow' | 'deny' | 'ask';
+
+/**
+ * The `permissions.<key>` strings of one settings file's TEXT. null (missing / unreadable) or malformed JSON → no
+ * rules. Pure — the fs readers below and the remote reader (loadMergedPermissionRulesFrom) both feed it.
+ */
+export function ruleArrayFromSettingsText(raw: string | null, key: RuleKey): string[] {
+  if (raw === null) return [];
   try {
-    const raw = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw) as SettingsFileShape;
     const arr = parsed.permissions?.[key];
     if (!Array.isArray(arr)) return [];
     return arr.filter((x): x is string => typeof x === 'string');
   } catch {
-    // Missing / unreadable / malformed settings file → no rules from it.
     return [];
   }
+}
+
+/** A settings file's text, or null when it is missing / unreadable. */
+function readSettingsText(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function readRuleArray(filePath: string, key: RuleKey): string[] {
+  // Missing / unreadable / malformed settings file → no rules from it.
+  return ruleArrayFromSettingsText(readSettingsText(filePath), key);
 }
 
 /**
@@ -374,6 +393,12 @@ export function projectSettingsContainAllowRules(projectDir: string): boolean {
   return projectFiles.some((file) => readRuleArray(file, 'allow').length > 0);
 }
 
+/** The two project settings files, relative to the project dir, in merge order. */
+const PROJECT_SETTINGS_FILES: ReadonlyArray<readonly [string, string]> = [
+  ['.claude', 'settings.json'],
+  ['.claude', 'settings.local.json'],
+];
+
 /**
  * Load and merge `permissions.allow` / `permissions.deny` / `permissions.ask`
  * from the user (`~/.claude/settings.json`) and project
@@ -397,11 +422,17 @@ export function loadMergedPermissionRules(
   projectDir: string,
   homeDir: string = os.homedir(),
 ): MergedPermissionRules {
-  const userFile = path.join(homeDir, '.claude', 'settings.json');
-  const projectFiles = [
-    path.join(projectDir, '.claude', 'settings.json'),
-    path.join(projectDir, '.claude', 'settings.local.json'),
-  ];
+  const trustProject = resolveProjectTrust(projectDir);
+  const userText = readSettingsText(path.join(homeDir, '.claude', 'settings.json'));
+  const projectTexts = PROJECT_SETTINGS_FILES.map((rel) => readSettingsText(path.join(projectDir, ...rel)));
+  return mergePermissionRuleSources({ userText, projectTexts, trustProject });
+}
+
+/**
+ * Whether a project's repo-supplied ALLOW rules are honored: the global env override, else the injected per-project
+ * resolver (fail-closed on throw).
+ */
+function resolveProjectTrust(projectDir: string): boolean {
   let resolvedTrust = false;
   try {
     resolvedTrust = projectTrustResolver(projectDir);
@@ -409,22 +440,71 @@ export function loadMergedPermissionRules(
     // Fail-closed: a throwing resolver must never be read as "trusted".
     resolvedTrust = false;
   }
-  const trustProject = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES === '1' || resolvedTrust;
+  return process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES === '1' || resolvedTrust;
+}
 
+/** What {@link mergePermissionRuleSources} merges: each file's TEXT (null = missing / unreadable). */
+export interface PermissionRuleSources {
+  /** `~/.claude/settings.json` (always this Mac's: the user's own grants). */
+  userText: string | null;
+  /** `.claude/settings.json` then `.claude/settings.local.json` under the project dir. */
+  projectTexts: ReadonlyArray<string | null>;
+  /** Honor the project files' allow rules (see the module header's trust model). */
+  trustProject: boolean;
+}
+
+/**
+ * The pure merge behind {@link loadMergedPermissionRules}: user allow/deny/ask always; project deny/ask always and
+ * project allow only when trusted; each list de-duplicated in first-seen order (user first, then the project files
+ * in order).
+ */
+export function mergePermissionRuleSources(sources: PermissionRuleSources): MergedPermissionRules {
   const allow = new Set<string>();
   const deny = new Set<string>();
   const ask = new Set<string>();
 
-  for (const r of readRuleArray(userFile, 'allow')) allow.add(r);
-  for (const r of readRuleArray(userFile, 'deny')) deny.add(r);
-  for (const r of readRuleArray(userFile, 'ask')) ask.add(r);
-  for (const file of projectFiles) {
-    if (trustProject) {
-      for (const r of readRuleArray(file, 'allow')) allow.add(r);
+  for (const r of ruleArrayFromSettingsText(sources.userText, 'allow')) allow.add(r);
+  for (const r of ruleArrayFromSettingsText(sources.userText, 'deny')) deny.add(r);
+  for (const r of ruleArrayFromSettingsText(sources.userText, 'ask')) ask.add(r);
+  for (const text of sources.projectTexts) {
+    if (sources.trustProject) {
+      for (const r of ruleArrayFromSettingsText(text, 'allow')) allow.add(r);
     }
-    for (const r of readRuleArray(file, 'deny')) deny.add(r);
-    for (const r of readRuleArray(file, 'ask')) ask.add(r);
+    for (const r of ruleArrayFromSettingsText(text, 'deny')) deny.add(r);
+    for (const r of ruleArrayFromSettingsText(text, 'ask')) ask.add(r);
   }
 
   return { allow: [...allow], deny: [...deny], ask: [...ask] };
+}
+
+/**
+ * {@link loadMergedPermissionRules} for a project dir this Mac cannot read directly — an SSH environment's
+ * worktree (spec M2 §5 D2). The project files are read through `readProjectFile` (an absolute POSIX path in; the
+ * file's text, or null when it does not exist; a REJECTION for any other failure: unreachable host, too large, not
+ * readable). The user file stays this Mac's `~/.claude/settings.json`: those rules are this user's, wherever the
+ * session runs. Trust resolves exactly as locally (the resolver is keyed by the session's stored worktree path).
+ *
+ * Fail-closed: when a project file cannot be read, its rules are unknown — a deny or ask in it may be exactly what
+ * should stop an auto-allow — so the result keeps every rule it could read but drops ALL allow rules (every gated
+ * call then goes to the ApprovalRouter). Never rejects.
+ */
+export async function loadMergedPermissionRulesFrom(
+  projectDir: string,
+  readProjectFile: (absPosixPath: string) => Promise<string | null>,
+  homeDir: string = os.homedir(),
+): Promise<MergedPermissionRules> {
+  const trustProject = resolveProjectTrust(projectDir);
+  const userText = readSettingsText(path.join(homeDir, '.claude', 'settings.json'));
+  let unreadable = false;
+  const projectTexts: Array<string | null> = [];
+  for (const rel of PROJECT_SETTINGS_FILES) {
+    try {
+      projectTexts.push(await readProjectFile(path.posix.join(projectDir, ...rel)));
+    } catch {
+      unreadable = true;
+      projectTexts.push(null);
+    }
+  }
+  const merged = mergePermissionRuleSources({ userText, projectTexts, trustProject });
+  return unreadable ? { ...merged, allow: [] } : merged;
 }

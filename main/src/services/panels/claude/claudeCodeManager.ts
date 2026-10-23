@@ -72,7 +72,7 @@ import { isPermissionMode, type PermissionMode } from '../../../../../shared/typ
 import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 import { firstChangedFingerprintField, foldOptionsFingerprint, type OptionsFingerprint } from './claudeOptionsFingerprint';
-import { emptyPermissionRules, noteRemoteLocalityGap, prepareRemoteClaudeSpawn, releaseUnadoptedLease, remoteClaudeMcpServers, remoteClaudeRunEnv, remoteClaudeSdkOptions, resolveClaudeSpawnHostId, type RemoteLease, type RemoteRuntimeSession } from '../../hosts/remoteClaudeSpawn';
+import { installRemoteWorkflowBundle, loadRemoteSpawnPermissionRules, prepareRemoteClaudeSpawn, releaseUnadoptedLease, remoteBundleTarget, remoteClaudeMcpServers, remoteClaudeRunEnv, remoteClaudeSdkOptions, removeRemoteWorkflowBundle, resolveClaudeSpawnHostId, type RemoteBundleTarget, type RemoteLease, type RemoteRuntimeSession } from '../../hosts/remoteClaudeSpawn';
 
 /**
  * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
@@ -1193,6 +1193,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * written).
    */
   private readonly bundleWorktrees = new Map<string, string>();
+  /** M2: a REMOTE session's bundle target (host port + remote worktree), so teardown strips it on the environment. */
+  private readonly remoteBundleTargets = new Map<string, RemoteBundleTarget>();
 
   /**
    * Per-sessionId refcount of live spawns that provisioned the cyboflow-* command
@@ -1325,7 +1327,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       return;
     }
     this.bundleRefcountBySession.delete(sessionId);
-    this.bundleWriter.remove(worktreePath);
+    const remoteTarget = this.remoteBundleTargets.get(sessionId);
+    this.remoteBundleTargets.delete(sessionId);
+    // M2: a remote bundle is stripped through the environment's fs (queued behind any in-flight install; never rejects).
+    if (remoteTarget !== undefined) void removeRemoteWorkflowBundle(this.bundleWriter, remoteTarget, makeLoggerLike(this.logger));
+    else this.bundleWriter.remove(worktreePath);
     this.bundleWorktrees.delete(sessionId);
   }
 
@@ -1472,7 +1478,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // M2: null host = This Mac (unchanged); a remote host prepares (gates, orch link, token file) or fails readably.
       const hostId = resolveClaudeSpawnHostId(this.db, { hostId: options.hostId, sessionHostId: sessionRow?.host_id, runId, sessionId }, makeLoggerLike(this.logger));
       const remote = (remoteLease.session = hostId === null ? null : await prepareRemoteClaudeSpawn(hostId, { runId, spawnKey }, makeLoggerLike(this.logger)));
-      const permissionRules = remote === null ? this.loadSpawnPermissionRules(options.worktreePath) : emptyPermissionRules();
+      const permissionRules = remote === null ? this.loadSpawnPermissionRules(options.worktreePath) : await loadRemoteSpawnPermissionRules(remote, options.worktreePath, makeLoggerLike(this.logger));
       const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules, remote);
       const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId, permissionRules, hostId);
 
@@ -1540,8 +1546,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // The refcount is bumped ONCE per COLD spawn (the warm process's whole
       // lifetime), decremented once at process-death by removeBundleForSession — a
       // warm turn re-writes the bundle (driveWarmTurn) but does NOT re-bump.
-      if (remote !== null) noteRemoteLocalityGap(remote.hostId, makeLoggerLike(this.logger)); // TODO(M2-D): via ExecutionHost.fs
-      else if (!dbSession?.in_place) {
+      if (remote !== null && !dbSession?.in_place) {
+        // M2: the same bundle + overlay, placed in the REMOTE worktree through the environment's fs and awaited so the
+        // remote CLI discovers them at start (no local git exclude: remoteCheckout seeded the bare repo's).
+        const target = remoteBundleTarget(remote, options.worktreePath);
+        await installRemoteWorkflowBundle(this.db, this.bundleWriter, runId, target, makeLoggerLike(this.logger));
+        this.remoteBundleTargets.set(sessionId, target);
+        this.bundleWorktrees.set(sessionId, options.worktreePath);
+        this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+      } else if (remote === null && !dbSession?.in_place) {
         // 'prose' EXPLICITLY: this install seam is substrate-shared, but the SDK
         // path composes its prompt through workflowPromptReaderAdapter (which
         // never emits the workflow-dispatch chain), so stage scripts written
@@ -1591,7 +1604,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // waits for the last lane (cleanupPipeline decrements / detaches on 1→0).
       const priorRefcount = this.trackerRefcountByRunId.get(runId) ?? 0;
       this.trackerRefcountByRunId.set(runId, priorRefcount + 1);
-      if (priorRefcount === 0 && remote === null) { // TODO(M2-D): a remote CLI's transcripts are on the environment
+      // Remote: no attach — the tracker reads the CLI's transcripts under THIS Mac's ~/.claude/projects, but a remote
+      // CLI writes them on the environment (and the SDK prose dispatch renders no stage scripts to watch).
+      if (priorRefcount === 0 && remote === null) {
         // worktreePath explicitly (see the interactive sibling): a flow run has no
         // `sessions` row, so the tracker's sessions-keyed fallback resolves nothing.
         DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, {
