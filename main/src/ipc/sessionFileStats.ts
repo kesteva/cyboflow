@@ -32,6 +32,7 @@
  */
 import { resolveGitRefToSha, type GitDiffManager } from '../services/gitDiffManager';
 import type { Logger } from '../utils/logger';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 
 /** The `files` block of the sessions:get-statistics payload, minus executionCount. */
 export interface SessionFileStats {
@@ -95,9 +96,14 @@ export async function computeSessionFileStats(params: {
   resolveFallbackRef?: () => Promise<string | null | undefined>;
   gitDiffManager: DiffStatsSource;
   logger?: Logger;
+  /**
+   * The session's environment (sessions.host_id, M2). A remote session's worktree is not on this Mac, so there is
+   * no git-derived answer: null, without spawning git (this runs on the stats poll).
+   */
+  hostId?: string | null;
 }): Promise<SessionFileStats | null> {
   const { worktreePath, baseRef, baseCommit, resolveFallbackRef, gitDiffManager, logger } = params;
-  if (!worktreePath) return null;
+  if (!worktreePath || isRemoteHostId(params.hostId)) return null;
 
   try {
     const resolvedBaseRef =

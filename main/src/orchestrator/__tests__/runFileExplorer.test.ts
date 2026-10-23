@@ -409,3 +409,23 @@ describe('runFileExplorer (session-keyed)', () => {
     });
   });
 });
+
+describe('runFileExplorer (remote session, M2)', () => {
+  it('refuses list and read for a session on a remote environment with a readable reason', async () => {
+    const db = createTestDb();
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, worktree_path TEXT NOT NULL, host_id TEXT)');
+    // A path that exists locally proves the refusal is by host, not by a missing directory.
+    const local = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-fe-remote-'));
+    try {
+      db.prepare('INSERT INTO sessions (id, worktree_path, host_id) VALUES (?, ?, ?)').run('r1', local, 'host-a');
+      db.prepare('INSERT INTO sessions (id, worktree_path, host_id) VALUES (?, ?, ?)').run('l1', local, 'local');
+      const expected = { reason: 'no-worktree', message: 'The file explorer is not available on remote environments.' };
+      await expect(listSessionFiles(dbAdapter(db), 'r1')).rejects.toMatchObject(expected);
+      await expect(readSessionFile(dbAdapter(db), 'r1', 'a.txt')).rejects.toMatchObject(expected);
+      // The literal 'local' stays This Mac.
+      expect(resolveSessionWorktreePath(dbAdapter(db), 'l1')).toBe(local);
+    } finally {
+      fs.rmSync(local, { recursive: true, force: true });
+    }
+  });
+});

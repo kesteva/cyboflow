@@ -19,6 +19,7 @@ import { Code2 } from 'lucide-react';
 import { API } from '../../utils/api';
 import { useLandingStore } from '../../stores/landingStore';
 import { useErrorStore } from '../../stores/errorStore';
+import { useIsRemoteSession } from '../../hooks/useIsRemoteSession';
 
 const ERROR_TITLE = 'Failed to open IDE';
 
@@ -34,8 +35,10 @@ export function OpenInIdeButton({ sessionId, projectId }: OpenInIdeButtonProps):
     projectId === null ? null : (s.projects.find((p) => p.id === projectId)?.open_ide_command ?? null),
   );
   const [opening, setOpening] = useState(false);
+  // M2: the IDE command runs on this Mac — a session on a remote environment has no worktree here.
+  const remote = useIsRemoteSession(sessionId);
 
-  if (sessionId === null || !ideCommand || ideCommand.trim() === '') return null;
+  if (sessionId === null || remote || !ideCommand || ideCommand.trim() === '') return null;
 
   const handleClick = async (): Promise<void> => {
     setOpening(true);

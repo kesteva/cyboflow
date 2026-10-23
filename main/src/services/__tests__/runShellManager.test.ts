@@ -402,3 +402,39 @@ describe('RunShellManager.listOwnedShells', () => {
     expect(mgr.listOwnedShells().map((s) => s.runId)).toEqual(['run-2']);
   });
 });
+
+describe('RunShellManager — remote runs (M2)', () => {
+  it('refuses a run on a remote environment without spawning a local shell', () => {
+    const spawn = vi.fn(() => makeFakePty()) as unknown as ShellSpawner;
+    const mgr = new RunShellManager(() => '/home/me/cf-remote/h/wt', () => {}, spawn, () => 'host-a');
+    expect(mgr.open('run-1')).toEqual({ ok: false, reason: 'remote' });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(mgr.isOpen('run-1')).toBe(false);
+  });
+
+  it("'local' / null hosts keep the local shell", () => {
+    const spawn = vi.fn(() => makeFakePty()) as unknown as ShellSpawner;
+    const mgr = new RunShellManager(() => '/tmp/wt', () => {}, spawn, (runId) => (runId === 'a' ? 'local' : null));
+    expect(mgr.open('a')).toEqual({ ok: true });
+    expect(mgr.open('b')).toEqual({ ok: true });
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('the default host resolver reads the published runtime, and is This Mac without one', async () => {
+    const { setRemoteRuntime } = await import('../hosts/remoteRuntimeBridge');
+    const { defaultRunHostId } = await import('../runShellManager');
+    expect(defaultRunHostId('run-1')).toBeNull();
+    setRemoteRuntime({
+      resolveHostId: ({ runId }) => (runId === 'run-1' ? 'host-a' : null),
+      prepare: vi.fn(),
+      removeRunToken: vi.fn(),
+    });
+    try {
+      expect(defaultRunHostId('run-1')).toBe('host-a');
+      expect(defaultRunHostId('run-2')).toBeNull();
+    } finally {
+      setRemoteRuntime(null);
+    }
+  });
+});
+

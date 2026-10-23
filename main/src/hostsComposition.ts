@@ -48,6 +48,9 @@ import { LocalHost } from './services/hosts/localHost';
 import { PreflightScheduler } from './services/hosts/preflightScheduler';
 import { RemoteCheckout } from './services/hosts/remoteCheckout';
 import { getRemoteCheckout, setRemoteCheckout } from './services/hosts/remoteCheckoutBridge';
+import { getExecutionHostResolver, setExecutionHostResolver, type ExecutionHostResolver } from './services/hosts/executionHostBridge';
+import { RemoteArtifactFetcher } from './services/hosts/remoteArtifactFetcher';
+import { getRemoteArtifactFetcher, setRemoteArtifactFetcher } from './orchestrator/hosts/remoteArtifactPull';
 import { RemoteRuntime } from './services/hosts/remoteRuntime';
 import { getRemoteRuntime, setRemoteRuntime } from './services/hosts/remoteRuntimeBridge';
 import { SshTransport } from './services/hosts/sshTransport';
@@ -203,6 +206,10 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
   };
   let started = false;
 
+  // Phase D: orchestrator-side host access (lane probes, environment actions) and remote artifact pull-back.
+  const hostResolver: ExecutionHostResolver = (hostId) => registry.get(hostId);
+  const artifactFetcher = new RemoteArtifactFetcher({ logger });
+
   return {
     service,
     remoteRuntime,
@@ -214,6 +221,8 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       started = true;
       setRemoteRuntime(remoteRuntime);
       setRemoteCheckout(remoteCheckout);
+      setExecutionHostResolver(hostResolver);
+      setRemoteArtifactFetcher(artifactFetcher);
       scheduler.start();
       configManager.on('config-updated', onConfig);
     },
@@ -221,6 +230,8 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       started = false;
       if (getRemoteRuntime() === remoteRuntime) setRemoteRuntime(null);
       if (getRemoteCheckout() === remoteCheckout) setRemoteCheckout(null);
+      if (getExecutionHostResolver() === hostResolver) setExecutionHostResolver(null);
+      if (getRemoteArtifactFetcher() === artifactFetcher) setRemoteArtifactFetcher(null);
       scheduler.stop();
       configManager.off('config-updated', onConfig);
       service.shutdown();

@@ -31,6 +31,8 @@ import type { IPtyForkOptions, IWindowsPtyForkOptions } from '@homebridge/node-p
 import { ShellDetector } from '../utils/shellDetector';
 import { getShellPath } from '../utils/shellPath';
 import { stampSpawnMarker } from '../utils/spawnMarker';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { getRemoteRuntime } from './hosts/remoteRuntimeBridge';
 
 /**
  * The narrow slice of node-pty's `IPty` this manager uses. Typed structurally so
@@ -54,8 +56,24 @@ export type ShellSpawner = (
   options: IPtyForkOptions | IWindowsPtyForkOptions,
 ) => ManagedPty;
 
-/** Result of {@link RunShellManager.open}. */
-export type OpenShellResult = { ok: true } | { ok: false; reason: 'no_worktree' };
+/**
+ * Result of {@link RunShellManager.open}. `remote` (M2): the run's worktree lives on a remote environment — a local
+ * PTY cannot `cd` into it; the renderer points the user at the environment card's Open terminal instead.
+ */
+export type OpenShellResult = { ok: true } | { ok: false; reason: 'no_worktree' | 'remote' };
+
+/**
+ * Which environment a run lives on (null = This Mac), from the hosts runtime the composition publishes on
+ * remoteRuntimeBridge. No runtime (Environments off) or a lookup error reads as This Mac — exactly the pre-M2 path;
+ * a remote run then also has nothing that could have started it.
+ */
+export function defaultRunHostId(runId: string): string | null {
+  try {
+    return getRemoteRuntime()?.resolveHostId({ runId }) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 interface RunShell {
   pty: ManagedPty;
@@ -96,6 +114,8 @@ export class RunShellManager {
     private readonly emitBytes: (terminalId: string, chunk: string) => void,
     /** node-pty spawner (production: `pty.spawn`; tests: a fake). */
     private readonly spawn: ShellSpawner,
+    /** The run's environment (M2); a remote one is refused. Default {@link defaultRunHostId}. */
+    private readonly resolveHostId: (runId: string) => string | null = defaultRunHostId,
   ) {}
 
   /**
@@ -103,10 +123,12 @@ export class RunShellManager {
    * terminal that already has a live shell is a no-op success (so a terminal tab
    * can call this on every mount). `terminalId` defaults to `runId` (the run's
    * primary terminal); pass a distinct id for additional terminals. Returns
-   * `{ ok:false, reason:'no_worktree' }` if the run has no worktree to anchor in.
+   * `{ ok:false, reason:'no_worktree' }` if the run has no worktree to anchor in, and
+   * `{ ok:false, reason:'remote' }` if it lives on a remote environment (M2).
    */
   open(runId: string, terminalId: string = runId): OpenShellResult {
     if (this.shells.has(terminalId)) return { ok: true };
+    if (isRemoteHostId(this.resolveHostId(runId))) return { ok: false, reason: 'remote' };
 
     const cwd = this.resolveWorktree(runId);
     if (!cwd) return { ok: false, reason: 'no_worktree' };

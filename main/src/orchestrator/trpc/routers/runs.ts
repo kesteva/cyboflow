@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
+import { isRemoteHostId } from '../../../../../shared/types/hosts';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState, PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -2923,13 +2924,15 @@ export const runsRouter = router({
           message: 'gitDiff not wired into tRPC context',
         });
       }
+      // SELECT * so pre-152 fixtures (no host_id) still read; host_id is M2's environment stamp.
       const row = ctx.db
-        .prepare('SELECT worktree_path, base_sha FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { worktree_path: string | null; base_sha: string | null } | undefined;
+        .prepare('SELECT * FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { worktree_path: string | null; base_sha: string | null; host_id?: string | null } | undefined;
       if (!row) {
         throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
       }
-      if (!row.worktree_path) {
+      // A remote run's worktree lives on its environment: no local git to diff (the renderer shows why).
+      if (!row.worktree_path || isRemoteHostId(row.host_id)) {
         // No worktree yet (e.g. a not-yet-materialized run) — nothing to diff.
         return null;
       }

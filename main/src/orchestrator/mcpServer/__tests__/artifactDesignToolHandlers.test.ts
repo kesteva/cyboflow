@@ -15,6 +15,12 @@ import {
 } from '../handlers/artifactDesignToolHandlers';
 import type { McpQueryResponse } from '../mcpQueryMessages';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { ArtifactRouter } from '../../artifactRouter';
+import { RemoteArtifactFetchError, setRemoteArtifactFetcher } from '../../hosts/remoteArtifactPull';
+import { getCyboflowDirectory, getCyboflowSubdirectory, setCyboflowDirectory } from '../../../utils/cyboflowDirectory';
 
 function makeCtx(overrides: Partial<ArtifactDesignToolContext> = {}): {
   ctx: ArtifactDesignToolContext;
@@ -57,3 +63,72 @@ describe('ArtifactDesignToolHandlers — context seam', () => {
     ]);
   });
 });
+
+describe('ArtifactDesignToolHandlers — remote run pull-back (M2)', () => {
+  function remoteCtx() {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, host_id TEXT, session_id TEXT)');
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, host_id TEXT, design_idea_id TEXT)');
+    db.prepare('INSERT INTO workflow_runs VALUES (?, ?, ?)').run('run-r', 'host-a', null);
+    return makeCtx({
+      db: dbAdapter(db),
+      resolveReviewItemRunContext: () => ({ ok: true, projectId: 1, actor: 'agent:test' }),
+    });
+  }
+
+  it('pulls the prototype from the environment BEFORE validating it, then reports it', async () => {
+    const previous = getCyboflowDirectory();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-art-pull-'));
+    setCyboflowDirectory(tmp);
+    const apply = vi.fn(async () => ({ artifactId: 'art-1' }));
+    const router = vi.spyOn(ArtifactRouter, 'getInstance').mockReturnValue({ apply } as unknown as ArtifactRouter);
+    setRemoteArtifactFetcher({
+      fetch: async (req) => {
+        expect(req).toMatchObject({ hostId: 'host-a', runKey: 'run-r', relPaths: ['prototype/index.html'] });
+        fs.mkdirSync(path.join(req.localDir, 'prototype'), { recursive: true });
+        fs.writeFileSync(path.join(req.localDir, 'prototype', 'index.html'), '<!doctype html><p>remote</p>');
+      },
+    });
+    try {
+      const { ctx, writes } = remoteCtx();
+      await new ArtifactDesignToolHandlers(ctx).handleReportArtifact(
+        { type: 'mcp-report-artifact', requestId: 'r1', runId: 'run-r', atype: 'ui-prototype', label: 'Proto' },
+        client,
+      );
+      expect(writes).toEqual([
+        { type: 'mcp-query-response', requestId: 'r1', ok: true, data: { artifactId: 'art-1', atype: 'ui-prototype' } },
+      ]);
+      expect(fs.existsSync(path.join(getCyboflowSubdirectory('artifacts', 'runs', 'run-r'), 'prototype', 'index.html'))).toBe(true);
+    } finally {
+      setRemoteArtifactFetcher(null);
+      router.mockRestore();
+      setCyboflowDirectory(previous);
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('a file missing on the environment fails the report readably and writes nothing', async () => {
+    const apply = vi.fn();
+    const router = vi.spyOn(ArtifactRouter, 'getInstance').mockReturnValue({ apply } as unknown as ArtifactRouter);
+    setRemoteArtifactFetcher({
+      fetch: async () => {
+        throw new RemoteArtifactFetchError("prototype/index.html was not found in this run's artifacts folder on the environment");
+      },
+    });
+    try {
+      const { ctx, writes } = remoteCtx();
+      await new ArtifactDesignToolHandlers(ctx).handleReportArtifact(
+        { type: 'mcp-report-artifact', requestId: 'r2', runId: 'run-r', atype: 'ui-prototype', label: 'Proto' },
+        client,
+      );
+      expect(writes.map((w) => w.error)).toEqual([
+        "invalid_payload: remote_artifact_unavailable: prototype/index.html was not found in this run's artifacts folder on the environment",
+      ]);
+      expect(apply).not.toHaveBeenCalled();
+    } finally {
+      setRemoteArtifactFetcher(null);
+      router.mockRestore();
+    }
+  });
+});
+

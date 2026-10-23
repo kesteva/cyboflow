@@ -3,6 +3,7 @@ import { watch, FSWatcher, readdirSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import { fastCheckWorkingDirectory } from './gitPlumbingCommands';
 import type { Logger } from '../utils/logger';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 import { LANE_BUILD_SLOTS_DIR } from '../orchestrator/programmatic/laneBuildSlots';
 
 interface WatchedSession {
@@ -80,9 +81,14 @@ export class GitFileWatcher extends EventEmitter {
   }
 
   /**
-   * Start watching a session's worktree for changes
+   * Start watching a session's worktree for changes. A session on a remote environment (`hostId`, M2) is never
+   * watched: its worktree path is on another machine, so this is a no-op (any earlier watch is still stopped).
    */
-  startWatching(sessionId: string, worktreePath: string): void {
+  startWatching(sessionId: string, worktreePath: string, hostId?: string | null): void {
+    if (isRemoteHostId(hostId)) {
+      this.stopWatching(sessionId);
+      return;
+    }
     // Stop existing watcher if any
     this.stopWatching(sessionId);
 

@@ -37,6 +37,7 @@ import {
 } from '../services/createQuickSessionCore';
 import { peekHostsFacade } from '../orchestrator/hostsBridge';
 import { isRemoteHostId } from '../../../shared/types/hosts';
+import { remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
 import { getRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
 import { isOrchSockAuthDisabled } from '../orchestrator/orchAuthToken';
 import { isPermissionMode } from '../../../shared/types/workflows';
@@ -3155,9 +3156,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    */
   const assertAttachmentOwner = async (ownerId: string): Promise<void> => {
     if (isPendingAttachmentOwner(ownerId)) return;
-    if (await sessionManager.getSession(ownerId)) return;
-    if (cyboflow.workflowRegistry.getRunById(ownerId)) return;
-    throw new Error('Attachment owner not found');
+    const session = await sessionManager.getSession(ownerId);
+    const run = session ? null : cyboflow.workflowRegistry.getRunById(ownerId);
+    if (!session && !run) throw new Error('Attachment owner not found');
+    // M2: the saved files live on this Mac, where an agent on a remote environment cannot read them.
+    if (isRemoteHostId(session ? session.hostId : run?.host_id)) throw new Error(remoteUnavailableError('Attaching files'));
   };
 
   ipcMain.handle('sessions:save-images', async (_event, ownerId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => {

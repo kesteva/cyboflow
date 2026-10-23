@@ -1732,3 +1732,43 @@ describe('RunDiffTabPanel / SessionDiffTabPanel — comparisonRef refetch + grou
     expect(header).toHaveTextContent('1 file');
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2: a session on a remote environment has no worktree on this Mac — the File
+// Explorer and Diff tabs show the shared empty state, and no worktree watcher is
+// subscribed for it.
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — remote-environment session (M2)', () => {
+  let subscribeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    subscribeMock = vi.fn().mockReturnValue({ unsubscribe: vi.fn() });
+    (trpc.cyboflow.sessionGit as unknown as { onWorktreeChanged: OnWorktreeChangedMock }).onWorktreeChanged = {
+      subscribe: subscribeMock,
+    };
+    const { useSessionStore } = await import('../../../stores/sessionStore');
+    act(() => {
+      useSessionStore.setState({ sessions: [{ id: 'sess-remote', hostId: 'host-a' } as never] });
+      useCyboflowStore.setState({ selectedSessionId: 'sess-remote' });
+    });
+  });
+
+  it('shows "Not available on remote environments" in the File Explorer and Diff tabs', () => {
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    expect(screen.getByTestId('run-right-rail-file-explorer-remote')).toHaveTextContent('Not available on remote environments');
+    expect(screen.queryByTestId('session-file-explorer-mock')).toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(screen.getByTestId('run-right-rail-diff-remote')).toHaveTextContent('Not available on remote environments');
+    expect(screen.queryByTestId('diff-open-in-ide')).toBeNull();
+  });
+
+  it('never subscribes to worktree changes for a remote session', () => {
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).not.toHaveBeenCalled();
+  });
+});
+

@@ -45,6 +45,7 @@ import { ALREADY_UP_TO_DATE_CODE } from '../services/worktreeManager';
 import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCommands';
 import { resolveSessionDiffBaseRef } from './sessionFileStats';
 import type { WorktreeStatusPayload, DiffGroupScope } from '../../../shared/types/runFiles';
+import { isRemoteSession, remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -922,6 +923,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
       }
+      // M2: a remote session's worktree is on its environment — no local git against it.
+      if (isRemoteSession(session)) return { success: false, error: remoteUnavailableError('Committing') };
 
       // Check if there are any changes to commit
       const status = runGit(session.worktreePath, ['status', '--porcelain']).trim();
@@ -986,6 +989,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
       }
+      // M2: no local git against a remote worktree; the renderer shows the Diff tab as unavailable.
+      if (isRemoteSession(session)) return { success: false, error: remoteUnavailableError('The diff') };
       const worktreePath = session.worktreePath;
 
       // `scope` (TASK-212) selects one DiffGroupScope's own git query for the
@@ -1882,7 +1887,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     if (!session || !session.worktreePath) {
       return { success: false, error: 'Session or worktree path not found' };
     }
-    const unsubscribe = worktreeChangeNotifier.subscribe(sessionId, session.worktreePath, listener);
+    // A remote session (M2) gets a no-op unsubscribe from the notifier: nothing to watch on this Mac.
+    const unsubscribe = worktreeChangeNotifier.subscribe(sessionId, session.worktreePath, listener, session.hostId);
     return { success: true, unsubscribe };
   };
 
@@ -1900,6 +1906,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
       }
+      if (isRemoteSession(session)) return { success: false, error: remoteUnavailableError('Choosing a comparison base') };
 
       const project = sessionManager.getProjectForSession(sessionId);
       if (!project) {
@@ -1975,7 +1982,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       }
       // An archived session's worktree is gone; readCurrentBranch would only log
       // a missing-directory warning per hover, so short-circuit to null.
-      if (session.archived) {
+      // A remote session's (M2) branch lives on its environment: report nothing rather than read local git.
+      if (session.archived || isRemoteSession(session)) {
         return { success: true, data: { branch: null } };
       }
       // Every git read walks UP to the nearest enclosing repo. A session whose

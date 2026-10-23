@@ -3,6 +3,7 @@ import { exec, type ExecException } from 'child_process';
 import type { AppServices } from './types';
 import { getShellPath, findExecutableInPath } from '../utils/shellPath';
 import { logsManager } from '../services/panels/logPanel/logsManager';
+import { isRemoteSession, remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
 
 type OpenIdeResult = { success: true } | { success: false; error: string };
 
@@ -15,6 +16,8 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
       }
+      // M2: the IDE command runs on this Mac; a remote worktree path does not exist here.
+      if (isRemoteSession(session)) return { success: false, error: remoteUnavailableError('Open in IDE') };
 
       const project = sessionManager.getProjectForSession(sessionId);
       const ideCommand = project?.open_ide_command;

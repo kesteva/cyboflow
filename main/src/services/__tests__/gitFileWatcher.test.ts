@@ -52,6 +52,20 @@ describe('GitFileWatcher attachment policy', () => {
     });
   });
 
+  it('never watches a remote session (M2): no-op, even when the path exists locally', async () => {
+    await withTempDir('gitfilewatcher-remote-', (root) => {
+      scaffold(root);
+      watcher = new GitFileWatcher();
+      watcher.startWatching('s1', root, 'host-a');
+      expect(watcher.getStats().totalWatched).toBe(0);
+      expect(watcher.getStats().totalWatchers).toBe(0);
+      // 'local' / null keep the local watch.
+      watcher.startWatching('s2', root, 'local');
+      watcher.startWatching('s3', root, null);
+      expect(watcher.getStats().totalWatched).toBe(2);
+    });
+  });
+
   it('attaches no recursive watchers when only excluded dirs exist (root only)', async () => {
     await withTempDir('gitfilewatcher-excluded-only-', (root) => {
       mkdirSync(join(root, 'node_modules'), { recursive: true });

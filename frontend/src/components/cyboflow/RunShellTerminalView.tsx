@@ -38,6 +38,7 @@ import { subscribeToShellBytes } from '../../utils/cyboflowApi';
 import { trpc } from '../../trpc/client';
 import { WebLinkContext } from '../../contexts/WebLinkContext';
 import { attachTerminalLinks } from '../../utils/terminalLinks';
+import { REMOTE_SHELL_MESSAGE, REMOTE_UNAVAILABLE_MESSAGE } from '../../../../shared/types/remoteEnvironment';
 import '@xterm/xterm/css/xterm.css';
 
 /**
@@ -292,7 +293,9 @@ export function RunShellTerminalView({
             setError(
               res.reason === 'no_worktree'
                 ? 'This run has no worktree — a shell is unavailable.'
-                : (res.message ?? 'Could not open a shell for this run.'),
+                : res.reason === 'remote'
+                  ? `${REMOTE_UNAVAILABLE_MESSAGE}. ${REMOTE_SHELL_MESSAGE}.`
+                  : (res.message ?? 'Could not open a shell for this run.'),
             );
             settleBacklog();
             return undefined;

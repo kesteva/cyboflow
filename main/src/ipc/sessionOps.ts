@@ -516,6 +516,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // ipc/sessionFileStats.ts for the full rationale.
       const gitFileStats = await computeSessionFileStats({
         worktreePath: session.worktreePath,
+        hostId: session.hostId, // M2: a remote worktree has no local git to diff
         // TASK-278: the caller's persisted BaseSelector selection (when any)
         // wins over the recorded branch point, so the card agrees with
         // whatever base the Diff panel beside it is showing.
