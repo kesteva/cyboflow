@@ -3425,6 +3425,7 @@ async function drainOnQuit(): Promise<void> {
     await cliManagerFactory.shutdown();
     console.log('[Main] CLI manager factory shutdown complete');
   }
+  await hostsComposition?.drain(); // remote agent processes (after their managers), then the ssh masters
 
   // Tear down all run user-shells (and any dev servers they launched) so none
   // orphan on quit. RunShellManager is independent of the CLI factory above.

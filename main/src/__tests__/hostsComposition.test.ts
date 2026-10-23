@@ -39,6 +39,7 @@ import {
   peekHostsFacade,
 } from '../orchestrator/hostsBridge';
 import { HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../services/hosts/flags';
+import type { HostsServiceDeps } from '../services/hosts/hostsService';
 import { getRemoteRuntime, setRemoteRuntime } from '../services/hosts/remoteRuntimeBridge';
 import { getRemoteCheckout, setRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
 import { getMergeBackService, setMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
@@ -255,6 +256,22 @@ describe('composeHosts remote runtime bridge', () => {
     expect(comp.remoteRuntime.resolveHostId({ hostId: 'h1' })).toBe('h1');
     config.enabled = false;
     await expect(comp.remoteRuntime.prepare('h1', { runId: 'r1', spawnKey: 'r1' })).rejects.toThrow(/turned off/);
+  });
+});
+
+describe('composeHosts remote process cleanup (Phase F)', () => {
+  it('the service\'s run-folder pass goes through the composed runtime', async () => {
+    const gc = vi.spyOn(comp.remoteRuntime, 'gcRunDir').mockResolvedValue(null);
+    const deps = (comp.service as unknown as { deps: Pick<HostsServiceDeps, 'runDirGc'> }).deps;
+    expect(deps.runDirGc).toBeTypeOf('function');
+    await deps.runDirGc?.('h1', '/Users/me/cf-remote');
+    expect(gc).toHaveBeenCalledWith('h1', '/Users/me/cf-remote');
+  });
+
+  it('drain() kills the remote processes through the service', async () => {
+    const drain = vi.spyOn(comp.service, 'drainRemoteProcesses').mockResolvedValue(undefined);
+    await comp.drain();
+    expect(drain).toHaveBeenCalledTimes(1);
   });
 });
 

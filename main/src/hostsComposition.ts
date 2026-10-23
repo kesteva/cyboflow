@@ -18,7 +18,9 @@
  *
  * Remote runtime (spec B1): a RemoteRuntime over the service (gates, links), the registry (ExecutionHosts) and the db
  * (host resolution) is published on services/hosts/remoteRuntimeBridge at start() and cleared at stop(), so the
- * agent managers reach it without a constructor change.
+ * agent managers reach it without a constructor change. The service's run-folder pass (spec F3) goes through the
+ * runtime's gcRunDir (late-bound: the runtime is built over the service), and drain() is the async quit hook that
+ * runs after the agent managers' shutdown (spec F2: kill the live remote processes, then close the ssh masters).
  *
  * Remote checkouts (spec C2): the ONE MergeBackStore (sole writer of session_merge_backs — its write queue only
  * serializes within one instance) and a RemoteCheckout over it, the HostStore, the registry and the transport; the
@@ -105,6 +107,8 @@ export interface HostsComposition {
   start(): void;
   /** Synchronous and idempotent (quit drain): no timers, no listeners, no terminals, no ssh masters. */
   stop(): void;
+  /** Quit drain, after the agent managers' shutdown: kills the live remote processes, then closes the ssh masters. */
+  drain(): Promise<void>;
 }
 
 export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
@@ -115,6 +119,8 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
   const local = new LocalHost({ appVersion, captureError: captureSeamError, logger });
   // Late-bound: SshHosts are only built (and preflighted) after the service below exists.
   let serviceRef: HostsService | null = null;
+  // Late-bound: the runtime is built over the service, and the service's run-folder pass (spec F3) calls into it.
+  let remoteRuntimeRef: RemoteRuntime | null = null;
   const registry = new HostRegistry({
     store, transport, local, appVersion, captureError: captureSeamError, logger,
     createSshHost: (d) => new SshHost({
@@ -188,6 +194,7 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       push: (input) => pushToolchain(input),
       transport,
     },
+    runDirGc: (hostId, root) => (remoteRuntimeRef ? remoteRuntimeRef.gcRunDir(hostId, root) : Promise.resolve(null)),
   });
   serviceRef = service;
   const scheduler = new PreflightScheduler({
@@ -205,6 +212,7 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
     captureError: captureSeamError,
   });
+  remoteRuntimeRef = remoteRuntime;
   // Late-bound: the merge-back service is built over this store, and its change callback reaches the service.
   let onMergeBackChange: ((change: MergeBackChange) => void) | null = null;
   const mergeBackStore = new MergeBackStore(db, { logger, onChange: (change) => onMergeBackChange?.(change) });
@@ -329,5 +337,6 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       configManager.off('config-updated', onConfig);
       service.shutdown();
     },
+    drain: () => service.drainRemoteProcesses(),
   };
 }
