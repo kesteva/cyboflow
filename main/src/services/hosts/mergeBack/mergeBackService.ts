@@ -13,10 +13,21 @@
  *                    hard-reset to the import ref before EVERY merge attempt (the squash rewrites it)
  *   merged           the UNCHANGED WorktreeManager squash / rebase-merge ran on the mirror (or ALREADY_UP_TO_DATE /
  *                    the landing probe says the work is already on main)
- *   cleaned          remote: worktree remove --force, branch -D, base ref deleted; local: import + checkpoint refs,
- *                    the mirror worktree and the mirror branch deleted. "Already gone" = success.
- * plus `abandoned` (archive; RemoteCheckout.removeSessionWorktree owns the remote half, the local half runs through
- * {@link MergeBackService.cleanupLocal}, wired to the store's change callback by hostsComposition).
+ *   remote_ready     the post-merge RESYNC (background, under the session lock), so a merged session behaves like a
+ *                    local one — it keeps its worktree, its branch now equals main, and it can merge again:
+ *                    local main (the merge result) is force-pushed to refs/cyboflow/base/<key>; the remote worktree,
+ *                    re-verified clean, is `reset --hard` to it when its branch is still the imported tip (a branch
+ *                    the agent moved since is left alone — the next merge asks for a rebase); then the LOCAL half
+ *                    (import + checkpoint refs, the mirror worktree and the mirror branch) is deleted. A dirty tree
+ *                    keeps `merged` + last_error; the next Merge (or boot) finishes the resync first.
+ *
+ *   remote_ready ─▶ [checkpointed]* ─▶ import_intent ─▶ imported ─▶ local_ready ─▶ merged ─▶ remote_ready ─▶ …
+ *                                          ▲   (imported / local_ready ─▶ import_intent: the branch moved; S re-read)
+ *
+ * The remote worktree, branch and base ref are removed only at archive: any state ─▶ `abandoned` ─▶ `cleaned`
+ * (RemoteCheckout.removeSessionWorktree owns the remote half; the local half runs through
+ * {@link MergeBackService.cleanupLocal}, wired to the store's change callback by hostsComposition; boot resume
+ * finishes an `abandoned` row through {@link MergeBackService.cleanup}). "Already gone" = success.
  *
  * The mirror branch is the session branch `<branch>` (so Create-PR pushes a branch named like the session) unless This
  * Mac already has a `<branch>` cyboflow did not create; then it is the cyboflow-owned `cyboflow-import/<key>`.
@@ -78,7 +89,8 @@ export function mirrorWorktreePath(projectPath: string, key: string): string {
   return path.join(projectPath, ...MIRROR_DIR_SEGMENTS, key);
 }
 
-export type MergeBackErrorCode = 'not-remote' | 'needs-check' | 'no-row' | 'state' | 'dirty' | 'import' | 'mirror' | 'refresh' | 'cleanup';
+export type MergeBackErrorCode =
+  | 'not-remote' | 'needs-check' | 'no-row' | 'state' | 'dirty' | 'import' | 'mirror' | 'refresh' | 'resync' | 'cleanup';
 
 /** `message` is user-presentable: redacted, no ssh target. */
 export class MergeBackError extends Error {
@@ -133,6 +145,9 @@ export interface ResumeDeps {
 }
 
 export interface ResumeSummary {
+  /** `merged` rows brought back to remote_ready (resync). */
+  resynced: number;
+  /** `abandoned` rows whose two halves were removed. */
   cleaned: number;
   closedOut: number;
   left: number;
@@ -145,7 +160,8 @@ export interface MergeBackServiceLike {
   withMirror<T>(input: MirrorInput, fn: (mirror: MirrorHandle) => Promise<T>): Promise<T>;
   refreshBase(sessionId: string, projectPath: string, mainBranch: string): Promise<string>;
   probeLanding(sessionId: string, projectPath: string, mainBranch: string): Promise<LandingProbe>;
-  recordLanded(sessionId: string): Promise<void>;
+  /** `mainBranch` = the branch the work landed on (default: the project's checked-out branch). */
+  recordLanded(sessionId: string, mainBranch?: string): Promise<void>;
   mirrorBranch(sessionId: string, projectPath: string): Promise<string | null>;
   requestCheckpoint(sessionId: string): Promise<void>;
   cleanup(sessionId: string): Promise<boolean>;
@@ -153,7 +169,9 @@ export interface MergeBackServiceLike {
   resumeAll(deps: ResumeDeps): Promise<ResumeSummary>;
 }
 
-export type MergeBackStep = 'import-intent' | 'imported' | 'local-ready' | 'merged' | 'checkpointed' | 'cleanup-remote' | 'cleanup-local';
+export type MergeBackStep =
+  | 'import-intent' | 'imported' | 'local-ready' | 'merged' | 'checkpointed'
+  | 'resync-base' | 'resync-remote' | 'cleanup-remote' | 'cleanup-local';
 
 export interface MergeBackServiceDeps {
   /** HostsService.status(): the Environments gates. */
@@ -215,7 +233,7 @@ export class MergeBackService implements MergeBackServiceLike {
   private readonly gitRemote: GitRemoteResolver;
   private readonly ensureExcluded: (projectPath: string) => void;
   private readonly checkpoints = new Map<string, { running: Promise<void>; again: boolean }>();
-  private readonly cleanups = new Map<string, Promise<boolean>>();
+  private readonly resyncs = new Map<string, Promise<boolean>>();
 
   constructor(private readonly deps: MergeBackServiceDeps) {
     this.localGit = deps.localGit ?? ((cwd, args, opts) => runGitCapture(cwd, args, opts));
@@ -456,7 +474,7 @@ export class MergeBackService implements MergeBackServiceLike {
 
   private async markMergedLocked(sessionId: string): Promise<void> {
     const row = this.requireRow(sessionId);
-    if (row.state === 'merged' || row.state === 'cleaned') return;
+    if (row.state === 'merged') return;
     if (row.state === 'import_intent') {
       const sha = await this.importedShaFor(row);
       if (sha === null) return;
@@ -474,20 +492,20 @@ export class MergeBackService implements MergeBackServiceLike {
     return projectPath === null ? null : this.localSha(projectPath, importRef(row.mergeKey));
   }
 
-  private scheduleCleanup(sessionId: string): void {
-    if (this.cleanups.has(sessionId)) return;
-    const p = this.cleanup(sessionId).finally(() => this.cleanups.delete(sessionId));
-    this.cleanups.set(sessionId, p);
+  private scheduleResync(sessionId: string, mainBranch: string | null): void {
+    if (this.resyncs.has(sessionId)) return;
+    const p = this.resync(sessionId, mainBranch).finally(() => this.resyncs.delete(sessionId));
+    this.resyncs.set(sessionId, p);
   }
 
-  /** Test seam: the background cleanup a merge scheduled (resolved true when none is pending). */
-  whenCleanedUp(sessionId: string): Promise<boolean> {
-    return this.cleanups.get(sessionId) ?? Promise.resolve(true);
+  /** Test seam: the background resync a merge scheduled (resolved true when none is pending). */
+  whenResynced(sessionId: string): Promise<boolean> {
+    return this.resyncs.get(sessionId) ?? Promise.resolve(true);
   }
 
-  /** Every background cleanup and checkpoint in flight has settled (quit drain, tests). */
+  /** Every background resync and checkpoint in flight has settled (quit drain, tests). */
   async whenIdle(): Promise<void> {
-    await Promise.allSettled([...this.cleanups.values(), ...[...this.checkpoints.values()].map((c) => c.running)]);
+    await Promise.allSettled([...this.resyncs.values(), ...[...this.checkpoints.values()].map((c) => c.running)]);
   }
 
   // ------------------------------------------------------------------ merge
@@ -495,8 +513,9 @@ export class MergeBackService implements MergeBackServiceLike {
   async mergeSession(input: MergeSessionInput): Promise<RemoteMergeOutcome> {
     const { sessionId, projectPath, mainBranch } = input;
     const outcome = await this.locked(sessionId, async (): Promise<RemoteMergeOutcome> => {
-      const pre = this.requireRow(sessionId);
-      if (pre.state === 'merged' || pre.state === 'cleaned') return { kind: 'already-landed' };
+      // The last round landed but its resync never finished: finish it (a failure throws, recorded), then this is an
+      // ordinary round — nothing new on the branch ends ALREADY_UP_TO_DATE = already-landed.
+      if (this.requireRow(sessionId).state === 'merged') await this.resyncLocked(sessionId, mainBranch);
       const { row, r, mirror } = await this.prepareLocked(input);
       if (input.needsRebase && (await input.needsRebase(mirror.worktreePath))) {
         // Main moved — maybe because this very work was landed by hand; then there is nothing to rebase.
@@ -519,7 +538,7 @@ export class MergeBackService implements MergeBackServiceLike {
       await this.markMergedLocked(sessionId);
       return { kind: 'merged' };
     });
-    if (outcome.kind !== 'needs-rebase') this.scheduleCleanup(sessionId);
+    if (outcome.kind !== 'needs-rebase') this.scheduleResync(sessionId, mainBranch);
     return outcome;
   }
 
@@ -545,16 +564,22 @@ export class MergeBackService implements MergeBackServiceLike {
     });
   }
 
+  /** Force-push the local commit `sha` to refs/cyboflow/base/<key> in the environment's bare repo. */
+  private async pushBase(row: MergeBackRow, r: ResolvedHost, projectPath: string, sha: string): Promise<void> {
+    const { url, env } = this.gitRemote({ sshTarget: r.row.sshTarget }, this.bareOf(r, row));
+    await this.localGit(projectPath, [
+      'push', '--quiet', '--no-verify', `--receive-pack=${remoteGitPackCommand(r.gitPath, 'receive-pack')}`, url,
+      `+${sha}:${baseRef(row.mergeKey)}`,
+    ], { env, timeout: FETCH_TIMEOUT_MS });
+  }
+
   /** Force-push local `mainBranch` to refs/cyboflow/base/<key> on the environment; returns the message for the user. */
   private async refreshBaseLocked(row: MergeBackRow, r: ResolvedHost, projectPath: string, mainBranch: string): Promise<string> {
     const ref = baseRef(row.mergeKey);
     try {
       const sha = await this.localSha(projectPath, `refs/heads/${mainBranch}`);
       if (sha === null) throw new Error(`${mainBranch} does not resolve to a commit.`);
-      const { url, env } = this.gitRemote({ sshTarget: r.row.sshTarget }, this.bareOf(r, row));
-      await this.localGit(projectPath, [
-        'push', '--quiet', '--no-verify', `--receive-pack=${remoteGitPackCommand(r.gitPath, 'receive-pack')}`, url, `+${sha}:${ref}`,
-      ], { env, timeout: FETCH_TIMEOUT_MS });
+      await this.pushBase(row, r, projectPath, sha);
     } catch (err) {
       const e = new MergeBackError('refresh', `Could not send the latest ${mainBranch} to "${r.row.label}": ${readable(err)}`, { cause: err });
       await this.recordFailure(row.sessionId, row.hostId, 'merge-back-refresh', err, e.message);
@@ -618,15 +643,15 @@ export class MergeBackService implements MergeBackServiceLike {
     return { landed: false, ownCommits: 0, proven: false };
   }
 
-  /** markComplete found the work on main: an import in flight is closed as merged (and cleaned up). */
-  async recordLanded(sessionId: string): Promise<void> {
+  /** markComplete found the work on main: an import in flight is closed as merged (and resynced). */
+  async recordLanded(sessionId: string, mainBranch?: string): Promise<void> {
     const merged = await this.locked(sessionId, async () => {
       const row = this.deps.mergeBacks.get(sessionId);
       if (row === null || !['import_intent', 'imported', 'local_ready'].includes(row.state)) return false;
       await this.markMergedLocked(sessionId);
       return this.requireRow(sessionId).state === 'merged';
     });
-    if (merged) this.scheduleCleanup(sessionId);
+    if (merged) this.scheduleResync(sessionId, mainBranch ?? null);
   }
 
   async mirrorBranch(sessionId: string, projectPath: string): Promise<string | null> {
@@ -689,15 +714,97 @@ export class MergeBackService implements MergeBackServiceLike {
     await this.step(sessionId, 'checkpointed');
   }
 
+  // ------------------------------------------------------------------- resync
+
+  /** After `merged`: the resync below, under the session lock. Resolves false (last_error set) on failure. */
+  async resync(sessionId: string, mainBranch: string | null): Promise<boolean> {
+    try {
+      await this.locked(sessionId, () => this.resyncLocked(sessionId, mainBranch));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * `merged` → `remote_ready`: base ref := local main, the remote worktree reset to it, the local half removed.
+   * No-op for any other state (or a project that is gone — archive removes the rest). Throws (recorded) on failure,
+   * keeping `merged`.
+   */
+  private async resyncLocked(sessionId: string, mainBranch: string | null): Promise<void> {
+    const row = this.deps.mergeBacks.get(sessionId);
+    if (row === null || row.state !== 'merged') return;
+    const projectPath = this.deps.projectPathFor(row.projectId);
+    if (projectPath === null) return;
+    const r = this.resolve(row.hostId);
+    try {
+      const main = mainBranch ?? (await this.localMainBranch(projectPath));
+      const mainSha = main === null ? null : await this.localSha(projectPath, `refs/heads/${main}`);
+      if (main === null || mainSha === null) throw new MergeBackError('resync', 'Could not read the main branch on This Mac.');
+      try {
+        await this.pushBase(row, r, projectPath, mainSha);
+      } catch (err) {
+        throw new MergeBackError('resync', `Could not send the merged ${main} to "${r.row.label}": ${readable(err)}`, { cause: err });
+      }
+      await this.step(sessionId, 'resync-base');
+      const reset = await this.resetRemoteLocked(row, r, mainSha);
+      if (reset === 'moved') {
+        this.deps.logger.info('[merge-back] the session branch moved after the merge; the environment worktree was not reset', { sessionId });
+      }
+      await this.step(sessionId, 'resync-remote');
+      await this.cleanupLocalFor(row, projectPath);
+      await this.step(sessionId, 'cleanup-local');
+      await this.deps.mergeBacks.transition(sessionId, {
+        from: ['merged'],
+        to: 'remote_ready',
+        patch: { baseSha: mainSha, importSha: null, checkpointSha: null, localWorktreePath: null, lastError: null },
+      });
+      this.deps.logger.info('[merge-back] session resynced after the merge', { hostId: row.hostId, sessionId, reset });
+    } catch (err) {
+      const e = err instanceof MergeBackError
+        ? err
+        : new MergeBackError('resync', `Could not bring the session on its environment up to date after the merge: ${readable(err)}`, { cause: err });
+      await this.recordFailure(sessionId, row.hostId, `merge-back-${e.code}`, err, e.message);
+      throw e;
+    }
+  }
+
+  /**
+   * The remote worktree, re-verified clean, reset hard to the base ref — only while its HEAD is the session branch at
+   * the imported tip (the work that just landed). A branch the agent moved since is left alone ('moved').
+   */
+  private async resetRemoteLocked(row: MergeBackRow, r: ResolvedHost, mainSha: string): Promise<'reset' | 'current' | 'moved'> {
+    const label = r.row.label;
+    const wt = this.hp(row.hostId, row.remoteWorktreePath ?? remoteSessionWorktreePath(r.remoteRoot, row.mergeKey));
+    const opts = { timeoutMs: GIT_TIMEOUT_MS };
+    const status = await r.host.git.run(wt, ['status', '--porcelain'], opts);
+    if (status.code !== 0) {
+      throw new MergeBackError('resync', `Could not read the session worktree on "${label}": ${readable(status.stderr)}`);
+    }
+    if (status.stdout.trim() !== '') {
+      throw new MergeBackError('dirty', `Uncommitted changes on ${label} after the merge — ask the agent to commit them, then merge again.`);
+    }
+    const tip = await r.host.git.run(wt, ['rev-parse', '--verify', '-q', `refs/heads/${row.branch}^{commit}`], opts);
+    const sha = tip.code === 0 ? tip.stdout.trim() : '';
+    if (sha === mainSha) return 'current';
+    const head = await r.host.git.run(wt, ['symbolic-ref', '-q', 'HEAD'], opts);
+    if (sha === '' || sha !== row.importSha || head.code !== 0 || head.stdout.trim() !== `refs/heads/${row.branch}`) return 'moved';
+    const reset = await r.host.git.run(wt, ['reset', '--hard', '-q', baseRef(row.mergeKey)], { timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (reset.code !== 0) {
+      throw new MergeBackError('resync', `Could not reset the session worktree on "${label}": ${readable(reset.stderr)}`);
+    }
+    return 'reset';
+  }
+
   // ------------------------------------------------------------------ cleanup
 
-  /** After `merged` (or `abandoned`): both halves, then `cleaned`. Resolves false (last_error set) on failure. */
+  /** After `abandoned` (archive): both halves, then `cleaned`. Resolves false (last_error set) on failure. */
   async cleanup(sessionId: string): Promise<boolean> {
     return this.locked(sessionId, async () => {
       const row = this.deps.mergeBacks.get(sessionId);
       if (row === null || row.state === 'cleaned') return true;
-      if (row.state !== 'merged' && row.state !== 'abandoned') {
-        this.deps.logger.warn('[merge-back] cleanup refused before merge or archive', { sessionId, state: row.state });
+      if (row.state !== 'abandoned') {
+        this.deps.logger.warn('[merge-back] cleanup refused before archive', { sessionId, state: row.state });
         return false;
       }
       try {
@@ -706,7 +813,7 @@ export class MergeBackService implements MergeBackServiceLike {
         const projectPath = this.deps.projectPathFor(row.projectId);
         if (projectPath !== null) await this.cleanupLocalFor(row, projectPath);
         await this.step(sessionId, 'cleanup-local');
-        await this.deps.mergeBacks.transition(sessionId, { from: [row.state], to: 'cleaned', patch: { lastError: null } });
+        await this.deps.mergeBacks.transition(sessionId, { from: ['abandoned'], to: 'cleaned', patch: { lastError: null } });
         this.deps.logger.info('[merge-back] session cleaned up', { hostId: row.hostId, sessionId });
         return true;
       } catch (err) {
@@ -780,14 +887,14 @@ export class MergeBackService implements MergeBackServiceLike {
   // ------------------------------------------------------------------- resume
 
   /**
-   * Boot: `merged` → close-out (idempotent) + cleanup; `abandoned` → cleanup; an import left mid-way whose work is
-   * already on main (a crash after the squash landed) → close-out + merged + cleanup; any other is left for the user
+   * Boot: `merged` → close-out (idempotent) + resync; `abandoned` → cleanup; an import left mid-way whose work is
+   * already on main (a crash after the squash landed) → close-out + merged + resync; any other is left for the user
    * (a squash needs their commit message). Per-row fail-soft; never throws.
    */
   async resumeAll(deps: ResumeDeps): Promise<ResumeSummary> {
-    const summary: ResumeSummary = { cleaned: 0, closedOut: 0, left: 0, errored: 0 };
-    const tally = (ok: boolean): void => {
-      if (ok) summary.cleaned++;
+    const summary: ResumeSummary = { resynced: 0, cleaned: 0, closedOut: 0, left: 0, errored: 0 };
+    const tally = (ok: boolean, done: 'resynced' | 'cleaned'): void => {
+      if (ok) summary[done]++;
       else summary.errored++;
     };
     let rows: MergeBackRow[];
@@ -800,16 +907,18 @@ export class MergeBackService implements MergeBackServiceLike {
     for (const row of rows) {
       try {
         if (row.state === 'abandoned') {
-          tally(await this.cleanup(row.sessionId));
+          tally(await this.cleanup(row.sessionId), 'cleaned');
           continue;
         }
         const projectPath = this.deps.projectPathFor(row.projectId);
         if (row.state === 'merged') {
-          if (projectPath !== null) {
-            await deps.closeOut(row.sessionId, (await this.localMainSha(projectPath)) ?? undefined);
-            summary.closedOut++;
+          if (projectPath === null) {
+            summary.left++;
+            continue;
           }
-          tally(await this.cleanup(row.sessionId));
+          await deps.closeOut(row.sessionId, (await this.localMainSha(projectPath)) ?? undefined);
+          summary.closedOut++;
+          tally(await this.resync(row.sessionId, null), 'resynced');
           continue;
         }
         if (projectPath === null || !(await this.landedForResume(row, projectPath))) {
@@ -819,7 +928,7 @@ export class MergeBackService implements MergeBackServiceLike {
         await deps.closeOut(row.sessionId, (await this.localMainSha(projectPath)) ?? undefined);
         summary.closedOut++;
         await this.locked(row.sessionId, () => this.markMergedLocked(row.sessionId));
-        tally(await this.cleanup(row.sessionId));
+        tally(await this.resync(row.sessionId, null), 'resynced');
       } catch (err) {
         summary.errored++;
         this.deps.logger.warn('[merge-back] resume failed for a session', { sessionId: row.sessionId, error: errorName(err) });

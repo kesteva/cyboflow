@@ -23,9 +23,12 @@ export const TERMINAL_MERGE_BACK_STATES: readonly MergeBackState[] = ['cleaned',
 const PREDECESSORS: Record<MergeBackState, readonly MergeBackState[]> = {
   bare_ready: [],
   base_pushed: ['bare_ready'],
-  remote_ready: ['base_pushed'],
+  // merged -> remote_ready: the post-merge resync (base := main, the remote worktree reset to it, local half removed);
+  // the session keeps working on the environment and can merge again.
+  remote_ready: ['base_pushed', 'merged'],
   checkpointed: ['remote_ready', 'checkpointed'],
-  import_intent: ['remote_ready', 'checkpointed'],
+  // imported / local_ready -> import_intent: the branch moved after an earlier import; S is re-recorded.
+  import_intent: ['remote_ready', 'checkpointed', 'imported', 'local_ready'],
   imported: ['import_intent'],
   local_ready: ['imported'],
   // imported -> merged: the landed probe found the squash already on main.

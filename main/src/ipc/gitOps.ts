@@ -1797,8 +1797,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         });
         const tasksNotYetDoneAfterCloseOut = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
         if (isRemoteSession(session)) {
-          // An import in flight is closed as merged and cleaned up (fail-soft: the close-out already ran).
-          await requireMergeBackService().recordLanded(sessionId).catch((err: unknown) => {
+          // An import in flight is closed as merged and resynced (fail-soft: the close-out already ran).
+          await requireMergeBackService().recordLanded(sessionId, mainBranch).catch((err: unknown) => {
             console.warn(`[IPC:git] merge-back could not record the landing for session ${sessionId}:`, err);
           });
         }

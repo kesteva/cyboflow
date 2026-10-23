@@ -256,8 +256,8 @@ export async function runBootRecovery(deps: BootRecoveryDeps): Promise<void> {
   }
 
   await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
-  // M2 merge-back resume (remote sessions): merged / abandoned rows are cleaned up, an import whose work already
-  // landed is closed out. Reached through the bridge hostsComposition published at start() (absent = nothing to do);
+  // M2 merge-back resume (remote sessions): merged rows are resynced, abandoned rows cleaned up, an import whose work
+  // already landed is closed out. Reached through the bridge hostsComposition published at start() (absent = nothing to do);
   // NOT awaited — the cleanup talks to environments over ssh, and boot must not wait on a machine that is away.
   const mergeBack = getMergeBackService();
   if (mergeBack) {
@@ -268,8 +268,8 @@ export async function runBootRecovery(deps: BootRecoveryDeps): Promise<void> {
         },
       })
       .then((r) => {
-        if (r.cleaned + r.closedOut + r.errored > 0) {
-          console.log(`[Main] Merge-back resume (cleaned: ${r.cleaned}, closed out: ${r.closedOut}, left: ${r.left}, errored: ${r.errored})`);
+        if (r.resynced + r.cleaned + r.closedOut + r.errored > 0) {
+          console.log(`[Main] Merge-back resume (resynced: ${r.resynced}, cleaned: ${r.cleaned}, closed out: ${r.closedOut}, left: ${r.left}, errored: ${r.errored})`);
         }
       })
       .catch((err: unknown) => {

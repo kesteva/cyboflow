@@ -115,7 +115,7 @@ beforeEach(() => {
     requestCheckpoint: vi.fn(async () => undefined),
     cleanup: vi.fn(async () => true),
     cleanupLocal: vi.fn(async () => true),
-    resumeAll: vi.fn(async () => ({ cleaned: 0, closedOut: 0, left: 0, errored: 0 })),
+    resumeAll: vi.fn(async () => ({ resynced: 0, cleaned: 0, closedOut: 0, left: 0, errored: 0 })),
   };
   setMergeBackService(fake);
   vi.mocked(runGit).mockClear();
@@ -195,7 +195,7 @@ describe('gitOps remote merge-back', () => {
     expect(res.success).toBe(true);
     expect(vi.mocked(runGitAsync)).toHaveBeenCalledWith('/tmp/project', ['rev-parse', 'main']);
     expect(closeOut.calls).toContain('stampLanded');
-    expect(fake.recordLanded).toHaveBeenCalledWith('r1');
+    expect(fake.recordLanded).toHaveBeenCalledWith('r1', 'main');
   });
 
   it('a local session never touches the merge-back service', async () => {
