@@ -37,6 +37,8 @@ import {
   codexAgentRoleModels,
   defaultCodexAgentRolesDir,
   materializeCodexAgentRoles,
+  materializeCodexAgentRolesOnHost,
+  remoteCodexAgentRolesDir,
   type CodexAgentRoles,
 } from './appServer/agentRoles';
 import { buildCodexTurnInput } from './appServer/imageSpill';
@@ -63,6 +65,7 @@ import {
 import { projectTurnSessionEvent } from './appServer/eventProjector';
 import {
   buildCodexAppServerEnvironment,
+  buildCodexRemoteAppServerEnvironment,
   buildCodexAppServerThreadConfiguration,
   buildCodexAppServerThreadResumeParams,
   buildCodexAppServerThreadStartParams,
@@ -82,6 +85,9 @@ import {
   type TurnSessionClient,
   type TurnSessionEvent,
 } from './appServer/turnSession';
+import { resolveHostIdFromDb, type RemoteRuntimeSession } from '../../hosts/remoteRuntime';
+import { getRemoteRuntime, requireRemoteRuntime } from '../../hosts/remoteRuntimeBridge';
+import { prepareRemoteCodexLaunch, type RemoteCodexLaunch } from '../../hosts/remoteCodexSpawn';
 import {
   CodexProcessUsageTracker,
   CodexUsageRowWriter,
@@ -212,6 +218,18 @@ interface WarmCodexEntry {
    * isolation spawn or a run with no deployable roles.
    */
   agentRoles: CodexAgentRoles;
+  /**
+   * The cyboflow MCP bridge config this entry's thread is opened with — the
+   * manager's global (local) config, or the per-host one of a remote spawn.
+   * Captured at spawn so thread/start uses exactly what the fingerprint hashed.
+   */
+  runtimeConfig: CodexMcpRuntimeConfig;
+  /**
+   * The SSH environment this app-server runs on (its orch-link lease), or null
+   * on This Mac. Released when the entry is torn down (and when the process
+   * exits); release is idempotent.
+   */
+  remote: RemoteRuntimeSession | null;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -349,6 +367,23 @@ function appServerEnvironment(
   return options.laneEnv ? { ...env, ...options.laneEnv } : env;
 }
 
+/**
+ * A REMOTE app-server's env: the cyboflow slice (no `...process.env`, no local
+ * PATH, socket or token) made complete for the environment by
+ * RemoteRuntimeSession.env — remote HOME/USER/…, the remote PATH with the pushed
+ * `codex-path` first, the forwarded CYBOFLOW_ORCH_SOCKET and
+ * CYBOFLOW_ORCH_TOKEN_FILE. A lane's `laneEnv` is NOT carried: its values are
+ * this Mac's build-slot paths. One builder for the cold spawn and the warm
+ * fingerprint.
+ */
+function remoteAppServerEnvironment(
+  runId: string,
+  options: ClaudeSpawnerOptions,
+  remote: RemoteCodexLaunch,
+): NodeJS.ProcessEnv {
+  return remote.session.env(buildCodexRemoteAppServerEnvironment(runId, options.worktreePath));
+}
+
 function defaultCodexAppServerClientFactory(
   options: CodexAppServerClientOptions,
 ): CodexAppServerClientLike {
@@ -426,6 +461,8 @@ export class CodexSdkManager extends AbstractCliManager {
   private modelCatalog: CodexModelCatalog | null = null;
   private modelCatalogFetchedAt = 0;
   private modelCatalogRequest: Promise<CodexModelCatalog> | null = null;
+  /** Role files already written on SSH environments this app session (`<hostId>\0<path>`). */
+  private readonly remoteRoleFiles = new Set<string>();
 
   constructor(
     sessionManager: SessionManager,
@@ -693,6 +730,13 @@ export class CodexSdkManager extends AbstractCliManager {
     const isLaneSpawn = options.spawnKey !== undefined && options.spawnKey !== options.panelId;
     const warmEligible = !isLaneSpawn && !codexWarmDisabled();
 
+    // SSH environment (spec M2 B3): only this cold-entry app-server is routed to
+    // the host; every probe stays local. null ⇒ This Mac, the path below as-is.
+    const hostId = this.resolveSpawnHostId(options, runId);
+    if (hostId !== null) {
+      return await this.spawnRemoteTrackedProcess(options, spawnKey, runId, warmEligible, hostId);
+    }
+
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const executable = this.getResolvedExecutable();
     // HERMETIC spawn only: the user's own MCP servers, read fresh each spawn so
@@ -740,6 +784,92 @@ export class CodexSdkManager extends AbstractCliManager {
       agentRoles,
       roleModels,
     );
+    if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
+    return await this.runOneTurnGuarded(entry, options, spawnKey, true);
+  }
+
+  /**
+   * Which machine this spawn's app-server runs on; null = This Mac. The hermetic
+   * global agent (isolation) is always local. With Environments composed the
+   * runtime resolves it (explicit → run → session, fail closed on a db error).
+   * Without them the stamps are still read so a REMOTE session fails loudly
+   * (requireRemoteRuntime) instead of running here — but a db that cannot answer
+   * (no host_id column: a pre-Environments schema or a test fixture) means local.
+   */
+  private resolveSpawnHostId(options: ClaudeSpawnerOptions, runId: string): string | null {
+    if (options.isolation === 'agent') return null;
+    const lookup = { hostId: options.hostId, sessionId: options.sessionId, runId };
+    const rt = getRemoteRuntime();
+    if (rt) return rt.resolveHostId(lookup);
+    try {
+      return resolveHostIdFromDb(this.db, lookup);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The SSH-environment twin of the local spawn path above (spec M2 B3): gates +
+   * orch link + 0600 token file (RemoteRuntime.prepare), the role files written
+   * on the machine before thread/start, then the same warm-reuse / cold-entry
+   * lifecycle. The prepared session is owned by the cold entry from
+   * buildColdEntry on (released at teardown); every earlier exit — warm reuse
+   * by a parked entry that holds its own lease, or a throw — releases it here.
+   */
+  private async spawnRemoteTrackedProcess(
+    options: ClaudeSpawnerOptions,
+    spawnKey: string,
+    runId: string,
+    warmEligible: boolean,
+    hostId: string,
+  ): Promise<CliSpawnOutcome | void> {
+    if (options.images && options.images.length > 0) {
+      // Images are spilled to THIS Mac and sent by path (imageSpill.ts).
+      throw new Error('Image attachments are not supported for runs on a remote environment yet.');
+    }
+    const remote = await prepareRemoteCodexLaunch(requireRemoteRuntime(), hostId, { runId, spawnKey });
+    let entry: WarmCodexEntry;
+    try {
+      const runtimeConfig = remote.runtimeConfig;
+      const executable = { executablePath: remote.command, version: remote.version };
+      const { roles: agentRoles, roleModels } = await this.resolveRemoteAgentRoles(runId, options, remote.session);
+      const fingerprint = this.computeWarmFingerprint(
+        runId,
+        options,
+        runtimeConfig,
+        executable,
+        undefined,
+        agentRoles,
+        remote,
+      );
+      if (warmEligible) {
+        const existing = this.warmCodexRuns.get(spawnKey);
+        if (existing) {
+          if (this.evaluateCodexWarmReuse(existing, options, fingerprint)) {
+            this.clearWarmIdleTimer(existing);
+            // The parked entry holds its own lease; this one is not needed.
+            remote.session.release();
+            return await this.runOneTurnGuarded(existing, options, spawnKey, false);
+          }
+          await this.closeWarmEntry(spawnKey, existing, false);
+        }
+      }
+      entry = this.buildColdEntry(
+        options,
+        runId,
+        runtimeConfig,
+        executable,
+        fingerprint,
+        warmEligible,
+        undefined,
+        agentRoles,
+        roleModels,
+        remote,
+      );
+    } catch (error) {
+      remote.session.release();
+      throw error;
+    }
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     return await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
@@ -812,28 +942,66 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   /**
+   * {@link resolveAgentRoles} for an SSH environment: the same deployable roles,
+   * the same rendered TOML and content-addressed names, written ON the machine
+   * (`<remoteRoot>/codex/agent-roles`, 0600) before thread/start and registered
+   * by their remote paths. Equally fail-soft: a failure means fewer (or no) roles.
+   */
+  private async resolveRemoteAgentRoles(
+    runId: string,
+    options: ClaudeSpawnerOptions,
+    session: RemoteRuntimeSession,
+  ): Promise<{ roles: CodexAgentRoles; roleModels: Record<string, string | null> }> {
+    const none = { roles: {}, roleModels: {} };
+    if (options.isolation === 'agent') return none;
+    const logger = this.logger ? makeLoggerLike(this.logger) : undefined;
+    try {
+      const agents = resolveRunDeployableAgents(this.db, runId, logger);
+      if (agents.length === 0) return none;
+      const roles = await materializeCodexAgentRolesOnHost(agents, {
+        hostId: session.hostId,
+        rolesDir: remoteCodexAgentRolesDir(session.remoteRoot),
+        fs: session.fs,
+        written: this.remoteRoleFiles,
+      }, logger);
+      return { roles, roleModels: codexAgentRoleModels(agents, roles) };
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] native agent-role registration on the environment failed for run ${runId}; spawning without roles: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return none;
+    }
+  }
+
+  /**
    * Fingerprint the spawn-baked inputs (serialized env + thread configuration —
    * incl. `developerInstructions`, model, sandbox, the runId-bearing MCP
    * bridge env, and the native agent-role map (content-addressed role-file
    * paths) — plus executable path/version and client init version). A warm
    * turn whose fingerprint changed forces a cold respawn instead of splicing a
    * mismatched conversation onto the live thread. runId is baked into the env, so
-   * a cross-run reuse self-invalidates.
+   * a cross-run reuse self-invalidates. A remote spawn also hashes its host (and
+   * its env / executable path are the remote ones), so a parked app-server on one
+   * machine never serves a spawn for another; a local fingerprint is unchanged.
    */
   private computeWarmFingerprint(
     runId: string,
     options: ClaudeSpawnerOptions,
     runtimeConfig: CodexMcpRuntimeConfig,
-    executable: ResolvedCodexExecutable,
+    executable: Pick<ResolvedCodexExecutable, 'executablePath' | 'version'>,
     isolationConfig: CodexIsolationConfig | undefined,
     agentRoles: CodexAgentRoles,
+    remote?: RemoteCodexLaunch,
   ): string {
     return sha1(stableSerialize({
-      env: appServerEnvironment(runId, runtimeConfig, options),
+      env: remote
+        ? remoteAppServerEnvironment(runId, options, remote)
+        : appServerEnvironment(runId, runtimeConfig, options),
       thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig, agentRoles),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
       clientVersion: this.clientVersion,
+      ...(remote ? { host: remote.session.hostId } : {}),
     }));
   }
 
@@ -867,12 +1035,13 @@ export class CodexSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     runId: string,
     runtimeConfig: CodexMcpRuntimeConfig,
-    executable: ResolvedCodexExecutable,
+    executable: Pick<ResolvedCodexExecutable, 'executablePath'> & Partial<Pick<ResolvedCodexExecutable, 'pathDir'>>,
     fingerprint: string,
     warmEligible: boolean,
     isolationConfig: CodexIsolationConfig | undefined,
     agentRoles: CodexAgentRoles,
     roleModels: Record<string, string | null>,
+    remote?: RemoteCodexLaunch,
   ): WarmCodexEntry {
     // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
     // never an `agent:` id-prefix sniff. The client callbacks below are baked once
@@ -894,6 +1063,8 @@ export class CodexSdkManager extends AbstractCliManager {
       persistRawNotifications: !isolationSpawn,
       isolationConfig,
       agentRoles,
+      runtimeConfig,
+      remote: remote?.session ?? null,
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -910,11 +1081,17 @@ export class CodexSdkManager extends AbstractCliManager {
     perfBump('codex.appserver.spawn');
     const client = this.createAppServerClient({
       command: executable.executablePath,
+      // Remote: the stored worktree path IS the environment's checkout.
       cwd: options.worktreePath,
-      env: prependCodexPathToEnvironment(
-        appServerEnvironment(runId, runtimeConfig, options),
-        executable.pathDir,
-      ),
+      env: remote
+        ? remoteAppServerEnvironment(runId, options, remote)
+        : prependCodexPathToEnvironment(
+            appServerEnvironment(runId, runtimeConfig, options),
+            executable.pathDir ?? '',
+          ),
+      // Remote only: start the app-server on the environment (HostProcess, pid
+      // undefined → the client's teardown runs the remote kill sequence).
+      ...(remote ? { spawn: remote.spawn } : {}),
       onServerRequest: (request) => {
         if (isolationSpawn) {
           // Fail-closed and LOCAL: never the approval/question routers, which
@@ -1147,7 +1324,8 @@ export class CodexSdkManager extends AbstractCliManager {
           'Codex ChatGPT account check',
         );
         requireCodexChatGptAccount(accountResponse);
-        const runtimeConfig = this.requireMcpRuntimeConfig();
+        // The config this entry was built (and fingerprinted) with — per host for a remote spawn.
+        const runtimeConfig = entry.runtimeConfig;
         const thread = options.resumeSessionId
           ? await withTimeout(
               entry.turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
@@ -1447,6 +1625,8 @@ export class CodexSdkManager extends AbstractCliManager {
       } finally {
         this.drainingCodexEntries.delete(entry);
         entry.usage.settle();
+        // The orch-link lease of a remote app-server (idempotent; no-op locally).
+        entry.remote?.release();
       }
     })();
     return entry.teardownPromise;
@@ -1477,7 +1657,10 @@ export class CodexSdkManager extends AbstractCliManager {
         this.logger?.warn(
           `[CodexSdkManager] warm entry eviction teardown failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-      }).finally(() => entry.usage.settle());
+      }).finally(() => {
+        entry.usage.settle();
+        entry.remote?.release();
+      });
     }
   }
 

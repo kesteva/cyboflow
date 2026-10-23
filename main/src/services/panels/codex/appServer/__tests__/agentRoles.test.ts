@@ -12,14 +12,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EffectiveAgent } from '../../../../../orchestrator/agents/effectiveAgents';
 import { makeSpyLogger } from '../../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import {
   _resetCodexAgentRolePruneForTesting,
   codexAgentRoleModels,
   materializeCodexAgentRoles,
+  materializeCodexAgentRolesOnHost,
   pruneStaleCodexAgentRoleFiles,
+  remoteCodexAgentRolesDir,
   renderCodexAgentRoleToml,
   tomlBasicString,
 } from '../agentRoles';
@@ -377,5 +379,79 @@ describe('codexAgentRoleModels', () => {
       'cyboflow-architecture': 'gpt-5.6-sol',
       'cyboflow-context': null,
     });
+  });
+});
+
+describe('materializeCodexAgentRolesOnHost', () => {
+  const DIR = remoteCodexAgentRolesDir('/Users/me/cf-remote/h1/');
+
+  function hostFs() {
+    const files = new Map<string, { data: string; mode: number }>();
+    return {
+      files,
+      mkdirp: vi.fn(async (_p: { hostId: string; path: string }) => undefined),
+      writeFile: vi.fn(async (p: { hostId: string; path: string }, data: string, mode: number) => {
+        files.set(p.path, { data, mode });
+      }),
+    };
+  }
+
+  it('writes the SAME content-addressed TOML as the local writer, 0600, and registers the remote path', async () => {
+    const localDir = mkdtempSync(path.join(tmpdir(), 'codex-roles-local-'));
+    try {
+      const fs = hostFs();
+      const agents = [agent(), agent({ agentKey: 'implement', description: '  ' })];
+      const remote = await materializeCodexAgentRolesOnHost(agents, { hostId: 'h1', rolesDir: DIR, fs });
+      const local = materializeCodexAgentRoles(agents, localDir);
+
+      expect(DIR).toBe('/Users/me/cf-remote/h1/codex/agent-roles');
+      expect(Object.keys(remote).sort()).toEqual(Object.keys(local).sort());
+      for (const role of Object.keys(local)) {
+        expect(path.posix.dirname(remote[role].config_file)).toBe(DIR);
+        expect(path.basename(remote[role].config_file)).toBe(path.basename(local[role].config_file));
+        expect(remote[role].description).toBe(local[role].description);
+        const written = fs.files.get(remote[role].config_file);
+        expect(written?.mode).toBe(0o600);
+        expect(written?.data).toBe(readFileSync(local[role].config_file, 'utf8'));
+      }
+      expect(fs.mkdirp).toHaveBeenCalledWith({ hostId: 'h1', path: DIR });
+    } finally {
+      rmSync(localDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips files already written this session (no ssh round trip) and still registers them', async () => {
+    const fs = hostFs();
+    const written = new Set<string>();
+    await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', rolesDir: DIR, fs, written });
+    const again = await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', rolesDir: DIR, fs, written });
+    expect(fs.writeFile).toHaveBeenCalledOnce();
+    expect(fs.mkdirp).toHaveBeenCalledOnce();
+    expect(Object.keys(again)).toEqual(['cyboflow-code-review']);
+    // A different machine is a different key.
+    await materializeCodexAgentRolesOnHost([agent()], { hostId: 'h2', rolesDir: DIR, fs, written });
+    expect(fs.writeFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('is fail-soft: an unwritable role is omitted, an unusable directory registers nothing', async () => {
+    const logger = makeSpyLogger();
+    const fs = hostFs();
+    fs.writeFile.mockImplementationOnce(async () => {
+      throw new Error('Remote write failed: disk full');
+    });
+    const roles = await materializeCodexAgentRolesOnHost(
+      [agent(), agent({ agentKey: 'implement' }), agent({ agentKey: '../evil' })],
+      { hostId: 'h1', rolesDir: DIR, fs },
+      logger,
+    );
+    expect(Object.keys(roles)).toEqual(['cyboflow-implement']);
+
+    const broken = hostFs();
+    broken.mkdirp.mockRejectedValueOnce(new Error('Remote mkdir failed'));
+    await expect(materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', rolesDir: DIR, fs: broken }, logger))
+      .resolves.toEqual({});
+    await expect(materializeCodexAgentRolesOnHost([agent()], { hostId: 'h1', rolesDir: 'relative/dir', fs: broken }, logger))
+      .resolves.toEqual({});
+    expect(broken.writeFile).not.toHaveBeenCalled();
   });
 });
