@@ -74,10 +74,12 @@ export interface EnsureSessionForLaunchOptions {
    */
   baseBranch?: string;
   /**
-   * Remote environment (host id) the session runs on. Omitted / 'local' = This Mac. A selected session is
-   * reused only when its host matches (null and 'local' are equal); otherwise a fresh session is created there.
+   * Remote environment (host id) the session runs on. Omitted = no environment choice was offered: the create
+   * request carries no hostId (main then falls back to This Mac). null / 'local' = an EXPLICIT This Mac pick: the
+   * request carries `hostId: null` so a remote project default cannot override it. A selected session is reused
+   * only when its host matches (omitted, null and 'local' are all This Mac); otherwise a fresh session is created.
    */
-  hostId?: string;
+  hostId?: string | null;
 }
 
 function normalizeHost(id: string | null | undefined): string {
@@ -135,7 +137,7 @@ export async function ensureSessionForLaunch(
     ...(opts.agentModel ? { agentModel: opts.agentModel } : {}),
     ...(opts.agentRuntime ? {} : { substrate: 'sdk' as const }),
     ...(opts.baseBranch !== undefined ? { baseBranch: opts.baseBranch } : {}),
-    ...(opts.hostId !== undefined && opts.hostId !== 'local' ? { hostId: opts.hostId } : {}),
+    ...(opts.hostId !== undefined ? { hostId: opts.hostId === 'local' ? null : opts.hostId } : {}),
   });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');

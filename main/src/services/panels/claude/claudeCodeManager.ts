@@ -1550,11 +1550,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (remote !== null && !dbSession?.in_place) {
         // M2: the same bundle + overlay, placed in the REMOTE worktree through the environment's fs and awaited so the
         // remote CLI discovers them at start (no local git exclude: remoteCheckout seeded the bare repo's).
+        // The refcount is claimed BEFORE the await: a sibling lane tearing down meanwhile must see this spawn as live,
+        // or it drops the count to 0 and strips the bundle being installed. A throw releases the claim.
         const target = remoteBundleTarget(remote, options.worktreePath);
-        await installRemoteWorkflowBundle(this.db, this.bundleWriter, runId, target, makeLoggerLike(this.logger));
         this.remoteBundleTargets.set(sessionId, target);
         this.bundleWorktrees.set(sessionId, options.worktreePath);
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+        await installRemoteWorkflowBundle(this.db, this.bundleWriter, runId, target, makeLoggerLike(this.logger))
+          .catch((err: unknown) => { this.removeBundleForSession(sessionId); throw err; });
       } else if (remote === null && !dbSession?.in_place) {
         // 'prose' EXPLICITLY: this install seam is substrate-shared, but the SDK
         // path composes its prompt through workflowPromptReaderAdapter (which

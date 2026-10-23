@@ -997,6 +997,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   });
   const remoteHostId =
     selection?.kind === 'quick' || selection?.kind === 'workflow' ? envSelection.remoteHostId : null;
+  // What launch requests carry: undefined (omit) while the picker is hidden or the launch kind cannot run
+  // remotely, else the explicit pick — null for This Mac, so a remote project default cannot override it.
+  const requestHostId =
+    selection?.kind === 'quick' || selection?.kind === 'workflow' ? envSelection.requestHostId : undefined;
   // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
   const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
   useEffect(() => {
@@ -1033,7 +1037,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     error: quickError,
   } = useQuickSession({
     projectId: allowQuick ? selectedProjectId : null,
-    hostId: remoteHostId,
+    hostId: requestHostId,
     onSuccess: () => {
       setToast(`Starting quick session on ${banner.name}`);
       // CyboflowRoot reads navigationStore.activeProjectId as its `projectId`
@@ -1272,7 +1276,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentModel: model,
             // Advanced base-branch pick — '' = project default (omit).
             ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
-            ...(remoteHostId !== null ? { hostId: remoteHostId } : {}),
+            ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1366,7 +1370,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, remoteHostId],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, requestHostId],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1405,7 +1409,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentModel: model,
             // Advanced base-branch pick — '' = project default (omit).
             ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
-            ...(remoteHostId !== null ? { hostId: remoteHostId } : {}),
+            ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1469,7 +1473,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, remoteHostId],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, requestHostId],
   );
 
   // Design launch — fires from the idea-picker confirm callback

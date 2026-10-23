@@ -4395,7 +4395,7 @@ describe('SessionStartWizard — environment picker', () => {
     expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('hostId');
   });
 
-  it('a local pick (picker visible) still omits hostId', async () => {
+  it('a local pick (picker visible) sends an explicit hostId: null', async () => {
     seedHosts();
     await renderLockedWizard();
     await selectQuickAndConfigure();
@@ -4403,7 +4403,52 @@ describe('SessionStartWizard — environment picker', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
-    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('hostId');
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toHaveProperty('hostId', null);
+  });
+
+  describe('explicit This Mac pick over a remote project default (LC-1)', () => {
+    const mockGetAllProjects = vi.mocked(API.projects.getAll);
+    beforeEach(() => {
+      mockGetAllProjects.mockResolvedValue({ success: true, data: [makeProjectRow({ default_host_id: 'h2' })] });
+    });
+    afterEach(() => {
+      mockGetAllProjects.mockResolvedValue({ success: true, data: [makeProjectRow()] });
+    });
+
+    it('a quick launch carries hostId: null, not an omitted field main would resolve to the default', async () => {
+      seedHosts();
+      await renderLockedWizard();
+      await selectQuickAndConfigure();
+      // The remote project default is pre-selected…
+      await waitFor(() =>
+        expect(screen.getByTestId('wizard-environment-option-h2')).toHaveAttribute('aria-checked', 'true'),
+      );
+      // …and the user explicitly picks This Mac.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-environment-option-local'));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-cta'));
+      });
+      expect(mockCreateQuick).toHaveBeenCalledOnce();
+      expect(mockCreateQuick.mock.calls[0]?.[0]).toHaveProperty('hostId', null);
+    });
+
+    it('a workflow launch threads hostId: null into ensureSessionForLaunch', async () => {
+      seedHosts();
+      await renderLockedWizard();
+      await selectWorkflowAndConfigure();
+      await waitFor(() =>
+        expect(screen.getByTestId('wizard-environment-option-h2')).toHaveAttribute('aria-checked', 'true'),
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-environment-option-local'));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-cta'));
+      });
+      expect(mockEnsureSession).toHaveBeenCalledWith(1, expect.objectContaining({ forceNew: true, hostId: null }));
+    });
   });
 
   it('a remote quick launch carries hostId with an SDK runtime, coercing a non-SDK pick', async () => {

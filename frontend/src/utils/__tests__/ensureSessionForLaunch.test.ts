@@ -249,10 +249,16 @@ describe('ensureSessionForLaunch', () => {
       expect(mockCreateQuick.mock.calls[0][0]).toMatchObject({ hostId: 'h2' });
     });
 
-    it("never sends hostId for This Mac ('local' or omitted)", async () => {
+    it('never sends hostId when no environment choice was offered (omitted)', async () => {
       await ensureSessionForLaunch(7, { forceNew: true });
+      expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('hostId');
+    });
+
+    it("sends an explicit hostId: null for an explicit This Mac pick (null or 'local')", async () => {
+      // main reads an omitted hostId as "project default" — an explicit local pick must override a remote default.
+      await ensureSessionForLaunch(7, { forceNew: true, hostId: null });
       await ensureSessionForLaunch(7, { forceNew: true, hostId: 'local' });
-      for (const call of mockCreateQuick.mock.calls) expect(call[0]).not.toHaveProperty('hostId');
+      for (const call of mockCreateQuick.mock.calls) expect(call[0]).toHaveProperty('hostId', null);
     });
 
     it('reuses a free selection only when its host matches (null and local are equal)', async () => {
@@ -260,6 +266,7 @@ describe('ensureSessionForLaunch', () => {
       mockSessionGetState.mockReturnValue({ sessions: [{ id: 'sess-existing', hostId: null }] });
       expect(await ensureSessionForLaunch(7)).toBe('sess-existing');
       expect(await ensureSessionForLaunch(7, { hostId: 'local' })).toBe('sess-existing');
+      expect(await ensureSessionForLaunch(7, { hostId: null })).toBe('sess-existing');
       expect(mockCreateQuick).not.toHaveBeenCalled();
     });
 

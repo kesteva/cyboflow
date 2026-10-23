@@ -135,6 +135,10 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 
 vi.mock('../../../utils/api', () => ({
   API: {
+    // The picker reads the project's default environment from here; an empty list = no default (This Mac).
+    projects: {
+      getAll: vi.fn().mockResolvedValue({ success: true, data: [] }),
+    },
     sessions: {
       createQuick: vi.fn(),
     },
@@ -2757,6 +2761,29 @@ describe('WorkflowPicker — environment picker (M2 C4)', () => {
     await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
     expect(screen.queryByTestId('workflow-picker-environment')).not.toBeInTheDocument();
     expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('hostId');
+  });
+
+  it('an explicit This Mac pick over a remote project default sends hostId: null (LC-1)', async () => {
+    vi.mocked(API.projects.getAll).mockResolvedValueOnce({
+      success: true,
+      data: [{ id: 1, name: 'Proj', path: '/tmp/p', active: true, created_at: '', updated_at: '', default_host_id: 'h2' }],
+    });
+    act(() => {
+      useHostsStore.setState({ hosts: [makeLocalHost(), readyHost], featureStatus: makeHostsStatus() });
+    });
+    render(<WorkflowPicker projectId={1} />);
+    const startRun = await findEnabledStartRun();
+    await waitFor(() =>
+      expect(screen.getByTestId('workflow-picker-environment-option-h2')).toHaveAttribute('aria-checked', 'true'),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-environment-option-local'));
+    });
+    await act(async () => {
+      fireEvent.click(startRun);
+    });
+    await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toHaveProperty('hostId', null);
   });
 
   it('a remote pick threads hostId into the host session create', async () => {

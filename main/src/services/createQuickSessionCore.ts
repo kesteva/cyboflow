@@ -73,6 +73,11 @@ export interface CreateQuickSessionCoreDeps {
   sessionManager: {
     on(event: 'session-created', listener: (s: QuickSessionRow) => void): void;
     removeListener(event: 'session-created', listener: (s: QuickSessionRow) => void): void;
+    /**
+     * Hide a session row (SessionManager.archiveSession). Optional: used only to retire a REMOTE session that
+     * surfaced after its waiter gave up, when no {@link CreateQuickSessionCoreDeps.dismissHalfCreatedSession} is wired.
+     */
+    archiveSession?(sessionId: string): Promise<void>;
   };
   workflowRegistry: {
     ensureQuickWorkflow(projectId: number): string;
@@ -147,7 +152,10 @@ export interface CreateQuickSessionCoreOptions {
    * {@link resolveQuickSessionHost} validated it. Every other caller omits it (This Mac).
    */
   hostId?: string | null;
-  /** Await budget for the session-created event (default 30s). */
+  /**
+   * Await budget for the session-created event (default 30s; a REMOTE session defaults to
+   * {@link REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS}, its provisioning budget).
+   */
   timeoutMs?: number;
 }
 
@@ -157,6 +165,22 @@ export interface CreateQuickSessionCoreResult {
   resolvedSubstrate: CliSubstrate;
   jobId: string;
 }
+
+/** The local default await budget for the session-created event. */
+const LOCAL_QUICK_SESSION_CREATE_TIMEOUT_MS = 30_000;
+
+/**
+ * The await budget for a REMOTE session's session-created event. A remote session-create job provisions the
+ * environment worktree BEFORE session-created fires (services/taskQueue.ts → RemoteCheckout.ensureSessionWorktree),
+ * so the waiter must outlast that work, not the local 30s. Mirrors the step budgets in services/hosts/remoteCheckout.ts:
+ * the bare-repo lock wait (5 min) + its git steps, the base push of possibly the full history (30 min), the worktree
+ * add (10 min), plus a few 60s git probes — rounded up to 50 minutes. KEEP IN SYNC with those constants.
+ */
+export const REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS = 50 * 60_000;
+
+export const REMOTE_QUICK_SESSION_TIMEOUT_MESSAGE =
+  'Setting up the session on its environment took too long, so cyboflow stopped waiting. ' +
+  'If the setup finishes later, the session is removed from the environment automatically. Try again, or check the environment from Environments.';
 
 /**
  * Session ids already claimed by an in-flight core call's session-created
@@ -191,6 +215,7 @@ export async function createQuickSessionCore(
   const { taskQueue, sessionManager, workflowRegistry } = deps;
   const branchName = opts.nameHint;
   const inPlace = opts.inPlace === true;
+  const remote = isRemoteHostId(opts.hostId);
 
   // Job failures are subscribed BEFORE the job is enqueued: the processor's
   // throw is otherwise swallowed into a queue log line, and the only thing the
@@ -238,14 +263,17 @@ export async function createQuickSessionCore(
     // matching by path exactly as before. Names carry no separators, so this
     // branch needs no normalization.
     const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
-    const onCreated = (createdSession: QuickSessionRow) => {
+    const matchesThisCall = (createdSession: QuickSessionRow): boolean => {
       const wt = normalizePathSeparators(createdSession.worktreePath ?? '');
       const name = createdSession.name ?? '';
-      const matches =
+      return (
         wt.split('/').pop() === branchName ||
         suffixed.test(wt) ||
-        (inPlace && (name === branchName || nameSuffixed.test(name)));
-      if (!matches) return;
+        (inPlace && (name === branchName || nameSuffixed.test(name)))
+      );
+    };
+    const onCreated = (createdSession: QuickSessionRow) => {
+      if (!matchesThisCall(createdSession)) return;
       // Claim the session id so a concurrent sibling call doesn't also resolve to it.
       if (claimedQuickSessionIds.has(createdSession.id)) return;
       claimedQuickSessionIds.add(createdSession.id);
@@ -258,8 +286,14 @@ export async function createQuickSessionCore(
     };
     const timeout = setTimeout(() => {
       cleanup();
+      if (remote) {
+        // The remote job is still provisioning and nobody will ever receive its id: retire it when it lands.
+        watchForLateRemoteSession(deps, opts.hostId, job.id, matchesThisCall);
+        reject(new Error(REMOTE_QUICK_SESSION_TIMEOUT_MESSAGE));
+        return;
+      }
       reject(new Error('Timed out waiting for quick session to be created'));
-    }, opts.timeoutMs ?? 30_000);
+    }, opts.timeoutMs ?? (remote ? REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS : LOCAL_QUICK_SESSION_CREATE_TIMEOUT_MS));
     const cleanup = () => {
       clearTimeout(timeout);
       sessionManager.removeListener('session-created', onCreated);
@@ -338,6 +372,55 @@ export async function createQuickSessionCore(
       await deps.dismissHalfCreatedSession(session.id).catch(() => {});
     }
     throw err;
+  }
+}
+
+/**
+ * After a REMOTE create's waiter timed out, the session-create job may still finish: its session-created would then
+ * surface a session no caller holds (an orphan with a live environment worktree). Watch for it and retire it — remove
+ * the environment worktree, then dismiss (or, unwired, archive) the row. A job that FAILS late needs nothing: the
+ * task queue already compensated it. The watch claims the id (so a concurrent sibling waiter cannot resolve to the
+ * orphan) and expires after another provisioning budget so a job that never settles cannot leak the listener.
+ */
+function watchForLateRemoteSession(
+  deps: CreateQuickSessionCoreDeps,
+  hostId: string | null | undefined,
+  jobId: string,
+  matches: (s: QuickSessionRow) => boolean,
+): void {
+  const { sessionManager, taskQueue } = deps;
+  let unsubscribeFailed: () => void = () => {};
+  const stop = (): void => {
+    clearTimeout(expiry);
+    sessionManager.removeListener('session-created', onLate);
+    unsubscribeFailed();
+  };
+  const onLate = (late: QuickSessionRow): void => {
+    if (!matches(late) || claimedQuickSessionIds.has(late.id)) return;
+    claimedQuickSessionIds.add(late.id);
+    stop();
+    void compensateLateRemoteSession(deps, hostId, late.id);
+  };
+  const expiry = setTimeout(stop, REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS);
+  expiry.unref?.();
+  sessionManager.on('session-created', onLate);
+  unsubscribeFailed = taskQueue.onSessionJobFailed((failedJobId) => {
+    if (failedJobId === jobId) stop();
+  });
+}
+
+async function compensateLateRemoteSession(
+  deps: CreateQuickSessionCoreDeps,
+  hostId: string | null | undefined,
+  sessionId: string,
+): Promise<void> {
+  if (isRemoteHostId(hostId)) {
+    await getRemoteCheckout()?.removeSessionWorktree(sessionId).catch(() => false);
+  }
+  if (deps.dismissHalfCreatedSession) {
+    await deps.dismissHalfCreatedSession(sessionId).catch(() => {});
+  } else if (deps.sessionManager.archiveSession) {
+    await deps.sessionManager.archiveSession(sessionId).catch(() => {});
   }
 }
 

@@ -1159,11 +1159,14 @@ describe('useQuickSession — environment (hostId)', () => {
     expect(await startWith('h2')).toMatchObject({ hostId: 'h2' });
   });
 
-  it('omits hostId entirely for This Mac', async () => {
+  it('omits hostId entirely when no environment choice was offered (undefined)', async () => {
     expect(await startWith()).not.toHaveProperty('hostId');
+  });
+
+  it("sends an explicit hostId: null for an explicit This Mac pick (null or 'local')", async () => {
+    // An omitted hostId means "project default" to main; an explicit local pick must not be overridden by it.
+    expect(await startWith(null)).toHaveProperty('hostId', null);
     mockCreateQuick.mockClear();
-    expect(await startWith('local')).not.toHaveProperty('hostId');
-    mockCreateQuick.mockClear();
-    expect(await startWith(null)).not.toHaveProperty('hostId');
+    expect(await startWith('local')).toHaveProperty('hostId', null);
   });
 });

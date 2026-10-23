@@ -7,7 +7,9 @@
  *
  * `useEnvironmentSelection` owns the choice so the launch callbacks and the picker agree: it resolves the
  * effective host (user pick → project default → This Mac, falling back to This Mac whenever the pick is gone or
- * not launchable) and exposes `remoteHostId` — null for This Mac, so local payloads omit `hostId` entirely.
+ * not launchable) and exposes `remoteHostId` — null for This Mac — plus `requestHostId`, the value a launch request
+ * carries: undefined while the picker is hidden (the request omits `hostId`, byte-identical to before environments),
+ * else the explicit choice — null for This Mac, so main never lets a remote project default override it.
  */
 import { useCallback, useMemo, useState } from 'react';
 import { useHostsStore } from '../../stores/hostsStore';
@@ -30,8 +32,15 @@ export interface EnvironmentSelection {
   hosts: HostView[];
   /** 'local' or a host id; always a launchable choice. */
   selected: string;
-  /** The remote host id to launch on, or null for This Mac (omit hostId from the request). */
+  /** The remote host id to launch on, or null for This Mac. Drives the SDK-runtime coercion. */
   remoteHostId: string | null;
+  /**
+   * The `hostId` a launch request carries. undefined = the picker is hidden: omit the field (main falls back to
+   * This Mac). Otherwise the user's explicit choice: a host id, or null for This Mac — an explicit null, NOT an
+   * omitted field, because main reads an omitted `hostId` as "use the project default", which would let a remote
+   * project default override an explicit This Mac pick.
+   */
+  requestHostId: string | null | undefined;
   /** The saved project default (null = This Mac). */
   savedDefault: string | null;
   setSelected: (id: string) => void;
@@ -76,12 +85,14 @@ export function useEnvironmentSelection(args: {
     else if (picked === null && savedDefault !== null && launchable(savedDefault)) selected = savedDefault;
   }
   const remoteHostId = selected === LOCAL_ENVIRONMENT ? null : selected;
+  const requestHostId = visible ? remoteHostId : undefined;
 
   return {
     visible,
     hosts,
     selected,
     remoteHostId,
+    requestHostId,
     savedDefault,
     setSelected: setPicked,
     setSavedDefault: (value) => setSavedOverride({ projectId: args.projectId, value }),

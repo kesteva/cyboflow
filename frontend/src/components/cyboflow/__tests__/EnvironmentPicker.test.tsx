@@ -30,6 +30,7 @@ function Harness(props: { defaultHostId?: string | null; runtime?: string }) {
     <>
       <EnvironmentPicker selection={sel} projectId={7} kind="workflow" runtime={props.runtime ?? 'claude-sdk'} />
       <span data-testid="remote">{sel.remoteHostId ?? 'none'}</span>
+      <span data-testid="request">{sel.requestHostId === undefined ? 'omit' : String(sel.requestHostId)}</span>
     </>
   );
 }
@@ -90,6 +91,21 @@ describe('EnvironmentPicker', () => {
     expect(screen.getByTestId('remote')).toHaveTextContent('none');
   });
 
+  it('an explicit This Mac pick over a remote project default yields requestHostId null, not omitted (LC-1)', () => {
+    seed();
+    render(<Harness defaultHostId="h2" />);
+    expect(screen.getByTestId('request')).toHaveTextContent('h2');
+    fireEvent.click(screen.getByTestId('environment-picker-option-local'));
+    expect(screen.getByTestId('remote')).toHaveTextContent('none');
+    expect(screen.getByTestId('request')).toHaveTextContent('null');
+  });
+
+  it('a hidden picker omits the request hostId (requestHostId undefined)', () => {
+    seed([makeLocalHost(), full()], makeHostsStatus({ running: false }));
+    render(<Harness defaultHostId="h2" />);
+    expect(screen.getByTestId('request')).toHaveTextContent('omit');
+  });
+
   it('does not let a non-SDK runtime disable rows, but a signed-out SDK runtime does', () => {
     seed([makeLocalHost(), full({ preflight: makePreflight({ runtimes: { claudeSdk: false, codexSdk: true, claudeCli: true, codexCli: true } }) })]);
     const { rerender } = render(<Harness runtime="claude-interactive" />);
@@ -130,5 +146,6 @@ describe('useEnvironmentSelection', () => {
     const { result } = renderHook(() => useEnvironmentSelection({ projectId: 1, projectDefaultHostId: 'h2', kind: 'session' }));
     expect(result.current.visible).toBe(false);
     expect(result.current.remoteHostId).toBeNull();
+    expect(result.current.requestHostId).toBeUndefined();
   });
 });

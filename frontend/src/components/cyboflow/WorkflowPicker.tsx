@@ -363,6 +363,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     kind: 'workflow',
   });
   const remoteHostId = envSelection.remoteHostId;
+  // What launch requests carry: undefined (omit) while the picker is hidden, else the explicit pick (null = This Mac).
+  const requestHostId = envSelection.requestHostId;
   // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
   const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
   useEffect(() => {
@@ -426,7 +428,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     error: quickError,
   } = useQuickSession({
     projectId,
-    hostId: remoteHostId,
+    hostId: requestHostId,
     onSuccess: (sessionId) => {
       onWorkflowStarted?.(sessionId);
     },
@@ -531,7 +533,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
           agentModel: launchModel,
-          ...(remoteHostId !== null ? { hostId: remoteHostId } : {}),
+          ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -566,7 +568,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, remoteHostId],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, requestHostId],
   );
 
   /**
@@ -596,7 +598,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
           agentModel: launchModel,
-          ...(remoteHostId !== null ? { hostId: remoteHostId } : {}),
+          ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -626,7 +628,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, remoteHostId],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, requestHostId],
   );
 
   const handleStartRun = async () => {
