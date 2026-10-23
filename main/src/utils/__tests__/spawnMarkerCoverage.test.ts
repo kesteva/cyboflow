@@ -87,7 +87,7 @@ const SPAWN_SITES: Record<string, SpawnSite[]> = {
   'services/hosts/hostTerminalManager.ts': [{ kind: 'call', callee: 'this.spawn', count: 1 }],
   'services/panels/codex/appServer/runConfig.ts': [
     { kind: 'property', name: 'cyboflow', count: 1 },
-    { kind: 'return-stamp', count: 1 },
+    { kind: 'return-stamp', count: 2 }, // the local app-server env + the remote one (M2)
   ],
   'services/panels/logPanel/logsManager.ts': [{ kind: 'call', callee: 'spawn', count: 1 }],
   'orchestrator/verify/verificationAgentRunner.ts': [{ kind: 'call', callee: 'queryFn', count: 1 }],
