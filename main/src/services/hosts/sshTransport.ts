@@ -284,7 +284,8 @@ function baseConnectionArgs(): string[] {
 }
 
 /** Remote prep for a forward: the socket's parent 0700, and no stale socket that would fake readiness. */
-const FORWARD_PREP_PROGRAM = 'umask 077; mkdir -p -- "$1" && chmod 700 -- "$1" && rm -f -- "$2"';
+// BSD chmod (macOS) has no `--`; $1 is always absolute (assertForwardSocketPath), so it cannot read as an option.
+export const FORWARD_PREP_PROGRAM = 'umask 077; mkdir -p -- "$1" && chmod 700 "$1" && rm -f -- "$2"';
 
 /** A forward endpoint: absolute, and free of the characters ssh's `-R a:b` / option parsing cannot carry. */
 export function assertForwardSocketPath(p: string): void {
