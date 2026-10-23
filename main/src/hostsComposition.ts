@@ -24,6 +24,14 @@
  * serializes within one instance) and a RemoteCheckout over it, the HostStore, the registry and the transport; the
  * checkout is published on services/hosts/remoteCheckoutBridge alongside the runtime (taskQueue reaches it there).
  *
+ * Merge-back (spec E2): a MergeBackService over the same store, published on services/hosts/mergeBack/mergeBackBridge
+ * (gitOps merges / pushes / probes through it; bootRecovery resumes it). Two subscriptions feed it while started:
+ *  - checkpoints: every non-terminal run hosted on a remote environment (seeded from the db at start(), then followed
+ *    through runStatusEvents) has its sprintLaneChannel watched; a lane going `integrated` requests a coalesced
+ *    background fetch of the session branch into refs/cyboflow/checkpoint/<key>;
+ *  - archive: a row RemoteCheckout walks abandoned → cleaned (the remote half) gets its local half (import /
+ *    checkpoint refs, mirror worktree + branch) removed through the store's change callback.
+ *
  * Host terminal lifecycle guards (the renderer modal owns a terminal, but cannot always close it):
  *  - a config change that leaves the feature not running (or remote hosts kill-switched) destroys every terminal;
  *  - the first terminal opened against a main-window webContents attaches (once per webContents id) a main-frame
@@ -51,6 +59,14 @@ import { getRemoteCheckout, setRemoteCheckout } from './services/hosts/remoteChe
 import { getExecutionHostResolver, setExecutionHostResolver, type ExecutionHostResolver } from './services/hosts/executionHostBridge';
 import { RemoteArtifactFetcher } from './services/hosts/remoteArtifactFetcher';
 import { getRemoteArtifactFetcher, setRemoteArtifactFetcher } from './orchestrator/hosts/remoteArtifactPull';
+import type { MergeBackChange } from './orchestrator/hosts/mergeBackStore';
+import { sprintLaneChannel, sprintLaneEvents } from './orchestrator/sprintLaneStore';
+import { runStatusEvents } from './orchestrator/trpc/routers/events';
+import { MergeBackService } from './services/hosts/mergeBack/mergeBackService';
+import { getMergeBackService, setMergeBackService } from './services/hosts/mergeBack/mergeBackBridge';
+import { isRemoteHostId } from '../../shared/types/hosts';
+import { TERMINAL_RUN_STATUSES, type RunStatusChangedEvent } from '../../shared/types/cyboflow';
+import type { SprintLaneChangedEvent } from '../../shared/types/sprintBatch';
 import { RemoteRuntime } from './services/hosts/remoteRuntime';
 import { getRemoteRuntime, setRemoteRuntime } from './services/hosts/remoteRuntimeBridge';
 import { SshTransport } from './services/hosts/sshTransport';
@@ -81,6 +97,8 @@ export interface HostsComposition {
   mergeBackStore: MergeBackStore;
   /** Published on remoteCheckoutBridge while started. */
   remoteCheckout: RemoteCheckout;
+  /** Published on mergeBackBridge while started. */
+  mergeBack: MergeBackService;
   /** PTY shells owned by open host terminals (System view). */
   terminalShells: () => OwnedHostShell[];
   /** Idempotent. */
@@ -187,7 +205,9 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
     captureError: captureSeamError,
   });
-  const mergeBackStore = new MergeBackStore(db, { logger });
+  // Late-bound: the merge-back service is built over this store, and its change callback reaches the service.
+  let onMergeBackChange: ((change: MergeBackChange) => void) | null = null;
+  const mergeBackStore = new MergeBackStore(db, { logger, onChange: (change) => onMergeBackChange?.(change) });
   const remoteCheckout = new RemoteCheckout({
     status: () => service.status(),
     store,
@@ -197,6 +217,72 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     logger,
     captureError: captureSeamError,
   });
+
+  const mergeBack = new MergeBackService({
+    status: () => service.status(),
+    store,
+    getHost: (hostId) => registry.get(hostId),
+    transport,
+    mergeBacks: mergeBackStore,
+    projectPathFor: (projectId) => {
+      try {
+        const row = db.prepare('SELECT path FROM projects WHERE id = ?').get(projectId) as { path?: unknown } | undefined;
+        return typeof row?.path === 'string' && row.path !== '' ? row.path : null;
+      } catch {
+        return null;
+      }
+    },
+    logger,
+    captureError: captureSeamError,
+  });
+  onMergeBackChange = (change) => {
+    // Archive: RemoteCheckout removed the remote half; the local half (refs, mirror) goes here. Idempotent.
+    if (change.state === 'cleaned' && change.previous === 'abandoned') void mergeBack.cleanupLocal(change.sessionId).catch(() => false);
+  };
+
+  // Checkpoints: watch the lane channel of every live run hosted on a remote environment.
+  const watchedRuns = new Map<string, (event: SprintLaneChangedEvent) => void>();
+  const watchRun = (runId: string, sessionId: string): void => {
+    if (watchedRuns.has(runId)) return;
+    const listener = (event: SprintLaneChangedEvent): void => {
+      if (event.status === 'integrated') void mergeBack.requestCheckpoint(sessionId).catch(() => undefined);
+    };
+    watchedRuns.set(runId, listener);
+    sprintLaneEvents.on(sprintLaneChannel(runId), listener);
+  };
+  const unwatchRun = (runId: string): void => {
+    const listener = watchedRuns.get(runId);
+    if (!listener) return;
+    sprintLaneEvents.off(sprintLaneChannel(runId), listener);
+    watchedRuns.delete(runId);
+  };
+  const isTerminalRunStatus = (status: string): boolean => (TERMINAL_RUN_STATUSES as readonly string[]).includes(status);
+  const onRunStatus = (event: RunStatusChangedEvent): void => {
+    try {
+      if (isTerminalRunStatus(event.status)) {
+        unwatchRun(event.runId);
+        return;
+      }
+      const run = db.prepare('SELECT host_id, session_id FROM workflow_runs WHERE id = ?').get(event.runId) as
+        | { host_id: string | null; session_id: string | null }
+        | undefined;
+      if (run && isRemoteHostId(run.host_id) && run.session_id) watchRun(event.runId, run.session_id);
+    } catch (err) {
+      logger.warn('[merge-back] could not follow a run for checkpoints', { error: err instanceof Error ? err.name : 'unknown' });
+    }
+  };
+  const seedWatchedRuns = (): void => {
+    try {
+      const rows = db.prepare(
+        `SELECT id, session_id FROM workflow_runs
+          WHERE host_id IS NOT NULL AND host_id != 'local' AND session_id IS NOT NULL
+            AND status NOT IN (${TERMINAL_RUN_STATUSES.map(() => '?').join(', ')})`,
+      ).all(...TERMINAL_RUN_STATUSES) as Array<{ id: string; session_id: string }>;
+      for (const row of rows) watchRun(row.id, row.session_id);
+    } catch (err) {
+      logger.warn('[merge-back] could not list remote runs for checkpoints', { error: err instanceof Error ? err.name : 'unknown' });
+    }
+  };
 
   const onConfig = (): void => {
     // Turned off (or remote hosts kill-switched): no terminal may outlive the feature.
@@ -215,6 +301,7 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     remoteRuntime,
     mergeBackStore,
     remoteCheckout,
+    mergeBack,
     terminalShells: () => terminals.listOwnedShells(),
     start(): void {
       if (started) return;
@@ -223,6 +310,9 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       setRemoteCheckout(remoteCheckout);
       setExecutionHostResolver(hostResolver);
       setRemoteArtifactFetcher(artifactFetcher);
+      setMergeBackService(mergeBack);
+      seedWatchedRuns();
+      runStatusEvents.on('changed', onRunStatus);
       scheduler.start();
       configManager.on('config-updated', onConfig);
     },
@@ -232,6 +322,9 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
       if (getRemoteCheckout() === remoteCheckout) setRemoteCheckout(null);
       if (getExecutionHostResolver() === hostResolver) setExecutionHostResolver(null);
       if (getRemoteArtifactFetcher() === artifactFetcher) setRemoteArtifactFetcher(null);
+      if (getMergeBackService() === mergeBack) setMergeBackService(null);
+      runStatusEvents.off('changed', onRunStatus);
+      for (const runId of [...watchedRuns.keys()]) unwatchRun(runId);
       scheduler.stop();
       configManager.off('config-updated', onConfig);
       service.shutdown();

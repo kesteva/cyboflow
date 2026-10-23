@@ -41,6 +41,9 @@ import {
 import { HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../services/hosts/flags';
 import { getRemoteRuntime, setRemoteRuntime } from '../services/hosts/remoteRuntimeBridge';
 import { getRemoteCheckout, setRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
+import { getMergeBackService, setMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
+import { sprintLaneChannel, sprintLaneEvents } from '../orchestrator/sprintLaneStore';
+import { runStatusEvents } from '../orchestrator/trpc/routers/events';
 import type { HostsChangedEvent } from '../../../shared/types/hosts';
 import type { LoggerLike } from '../orchestrator/types';
 
@@ -116,6 +119,7 @@ afterEach(() => {
   _resetHostsFacadeForTesting();
   setRemoteRuntime(null);
   setRemoteCheckout(null);
+  setMergeBackService(null);
   raw.close();
   vi.unstubAllEnvs();
 });
@@ -276,6 +280,66 @@ describe('composeHosts remote checkout bridge', () => {
     // h1 has no completed check, so there is no remote root to name a path under.
     expect(() => comp.remoteCheckout.plannedWorktreePath('h1', 'k')).toThrow(/no completed check/);
     expect(() => comp.remoteCheckout.plannedWorktreePath('nope', 'k')).toThrow();
+  });
+});
+
+describe('composeHosts merge-back', () => {
+  const lane = (runId: string, status: string) => ({ runId, batchId: 'b', taskId: 't', status, currentStepId: null, attempts: 1, visualVerification: null, timestamp: 'now' });
+
+  it('publishes the merge-back service at start() and clears it at stop(), leaving a foreign one in place', () => {
+    expect(getMergeBackService()).toBeNull();
+    comp.start();
+    expect(getMergeBackService()).toBe(comp.mergeBack);
+    comp.stop();
+    expect(getMergeBackService()).toBeNull();
+    comp.start();
+    const other = { ...comp.mergeBack } as typeof comp.mergeBack;
+    setMergeBackService(other);
+    comp.stop();
+    expect(getMergeBackService()).toBe(other);
+  });
+
+  it('checkpoints: watches live remote runs (seeded + followed), asks on integrated only, unwatches on terminal / stop', () => {
+    // 152 added workflow_runs.host_id (FK to hosts); session_id comes from the real schema.
+    insertHost();
+    raw.exec(`ALTER TABLE workflow_runs ADD COLUMN session_id TEXT;
+              INSERT INTO workflow_runs (id, status, host_id, session_id) VALUES
+                ('r1', 'running', 'h1', 's1'), ('r0', 'running', NULL, 's0'), ('rL', 'running', 'local', 'sL'),
+                ('rT', 'completed', 'h1', 'sT');`);
+    const asked: string[] = [];
+    vi.spyOn(comp.mergeBack, 'requestCheckpoint').mockImplementation(async (sessionId: string) => { asked.push(sessionId); });
+    comp.start();
+    for (const runId of ['r1', 'r0', 'rL', 'rT']) sprintLaneEvents.emit(sprintLaneChannel(runId), lane(runId, 'integrated'));
+    sprintLaneEvents.emit(sprintLaneChannel('r1'), lane('r1', 'running'));
+    expect(asked).toEqual(['s1']);
+
+    runStatusEvents.emit('changed', { runId: 'r1', status: 'completed' });
+    sprintLaneEvents.emit(sprintLaneChannel('r1'), lane('r1', 'integrated'));
+    expect(asked).toEqual(['s1']);
+
+    raw.exec(`INSERT INTO workflow_runs (id, status, host_id, session_id) VALUES ('r2', 'starting', 'h1', 's2')`);
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(1);
+    sprintLaneEvents.emit(sprintLaneChannel('r2'), lane('r2', 'integrated'));
+    expect(asked).toEqual(['s1', 's2']);
+
+    comp.stop();
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(0);
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(0);
+  });
+
+  it('an archived session (abandoned → cleaned) gets its local half cleaned', async () => {
+    raw.exec(readFileSync(join(__dirname, '..', 'database', 'migrations', '153_session_merge_backs.sql'), 'utf-8'));
+    raw.exec(`INSERT INTO projects (id, name) VALUES (1, 'p'); INSERT INTO sessions (id) VALUES ('s1');`);
+    insertHost();
+    const local = vi.spyOn(comp.mergeBack, 'cleanupLocal').mockResolvedValue(true);
+    await comp.mergeBackStore.create({ sessionId: 's1', hostId: 'h1', projectId: 1, mergeKey: 'k', branch: 'k', state: 'remote_ready' });
+    await comp.mergeBackStore.transition('s1', { from: ['remote_ready'], to: 'abandoned' });
+    expect(local).not.toHaveBeenCalled();
+    await comp.mergeBackStore.transition('s1', { from: ['abandoned'], to: 'cleaned' });
+    expect(local).toHaveBeenCalledWith('s1');
   });
 });
 

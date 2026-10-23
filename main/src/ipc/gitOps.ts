@@ -46,6 +46,7 @@ import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCo
 import { resolveSessionDiffBaseRef } from './sessionFileStats';
 import type { WorktreeStatusPayload, DiffGroupScope } from '../../../shared/types/runFiles';
 import { isRemoteSession, remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
+import { requireMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -512,6 +513,44 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     void endLiveSession(session.chatRunId).catch((err: unknown) => {
       console.warn(`[IPC:git] Failed to end live session process for session ${sessionId}:`, err);
     });
+  };
+
+  // M2 merge-back (remote sessions). The agent on the environment must be stopped BEFORE the branch tip is read
+  // (a later commit would be lost), so a remote merge AWAITS the same fail-soft close instead of firing it after.
+  const stopLiveSessionProcesses = async (session: Session, sessionId: string): Promise<void> => {
+    if (!session.chatRunId) return;
+    try {
+      await endLiveSession(session.chatRunId);
+    } catch (err) {
+      console.warn(`[IPC:git] Failed to end live session process for session ${sessionId}:`, err);
+    }
+  };
+
+  // A remote session merges on a LOCAL mirror of its environment branch (services/hosts/mergeBack): import →
+  // mirror → the unchanged `merge` on the mirror path; a main that moved refreshes refs/cyboflow/base/<key> there.
+  const mergeRemoteSession = (
+    session: Session,
+    sessionId: string,
+    projectPath: string,
+    mainBranch: string,
+    merge: (mirrorPath: string) => Promise<void>,
+  ) => requireMergeBackService().mergeSession({
+    sessionId,
+    projectPath,
+    mainBranch,
+    stopProcesses: () => stopLiveSessionProcesses(session, sessionId),
+    needsRebase: (mirrorPath) => worktreeManager.hasChangesToRebase(mirrorPath, mainBranch),
+    merge,
+  });
+
+  // Create-PR for a remote session pushes from the mirror (the environment holds no origin credentials).
+  const pushRemoteSession = async (session: Session, sessionId: string): Promise<{ output: string }> => {
+    const project = sessionManager.getProjectForSession(sessionId);
+    if (!project) throw new Error('Project not found for session');
+    return requireMergeBackService().withMirror(
+      { sessionId, projectPath: project.path, stopProcesses: () => stopLiveSessionProcesses(session, sessionId) },
+      (mirror) => worktreeManager.gitPush(mirror.worktreePath),
+    );
   };
 
   // Helper function to emit git operation events to all sessions in a project
@@ -1221,31 +1260,46 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         new Promise((_, reject) => setTimeout(() => reject(new Error('getProjectMainBranch timeout')), 30000))
       ]) as string;
 
-      // Pre-merge guard: if main has advanced past this branch, a rebase is
-      // needed first. We do NOT auto-rebase here — the merge methods would
-      // silently rebase the worktree onto main (surprising the operator with
-      // extra commits in the merge / PR). Block and report so the user can
-      // rebase via chat, then merge.
-      if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
-        return {
-          success: false,
-          needsRebase: true,
-          error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
-        };
-      }
-
       // Emit git operation started event to all sessions in project
-      const startMessage = `🔄 GIT OPERATION\nSquashing commits and merging to ${mainBranch}...\nCommit message: ${commitMessage.split('\n')[0]}${commitMessage.includes('\n') ? '...' : ''}`;
-      emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
-        operation: 'squash_and_merge',
-        mainBranch,
-        commitMessage: commitMessage.split('\n')[0]
-      });
+      const emitSquashStarted = (): void => {
+        const startMessage = `🔄 GIT OPERATION\nSquashing commits and merging to ${mainBranch}...\nCommit message: ${commitMessage.split('\n')[0]}${commitMessage.includes('\n') ? '...' : ''}`;
+        emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
+          operation: 'squash_and_merge',
+          mainBranch,
+          commitMessage: commitMessage.split('\n')[0]
+        });
+      };
+      const squashWorktree = async (worktreePath: string): Promise<void> => {
+        await Promise.race([
+          worktreeManager.squashAndMergeWorktreeToMain(project.path, worktreePath, mainBranch, commitMessage),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('squashAndMergeWorktreeToMain timeout')), 180000))
+        ]);
+      };
 
-      await Promise.race([
-        worktreeManager.squashAndMergeWorktreeToMain(project.path, session.worktreePath, mainBranch, commitMessage),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('squashAndMergeWorktreeToMain timeout')), 180000))
-      ]);
+      if (isRemoteSession(session)) {
+        // Remote: the same guard and squash, on the local mirror (the guard's answer refreshes the base remotely).
+        const remote = await mergeRemoteSession(session, sessionId, project.path, mainBranch, async (mirrorPath) => {
+          emitSquashStarted();
+          await squashWorktree(mirrorPath);
+        });
+        if (remote.kind === 'needs-rebase') return { success: false, needsRebase: true, error: remote.message };
+      } else {
+        // Pre-merge guard: if main has advanced past this branch, a rebase is
+        // needed first. We do NOT auto-rebase here — the merge methods would
+        // silently rebase the worktree onto main (surprising the operator with
+        // extra commits in the merge / PR). Block and report so the user can
+        // rebase via chat, then merge.
+        if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
+          return {
+            success: false,
+            needsRebase: true,
+            error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
+          };
+        }
+
+        emitSquashStarted();
+        await squashWorktree(session.worktreePath);
+      }
 
       // Emit git operation completed event to all sessions in project
       const successMessage = `✓ Successfully squashed and merged worktree to ${mainBranch}`;
@@ -1348,27 +1402,39 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // Get the effective main branch (override or auto-detected)
       const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
 
-      // Pre-merge guard: if main has advanced past this branch, a rebase is
-      // needed first. We do NOT auto-rebase here — mergeWorktreeToMain would
-      // silently rebase the worktree onto main (surprising the operator with
-      // extra commits in the merge / PR). Block and report so the user can
-      // rebase via chat, then merge.
-      if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
-        return {
-          success: false,
-          needsRebase: true,
-          error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
-        };
-      }
-
       // Emit git operation started event to all sessions in project
-      const startMessage = `🔄 GIT OPERATION\nMerging to ${mainBranch} (preserving all commits)...`;
-      emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
-        operation: 'merge_to_main',
-        mainBranch
-      });
+      const emitMergeStarted = (): void => {
+        const startMessage = `🔄 GIT OPERATION\nMerging to ${mainBranch} (preserving all commits)...`;
+        emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
+          operation: 'merge_to_main',
+          mainBranch
+        });
+      };
 
-      await worktreeManager.mergeWorktreeToMain(project.path, session.worktreePath, mainBranch);
+      if (isRemoteSession(session)) {
+        // Remote: the same guard and merge, on the local mirror (see squashAndRebaseToMain).
+        const remote = await mergeRemoteSession(session, sessionId, project.path, mainBranch, async (mirrorPath) => {
+          emitMergeStarted();
+          await worktreeManager.mergeWorktreeToMain(project.path, mirrorPath, mainBranch);
+        });
+        if (remote.kind === 'needs-rebase') return { success: false, needsRebase: true, error: remote.message };
+      } else {
+        // Pre-merge guard: if main has advanced past this branch, a rebase is
+        // needed first. We do NOT auto-rebase here — mergeWorktreeToMain would
+        // silently rebase the worktree onto main (surprising the operator with
+        // extra commits in the merge / PR). Block and report so the user can
+        // rebase via chat, then merge.
+        if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
+          return {
+            success: false,
+            needsRebase: true,
+            error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
+          };
+        }
+
+        emitMergeStarted();
+        await worktreeManager.mergeWorktreeToMain(project.path, session.worktreePath, mainBranch);
+      }
 
       // Emit git operation completed event to all sessions in project
       const successMessage = `✓ Successfully merged worktree to ${mainBranch}`;
@@ -1466,8 +1532,10 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         operation: 'push'
       });
 
-      // Run git push
-      const result = await worktreeManager.gitPush(session.worktreePath);
+      // Run git push (a remote session pushes from its local mirror)
+      const result = isRemoteSession(session)
+        ? await pushRemoteSession(session, sessionId)
+        : await worktreeManager.gitPush(session.worktreePath);
 
       // Emit git operation completed event to all sessions in project
       const successMessage = `✓ Successfully pushed changes to remote` +
@@ -1600,10 +1668,18 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       if (session.worktreePath && project) {
         try {
           const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-          const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
-          landed = state.landed;
-          ownCommits = state.ownCommits;
-          ownCommitsProven = true;
+          if (isRemoteSession(session)) {
+            // Remote: the branch tip is fetched (nothing stopped or refused) and probed as a ref on This Mac.
+            const probe = await requireMergeBackService().probeLanding(sessionId, project.path, mainBranch);
+            landed = probe.landed;
+            ownCommits = probe.ownCommits;
+            ownCommitsProven = probe.proven;
+          } else {
+            const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
+            landed = state.landed;
+            ownCommits = state.ownCommits;
+            ownCommitsProven = true;
+          }
         } catch (error) {
           console.error(`[IPC:git] landing probe failed for session ${sessionId}:`, error);
         }
@@ -1680,10 +1756,17 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       if (session.worktreePath && project) {
         try {
           mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-          const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
-          landed = state.landed;
-          ownCommits = state.ownCommits;
-          ownCommitsProven = true;
+          if (isRemoteSession(session)) {
+            const probe = await requireMergeBackService().probeLanding(sessionId, project.path, mainBranch);
+            landed = probe.landed;
+            ownCommits = probe.ownCommits;
+            ownCommitsProven = probe.proven;
+          } else {
+            const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
+            landed = state.landed;
+            ownCommits = state.ownCommits;
+            ownCommitsProven = true;
+          }
         } catch (error) {
           console.error(`[IPC:git] markComplete landing probe failed for session ${sessionId}:`, error);
         }
@@ -1695,7 +1778,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         // current tip in THIS worktree (a plain ref read; no mutation).
         let mergeSha: string | undefined;
         try {
-          mergeSha = (await runGitAsync(session.worktreePath, ['rev-parse', mainBranch])).trim();
+          // A remote session's worktree is not on this disk: read main in the project instead.
+          const shaCwd = isRemoteSession(session) && project ? project.path : session.worktreePath;
+          mergeSha = (await runGitAsync(shaCwd, ['rev-parse', mainBranch])).trim();
         } catch (error) {
           console.error(`[IPC:git] Failed to resolve ${mainBranch} HEAD for session ${sessionId}:`, error);
         }
@@ -1711,6 +1796,12 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           overrideUndelivered: true,
         });
         const tasksNotYetDoneAfterCloseOut = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
+        if (isRemoteSession(session)) {
+          // An import in flight is closed as merged and cleaned up (fail-soft: the close-out already ran).
+          await requireMergeBackService().recordLanded(sessionId).catch((err: unknown) => {
+            console.warn(`[IPC:git] merge-back could not record the landing for session ${sessionId}:`, err);
+          });
+        }
         const tasksMovedToDone = Math.max(0, tasksNotYetDoneBeforeCloseOut - tasksNotYetDoneAfterCloseOut);
         console.log(
           `[IPC:git] Mark complete: session ${sessionId}'s branch already landed on ${mainBranch} — ran the full close-out (stamped ${stampedRuns} run(s) outcome='merged', moved ${tasksMovedToDone} task(s) to Done)`,
@@ -2009,6 +2100,15 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
+      }
+
+      if (isRemoteSession(session)) {
+        // Create-PR pushed from the local mirror: origin is the project's, the branch the mirror's.
+        const project = sessionManager.getProjectForSession(sessionId);
+        if (!project) return { success: false, error: 'Project not found for session' };
+        const mirrorBranch = await requireMergeBackService().mirrorBranch(sessionId, project.path);
+        if (!mirrorBranch) return { success: false, error: 'This session has no branch to open a pull request from.' };
+        return { success: true, data: { remoteUrl: runGit(project.path, ['remote', 'get-url', 'origin']).trim(), branchName: mirrorBranch } };
       }
 
       const remoteUrl = runGit(session.worktreePath, ['remote', 'get-url', 'origin']).trim();

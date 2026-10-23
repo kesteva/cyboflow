@@ -10,8 +10,8 @@
  * outcome reclassification → the archived-session review-item backfill → the
  * terminal-outcome backfill → the usage backfills (fire-and-forget) → the
  * stale derived-stage sweep → the landed-sprint close-out backfill → the
- * design-handoff recovery. The body is index.ts's verbatim, apart from its
- * inputs arriving as deps; it is `async` because the original sequence awaits
+ * remote merge-back resume (fire-and-forget) → the design-handoff recovery.
+ * The body is index.ts's verbatim, apart from its inputs arriving as deps; it is `async` because the original sequence awaits
  * (the call site awaits it, so every later wiring still observes a finished
  * recovery exactly as before).
  *
@@ -39,7 +39,8 @@ import { VerificationScheduler } from './orchestrator/verify/verificationSchedul
 import { DesignHandoffService } from './orchestrator/design/designHandoffService';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { captureSeamError } from './services/telemetry';
-import { backfillLandedSprintCloseOuts } from './ipc/gitOps';
+import { backfillLandedSprintCloseOuts, closeOutSessionAfterLanding } from './ipc/gitOps';
+import { getMergeBackService } from './services/hosts/mergeBack/mergeBackBridge';
 import {
   recoverActiveStateOrphans,
   recoverArchivedSessionRunOrphans,
@@ -255,6 +256,26 @@ export async function runBootRecovery(deps: BootRecoveryDeps): Promise<void> {
   }
 
   await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
+  // M2 merge-back resume (remote sessions): merged / abandoned rows are cleaned up, an import whose work already
+  // landed is closed out. Reached through the bridge hostsComposition published at start() (absent = nothing to do);
+  // NOT awaited — the cleanup talks to environments over ssh, and boot must not wait on a machine that is away.
+  const mergeBack = getMergeBackService();
+  if (mergeBack) {
+    void mergeBack
+      .resumeAll({
+        closeOut: async (sessionId, mergeSha) => {
+          await closeOutSessionAfterLanding(databaseService, sessionId, { mergeSha });
+        },
+      })
+      .then((r) => {
+        if (r.cleaned + r.closedOut + r.errored > 0) {
+          console.log(`[Main] Merge-back resume (cleaned: ${r.cleaned}, closed out: ${r.closedOut}, left: ${r.left}, errored: ${r.errored})`);
+        }
+      })
+      .catch((err: unknown) => {
+        console.warn('[Main] merge-back resume failed (continuing):', err instanceof Error ? err.message : String(err));
+      });
+  }
   // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
   // a previous process (state intent/snapshotted/folded) forward through the SAME
   // step functions the first-run approve uses — a crash after the body fold cannot
