@@ -197,6 +197,7 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
     await mgr.spawnCliProcess({ ...base, prompt: 'first' });
     expect(rt.sessions).toHaveLength(1);
     expect(rt.sessions[0].released).toBe(false);
+    expect(rt.sessions[0].fenceCalls).toBe(1); // F1: the cold spawn fenced its spawnKey first
     const spawner = fakeSdk.calls[0].spawnClaudeCodeProcess;
     expect(spawner).toBeTypeOf('function');
     const proc = spawner?.({
@@ -217,6 +218,7 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
     expect(rt.sessions).toHaveLength(2);
     expect(rt.sessions[1].released).toBe(true);
     expect(rt.sessions[0].released).toBe(false);
+    expect(rt.sessions[1].fenceCalls).toBe(0); // a warm push never fences the live process
 
     // Closing the warm process releases the lease it owns.
     await mgr.killProcess('p-warm-remote').catch(() => {});

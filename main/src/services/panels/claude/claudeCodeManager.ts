@@ -1528,6 +1528,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (this.processes.has(spawnKey)) {
         throw new Error(`Claude process already running for spawn ${spawnKey}`);
       }
+      if (remote !== null) await remote.fence?.(); // M2 F1: kill this spawnKey's orphans on the environment (bounded, never throws)
 
       // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
       // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE

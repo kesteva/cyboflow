@@ -858,6 +858,7 @@ export class CodexSdkManager extends AbstractCliManager {
           await this.closeWarmEntry(spawnKey, existing, false);
         }
       }
+      await remote.session.fence?.(); // M2 F1: kill this spawnKey's orphans on the environment (bounded, never throws)
       entry = this.buildColdEntry(
         options,
         runId,

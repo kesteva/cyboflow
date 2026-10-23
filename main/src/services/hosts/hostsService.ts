@@ -24,6 +24,11 @@
  * toolchain and the link live under a 2 s budget — that live run is NEVER recorded, emitted or shown as the last
  * attempt. A launch never runs a full preflight: that can take a minute and spends a model request. installToolchain() is the explicit
  * "Install cyboflow tools" action (progress on the bridge's toolchain channel), followed by a full preflight.
+ *
+ * Phase F (spec M2 §7): a full preflight that reached an SSH machine ends with one bounded GC pass over
+ * `<remoteRoot>/run` (deps.runDirGc, else the token-free built-in pass); drainRemoteProcesses() (quit, after the agent
+ * managers' shutdown) kills the remote processes every SshHost registered with the process tracker (2 s budget)
+ * before it closes the ssh masters they ride.
  */
 import {
   redactSecrets,
@@ -57,6 +62,12 @@ import { isHostPreflightScheduleKilled, isRemoteHostsKilled } from './flags';
 import { HostLink, HostLinkPool, type HostLinkEvent, type HostLinkLease, type HostLinkTimers } from './hostLink';
 import { remoteFactsFromPreflight, type HostRegistry } from './hostRegistry';
 import type { ExpectedToolchain } from './preflight/checks';
+import {
+  gcRemoteRunDir,
+  QUIT_DRAIN_BUDGET_MS,
+  remoteProcessTracker,
+  type RemoteProcessTracker,
+} from './remoteFencing';
 import type {
   CaptureErrorFn,
   PreflightOrchLink,
@@ -162,6 +173,14 @@ export interface HostsServiceDeps {
   links?: HostLinksDeps;
   /** The toolchain module; absent ⇒ no toolchain checks and no install. */
   toolchain?: HostsToolchainDeps;
+  /**
+   * Spec F3: collect `<remoteRoot>/run` after a full preflight found the machine reachable (RemoteRuntime.gcRunDir —
+   * it knows which runs are active and owns the token-write cache). Must not reject. Absent ⇒ the built-in pass,
+   * which removes stale pidfiles / temp files but never a token file.
+   */
+  runDirGc?: (hostId: string, remoteRoot: string) => Promise<unknown>;
+  /** Live remote processes for the quit drain (spec F2). Default: the app-wide tracker every SshHost registers with. */
+  processTracker?: RemoteProcessTracker;
 }
 
 interface LastAttempt {
@@ -528,7 +547,27 @@ export class HostsService implements HostsFacade {
         }
       }
     }
+    await this.collectRunDir(row, result, signal);
     return result;
+  }
+
+  /**
+   * Spec F3, at the end of a FULL preflight that reached an SSH machine and recorded its remote root: one bounded GC
+   * pass over `<remoteRoot>/run` (see HostsServiceDeps.runDirGc). Never throws; a cancelled run skips it.
+   */
+  private async collectRunDir(row: HostRow, result: PreflightResult, signal: AbortSignal): Promise<void> {
+    const root = result.remote?.remoteRoot ?? null;
+    if (row.kind !== 'ssh' || result.mode !== 'full' || !result.reachable || result.probeComplete === false) return;
+    if (root === null || !root.startsWith('/') || signal.aborted) return;
+    try {
+      if (this.deps.runDirGc) {
+        await this.deps.runDirGc(row.id, root);
+        return;
+      }
+      await gcRemoteRunDir(this.deps.registry.get(row.id).exec, root, { hostId: row.id, logger: this.deps.logger });
+    } catch (err) {
+      this.deps.logger.warn('[hosts] run folder cleanup skipped', { hostId: row.id, error: err instanceof Error ? err.name : 'unknown' });
+    }
   }
 
   /** Start a full preflight in the background (add / target change). Never throws. */
@@ -874,7 +913,10 @@ export class HostsService implements HostsFacade {
 
   /**
    * Quit drain (sync): abort in-flight preflights, close orchestrator links, kill terminals, close shared ssh
-   * masters. Never throws.
+   * masters. Never throws. Remote AGENT processes are deliberately not killed here: this runs before the run executor
+   * latches into shutdown mode, and a run whose agent dies first would be transitioned (see drainRemoteProcesses).
+   * While any remote process is live the masters stay open for its kill (drainRemoteProcesses closes them; an
+   * unref'd fallback closes them after the drain budget in case nothing calls it).
    */
   shutdown(): void {
     for (const f of this.inflight.values()) f.controller.abort();
@@ -889,6 +931,43 @@ export class HostsService implements HostsFacade {
       this.deps.terminals.destroyAll();
     } catch (err) {
       this.deps.logger.warn('[hosts] terminal teardown failed', { error: err instanceof Error ? err.name : 'unknown' });
+    }
+    if (this.tracker().size === 0) {
+      this.closeMasters();
+      return;
+    }
+    if (this.mastersFallback === null) {
+      this.mastersFallback = setTimeout(() => this.closeMasters(), QUIT_DRAIN_BUDGET_MS + 1_000);
+      this.mastersFallback.unref?.();
+    }
+  }
+
+  /**
+   * Spec F2 quit drain of the remote processes every SshHost spawned (the process tracker): stdin EOF + remote TERM
+   * to each, remote KILL + local SIGKILL for survivors, bounded by QUIT_DRAIN_BUDGET_MS; then the shared ssh masters
+   * close. Call it AFTER the agent managers were shut down (the run executor latched) — it is the backstop for what
+   * their own kill path has not finished. Never rejects; settles within the budget.
+   */
+  async drainRemoteProcesses(): Promise<void> {
+    try {
+      if (this.tracker().size > 0) await this.tracker().drain({ budgetMs: QUIT_DRAIN_BUDGET_MS, logger: this.deps.logger });
+    } catch {
+      /* best-effort */
+    }
+    this.closeMasters();
+  }
+
+  private tracker(): RemoteProcessTracker {
+    return this.deps.processTracker ?? remoteProcessTracker;
+  }
+
+  /** shutdown()'s deferred master close while remote processes were live (cleared by the close). */
+  private mastersFallback: ReturnType<typeof setTimeout> | null = null;
+
+  private closeMasters(): void {
+    if (this.mastersFallback !== null) {
+      clearTimeout(this.mastersFallback);
+      this.mastersFallback = null;
     }
     try {
       this.deps.registry.closeAllMasters();

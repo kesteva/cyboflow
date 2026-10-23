@@ -120,6 +120,7 @@ interface FakeSession {
   spawn: ReturnType<typeof vi.fn>;
   writeFile: ReturnType<typeof vi.fn>;
   mkdirp: ReturnType<typeof vi.fn>;
+  fence: ReturnType<typeof vi.fn>;
 }
 
 function fakeSession(events: string[], codexBin: string | null = CODEX_BIN, generation = 0): FakeSession {
@@ -132,6 +133,10 @@ function fakeSession(events: string[], codexBin: string | null = CODEX_BIN, gene
     events.push(`write:${p.path}`);
   });
   const mkdirp = vi.fn(async () => undefined);
+  const fence = vi.fn(async () => {
+    events.push('fence');
+    return null;
+  });
   const facts = { remoteRoot: ROOT, home: '/Users/me', user: 'me', shell: '/bin/zsh', lang: 'en_US.UTF-8' };
   const path = composeRemotePath({ codexPathDir: codexBin ? CODEX_PATH_DIR : null, nodeDir: '/opt/homebrew/bin' });
   const session: RemoteRuntimeSession = {
@@ -164,8 +169,9 @@ function fakeSession(events: string[], codexBin: string | null = CODEX_BIN, gene
     get released() {
       return released;
     },
+    fence,
   };
-  return { session, release, spawn, writeFile, mkdirp };
+  return { session, release, spawn, writeFile, mkdirp, fence };
 }
 
 function fakeRuntime(sessions: FakeSession[], hostFor: (lookup: { hostId?: string | null }) => string | null) {
@@ -453,6 +459,9 @@ describe('CodexSdkManager on an SSH environment', () => {
       expect(clients).toHaveLength(1);
       expect(s2.release).toHaveBeenCalled();
       expect(s1.release).not.toHaveBeenCalled();
+      // F1: the cold entry fenced its spawnKey; the warm push into the live app-server never does.
+      expect(s1.fence).toHaveBeenCalledTimes(1);
+      expect(s2.fence).not.toHaveBeenCalled();
       await manager.killAllProcesses();
       expect(s1.release).toHaveBeenCalled();
     } finally {

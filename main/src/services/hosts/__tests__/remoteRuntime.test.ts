@@ -22,8 +22,10 @@ import {
   RemoteRuntime,
   RemoteRuntimeError,
   resolveHostIdFromDb,
+  type RemoteRuntimeDeps,
   type RemoteRuntimeHostsLike,
 } from '../remoteRuntime';
+import { fenceArgv, FENCE_PROGRAM, RUN_DIR_GC_PROGRAM, RUN_REAP_PROGRAM, TOKEN_REMOVE_PROGRAM } from '../remoteFencing';
 import {
   getRemoteRuntime,
   requireRemoteRuntime,
@@ -102,7 +104,11 @@ interface Harness {
   env: NodeJS.ProcessEnv;
 }
 
-function harness(opts: { answer?: (argv: readonly string[]) => Partial<ExecResult>; db?: Database.Database } = {}): Harness {
+function harness(opts: {
+  answer?: (argv: readonly string[]) => Partial<ExecResult>;
+  db?: Database.Database;
+  rtDeps?: Partial<RemoteRuntimeDeps>;
+} = {}): Harness {
   const { transport, calls, streams } = recordingTransport(opts.answer ?? manifestAnswer);
   const ssh = new SshHost({
     id: 'h1', label: 'Box', sshTarget: 'box', remoteRoot: '~/cf-remote/h1', appVersion: '1.0.0', transport,
@@ -149,6 +155,8 @@ function harness(opts: { answer?: (argv: readonly string[]) => Partial<ExecResul
     logger,
     mintToken: mint,
     env,
+    runTerminalEvents: null,
+    ...opts.rtDeps,
   });
   return { rt, calls, streams, link, hostsState, mint, env };
 }
@@ -490,5 +498,159 @@ describe('remoteRuntimeBridge', () => {
     expect(requireRemoteRuntime()).toBe(h.rt);
     setRemoteRuntime(null);
     expect(getRemoteRuntime()).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Phase F: fence (F1), run teardown (F2), run dir GC (F3)
+// ---------------------------------------------------------------------------------------------------------------
+
+function runsDb(rows: Array<{ id: string; host_id: string | null; status: string }>): Database.Database {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, host_id TEXT, status TEXT); CREATE TABLE sessions (id TEXT PRIMARY KEY, host_id TEXT)');
+  const ins = db.prepare('INSERT INTO workflow_runs (id, host_id, status) VALUES (?, ?, ?)');
+  for (const r of rows) ins.run(r.id, r.host_id, r.status);
+  return db;
+}
+
+describe('RemoteRuntimeSession.fence (F1)', () => {
+  it("runs the fixed fence program for the session's filename-safe key over the host exec, bounded", async () => {
+    const h = harness({
+      answer: (argv) => (argv[2] === FENCE_PROGRAM ? { stdout: '1 0 2\n' } : manifestAnswer(argv)),
+    });
+    const s = await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1:lane-a' });
+    const out = await s.fence?.();
+    expect(out).toEqual({ termed: 1, killed: 0, stale: 2 });
+    const call = h.calls.find((c) => c.argv[2] === FENCE_PROGRAM);
+    expect(call?.argv).toEqual(fenceArgv(ROOT, remoteSpawnKey('run-1:lane-a')));
+    expect(call?.opts?.timeoutMs).toBe(4_500);
+    // The fence never carries the token or touches the link.
+    expect(allArgv(h.calls)).not.toContain(TOKEN);
+    expect(h.link.releases).toBe(0);
+  });
+
+  it('never rejects: an ssh failure resolves null and the session still spawns', async () => {
+    const h = harness({
+      answer: (argv) => (argv[2] === FENCE_PROGRAM ? { code: 255, stderr: 'Connection closed' } : manifestAnswer(argv)),
+    });
+    const s = await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    await expect(s.fence?.()).resolves.toBeNull();
+    await expect(s.fence?.('')).resolves.toBeNull();
+    expect(() => s.spawn({ command: '/x/claude', args: [] })).not.toThrow();
+  });
+});
+
+describe('RemoteRuntime.onRunTerminal (F2)', () => {
+  it('a remote run: removes the token (and forgets it) and reaps the run\'s dead pidfiles', async () => {
+    const h = harness({ db: runsDb([{ id: 'run-1', host_id: 'h1', status: 'completed' }]) });
+    await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    await h.rt.onRunTerminal('run-1');
+    expect(h.calls.some((c) => c.argv[2]?.includes('rm -f') && c.argv.includes(`${ROOT}/run/run-1.token`))).toBe(true);
+    const reap = h.calls.find((c) => c.argv[2] === RUN_REAP_PROGRAM);
+    expect(reap?.argv.slice(4)).toEqual([`${ROOT}/run`, 'run-1.*.pid', 'run-1-*.pid', 'run-1_*.pid']);
+    // Forgotten: a reopened run's next prepare writes the token again.
+    await h.rt.prepare('h1', { runId: 'run-1', spawnKey: 'run-1' });
+    expect(h.calls.filter((c) => c.argv.includes(`${ROOT}/run/run-1.token`) && c.opts?.stdin === `${TOKEN}\n`)).toHaveLength(2);
+  });
+
+  it('a local / unknown run touches nothing; failures never reject', async () => {
+    const h = harness({ db: runsDb([{ id: 'loc', host_id: null, status: 'failed' }, { id: 'lc', host_id: 'local', status: 'failed' }]) });
+    await h.rt.onRunTerminal('loc');
+    await h.rt.onRunTerminal('lc');
+    await h.rt.onRunTerminal('missing');
+    await h.rt.onRunTerminal('run-1', 'local');
+    expect(h.calls).toHaveLength(0);
+    await expect(h.rt.onRunTerminal('run-1', 'h2')).resolves.toBeUndefined();
+    const broken = harness({ db: new Database(':memory:') }); // no tables: the lookup throws
+    await expect(broken.rt.onRunTerminal('run-1')).resolves.toBeUndefined();
+  });
+
+  it('subscribes to run-terminal events and acts only while published and Environments run', async () => {
+    let listener: ((runId: string) => void) | null = null;
+    const unsubscribe = vi.fn();
+    let published = false;
+    const h = harness({
+      db: runsDb([{ id: 'run-1', host_id: 'h1', status: 'canceled' }, { id: 'loc', host_id: null, status: 'canceled' }]),
+      rtDeps: {
+        runTerminalEvents: (l) => {
+          listener = l;
+          return unsubscribe;
+        },
+        isPublished: () => published,
+      },
+    });
+    const fire = async (runId: string): Promise<void> => {
+      (listener as unknown as (id: string) => void)(runId);
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    await fire('run-1');
+    expect(h.calls).toHaveLength(0); // not published
+    published = true;
+    h.hostsState.running = false;
+    await fire('run-1');
+    expect(h.calls).toHaveLength(0); // Environments off
+    h.hostsState.running = true;
+    await fire('loc');
+    expect(h.calls).toHaveLength(0); // local run
+    await fire('run-1');
+    expect(h.calls.some((c) => c.argv[2] === RUN_REAP_PROGRAM)).toBe(true);
+    h.rt.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('by default it acts only while it is the runtime published on the bridge', async () => {
+    let listener: ((runId: string) => void) | null = null;
+    const h = harness({
+      db: runsDb([{ id: 'run-1', host_id: 'h1', status: 'completed' }]),
+      rtDeps: { runTerminalEvents: (l) => { listener = l; return () => undefined; } },
+    });
+    const fire = async (): Promise<void> => {
+      (listener as unknown as (id: string) => void)('run-1');
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    try {
+      await fire();
+      expect(h.calls).toHaveLength(0);
+      setRemoteRuntime(h.rt);
+      await fire();
+      expect(h.calls.some((c) => c.argv[2] === RUN_REAP_PROGRAM)).toBe(true);
+    } finally {
+      setRemoteRuntime(null);
+    }
+  });
+});
+
+describe('RemoteRuntime.gcRunDir (F3)', () => {
+  it('removes only tokens of runs that are not active, forgetting their writes first', async () => {
+    const h = harness({
+      db: runsDb([
+        { id: 'done', host_id: 'h1', status: 'completed' },
+        { id: 'live', host_id: 'h1', status: 'running' },
+        { id: 'paused', host_id: 'h1', status: 'paused' },
+      ]),
+      answer: (argv) => {
+        if (argv[2] === RUN_DIR_GC_PROGRAM) return { stdout: 'done.token\nlive.token\npaused.token\ngone.token\n#2\n' };
+        if (argv[2] === TOKEN_REMOVE_PROGRAM) return { stdout: '2\n' };
+        return manifestAnswer(argv);
+      },
+    });
+    await h.rt.prepare('h1', { runId: 'done', spawnKey: 'done' });
+    const out = await h.rt.gcRunDir('h1', ROOT);
+    expect(out).toEqual({ removed: 2, tokensRemoved: 2, tokensKept: 2 });
+    const remove = h.calls.find((c) => c.argv[2] === TOKEN_REMOVE_PROGRAM);
+    expect(remove?.argv.slice(4)).toEqual([`${ROOT}/run`, 'done.token', 'gone.token']);
+    await h.rt.prepare('h1', { runId: 'done', spawnKey: 'done' });
+    expect(h.calls.filter((c) => c.argv.includes(`${ROOT}/run/done.token`) && c.opts?.stdin === `${TOKEN}\n`)).toHaveLength(2);
+    expect(await h.rt.gcRunDir('local')).toBeNull();
+    expect(await h.rt.gcRunDir('h2')).toBeNull();
+  });
+
+  it('fails closed: a db that cannot answer keeps every token', async () => {
+    const h = harness({
+      db: new Database(':memory:'),
+      answer: (argv) => (argv[2] === RUN_DIR_GC_PROGRAM ? { stdout: 'x.token\n#0\n' } : {}),
+    });
+    expect(await h.rt.gcRunDir('h1')).toEqual({ removed: 0, tokensRemoved: 0, tokensKept: 1 });
+    expect(h.calls.some((c) => c.argv[2] === TOKEN_REMOVE_PROGRAM)).toBe(false);
   });
 });

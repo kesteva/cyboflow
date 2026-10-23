@@ -39,6 +39,7 @@ import {
 import type { LoggerLike } from '../../orchestrator/types';
 import { RemoteHostProcess, type HostProcessTimers } from './hostProcess';
 import { runSshPreflight, type CaptureErrorFn, type SshPreflightExtras } from './preflight/preflightEngine';
+import { remoteProcessTracker, type RemoteProcessTracker } from './remoteFencing';
 import {
   buildRemoteSpawnCommand,
   encodeEnvPrelude,
@@ -189,6 +190,8 @@ export interface SshHostDeps {
   processTimers?: HostProcessTimers;
   /** Per-spawn pidfile nonce (tests). Default: SPAWN_NONCE_HEX_CHARS hex chars from node:crypto. */
   spawnNonce?: () => string;
+  /** Where live spawns register for the quit drain (spec F2). Default: the app-wide remoteProcessTracker. */
+  processTracker?: RemoteProcessTracker;
   /**
    * The full-tier inputs of a preflight (expected toolchain, orch link, prelaunch node path), resolved per run by
    * the hosts service. Absent (or rejecting) ⇒ the M1 checks: sdk-binary-hash / mcp-roundtrip skipped.
@@ -380,8 +383,29 @@ export class SshHost implements ExecutionHost {
         }
       },
     });
+    // Live until exit / close (a child that never started only closes): the quit drain can reach it (spec F2).
+    const untrack = (this.deps.processTracker ?? remoteProcessTracker).add({
+      hostId: this.deps.id,
+      proc,
+      signalRemote: async (signal, timeoutMs) => {
+        try {
+          await t.exec(target, killArgv(pidFile, signal), { timeoutMs });
+        } catch {
+          /* best-effort */
+        }
+      },
+      killLocal: () => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      },
+    });
+    proc.once('close', untrack);
     // Best-effort pidfile cleanup over the shared master once the process is gone (kept while its pid is alive).
     proc.once('exit', () => {
+      untrack();
       void t.exec(target, reapPidFileArgv(pidFile), { timeoutMs: REMOTE_KILL_TIMEOUT_MS }).catch(() => undefined);
     });
     return proc;

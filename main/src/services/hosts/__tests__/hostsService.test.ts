@@ -28,6 +28,7 @@ import { HostLinkNotReadyError, type HostLinkEvent, type HostLinkTimers } from '
 import type { ForwardHandle, ForwardSpec } from '../sshTransport';
 import { REMOTE_HOSTS_KILL_SWITCH_ENV, HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../flags';
 import type { LoggerLike } from '../../../orchestrator/types';
+import { RemoteProcessTracker, RUN_DIR_GC_PROGRAM, TOKEN_REMOVE_PROGRAM, type TrackedRemoteProcess } from '../remoteFencing';
 
 const SQL = readFileSync(join(__dirname, '..', '..', '..', 'database', 'migrations', '152_hosts.sql'), 'utf-8');
 
@@ -685,5 +686,126 @@ describe('orchestrator links', () => {
     linked.shutdown();
     expect(forwards[2].closed).toBe(true);
     expect(linked.get(b).linkState).toBe('idle');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Phase F: run dir GC after a full preflight (F3) and the quit drain (F2)
+// ---------------------------------------------------------------------------------------------------------------
+
+const REMOTE_FACTS: PreflightRemoteFacts = {
+  home: '/Users/me', remoteRoot: '/Users/me/cf-remote/h', user: 'me', logname: 'me', shell: '/bin/zsh', tmpdir: null,
+  lang: null, nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git', codexPath: null, arch: 'arm64', socketPathOk: true,
+};
+
+describe('run dir GC after a full preflight (F3)', () => {
+  async function settleSecond(id: string, r: PreflightResult): Promise<void> {
+    const p = service.runPreflight(id);
+    await flush();
+    hostFor(id).runs[1].d.resolve(r);
+    await p;
+  }
+
+  it('built-in pass: one scan of <remoteRoot>/run over the host exec, never a token removal', async () => {
+    const id = await addSettled();
+    const exec = vi.fn(async (argv: string[]) => ({ code: 0, stdout: argv[2] === RUN_DIR_GC_PROGRAM ? 'r1.token\n#2\n' : '', stderr: '', timedOut: false }));
+    (hostFor(id).host as unknown as { exec: { exec: typeof exec } }).exec = { exec };
+    await settleSecond(id, result(id, { remote: { ...REMOTE_FACTS } }));
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec.mock.calls[0][0].slice(2, 5)).toEqual([RUN_DIR_GC_PROGRAM, 'sh', '/Users/me/cf-remote/h/run']);
+    expect(exec.mock.calls.some((c) => c[0][2] === TOKEN_REMOVE_PROGRAM)).toBe(false);
+  });
+
+  it('uses the injected runDirGc; skipped for unreachable / incomplete / unexpanded-root / fact-less results; never throws', async () => {
+    const runDirGc = vi.fn(async () => { throw new Error('boom'); });
+    service = new HostsService({
+      store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, runDirGc,
+    });
+    const id = await addSettled();
+    await settleSecond(id, result(id, { remote: { ...REMOTE_FACTS } }));
+    expect(runDirGc).toHaveBeenCalledWith(id, '/Users/me/cf-remote/h');
+    expect(logger.warn).toHaveBeenCalledWith('[hosts] run folder cleanup skipped', expect.anything());
+    runDirGc.mockClear();
+    for (const over of [
+      { reachable: false },
+      { probeComplete: false },
+      { remote: { ...REMOTE_FACTS, remoteRoot: '~/cf-remote/h' } },
+      {},
+    ] as Array<Partial<PreflightResult>>) {
+      const p = service.runPreflight(id);
+      await flush();
+      const runs = hostFor(id).runs;
+      runs[runs.length - 1].d.resolve(result(id, { remote: { ...REMOTE_FACTS }, ...over, ...(Object.keys(over).length === 0 ? { remote: undefined } : {}) }));
+      await p;
+    }
+    expect(runDirGc).not.toHaveBeenCalled();
+  });
+});
+
+describe('quit drain of live remote processes (F2)', () => {
+  function liveEntry(tracker: RemoteProcessTracker): { signals: string[]; exit: () => void } {
+    const proc = Object.assign(new EventEmitter(), { stdin: { end: vi.fn() } });
+    const signals: string[] = [];
+    const untrack = tracker.add({
+      hostId: 'h1',
+      proc: proc as unknown as TrackedRemoteProcess['proc'],
+      signalRemote: async (signal) => {
+        signals.push(signal);
+        queueMicrotask(() => {
+          untrack();
+          proc.emit('exit', null, 'SIGTERM');
+        });
+      },
+      killLocal: () => undefined,
+    });
+    return { signals, exit: () => untrack() };
+  }
+
+  it('no live process: shutdown closes the masters synchronously, as before; the drain is a no-op close', async () => {
+    const tracker = new RemoteProcessTracker();
+    const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+    s.shutdown();
+    expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    await s.drainRemoteProcesses();
+    expect(registry.closeAllMasters).toHaveBeenCalledTimes(2);
+  });
+
+  it('shutdown never kills a live remote process (runs are not latched yet) and keeps the masters for the drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = new RemoteProcessTracker();
+      const a = liveEntry(tracker);
+      const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+      s.shutdown();
+      s.shutdown();
+      expect(terminals.destroyAll).toHaveBeenCalled();
+      expect(a.signals).toEqual([]);
+      expect(registry.closeAllMasters).not.toHaveBeenCalled();
+      // Nobody drains: the unref'd fallback closes the masters once, after the budget.
+      vi.advanceTimersByTime(3_100);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drainRemoteProcesses: TERM over the still-open masters FIRST, then the masters close (fallback cancelled)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const tracker = new RemoteProcessTracker();
+      const a = liveEntry(tracker);
+      const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+      s.shutdown();
+      const done = s.drainRemoteProcesses();
+      expect(registry.closeAllMasters).not.toHaveBeenCalled();
+      await done;
+      expect(a.signals).toEqual(['TERM']);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+      expect(tracker.size).toBe(0);
+      vi.advanceTimersByTime(10_000);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

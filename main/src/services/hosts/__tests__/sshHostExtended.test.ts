@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { HostGitCommandError, type ExecResult } from '../../../orchestrator/trpc/contracts/executionHost';
 import { InvalidRemoteEnvError, KILL_PROGRAM, PIDFILE_REAP_PROGRAM, SPAWN_WRAPPER, type RemoteHostFacts } from '../remoteLaunch';
 import { InvalidRemotePathError, RemoteHostNotReadyError, SshHost, UnsafeRemoveError, parseStatLine } from '../sshHost';
+import { RemoteProcessTracker } from '../remoteFencing';
 import { quoteRemoteArgv, spawnCapture, type SshExecOptions, type SshTransportLike } from '../sshTransport';
 
 const posix = process.platform !== 'win32';
@@ -187,6 +188,28 @@ describe('SshHost spawn', () => {
     expect(b.kill('SIGKILL')).toBe(true);
     await new Promise<void>((r) => setImmediate(r));
     expect(calls.at(-1)?.argv[4]).toBe(pb);
+  });
+});
+
+describe('SshHost spawn — quit-drain tracking (F2)', () => {
+  it('registers every live spawn with its tracker; exit or close removes it; the drain signals ITS pidfile', async () => {
+    const { transport, streams, calls } = recording();
+    const tracker = new RemoteProcessTracker();
+    const h = new SshHost({
+      id: 'h1', label: 'Box', sshTarget: 'box', remoteRoot: '~/cf-remote/h1', appVersion: '1.0.0', transport,
+      localExists: () => false, remoteFacts: () => FACTS, spawnNonce: () => '0123456789abcdef', processTracker: tracker,
+    });
+    h.spawn({ command: 'x', args: [], spawnKey: 'r1' });
+    h.spawn({ command: 'x', args: [], spawnKey: 'r2' });
+    expect(tracker.size).toBe(2);
+    expect(tracker.list().map((e) => e.hostId)).toEqual(['h1', 'h1']);
+    streams[0].child.emit('exit', 0, null);
+    expect(tracker.size).toBe(1);
+    await tracker.list()[0].signalRemote('TERM', 300);
+    expect(calls.at(-1)?.argv).toEqual(['/bin/sh', '-c', KILL_PROGRAM, 'sh', '/Users/me/cf-remote/h1/run/r2.0123456789abcdef.pid', 'TERM']);
+    expect(calls.at(-1)?.opts?.timeoutMs).toBe(300);
+    streams[1].child.emit('close', 255, null);
+    expect(tracker.size).toBe(0);
   });
 });
 

@@ -8,7 +8,13 @@
  *                    per-run orch token FILE on the remote, returning a RemoteRuntimeSession;
  *   session          remote toolchain paths, the remote PATH / env (remoteLaunch.composeRemoteEnv allowlist), the
  *                    ExecutionHost's spawn / fs / git, and release() for the link;
- *   removeRunToken() best-effort cleanup of the token file when a run ends (spec F2).
+ *   removeRunToken() best-effort cleanup of the token file when a run ends (spec F2);
+ *   onRunTerminal()  run end (spec F2): the token file + the run's dead pidfiles. The runtime subscribes itself to
+ *                    services/cyboflow/transitions.onRunTerminal (every guarded completed / failed / canceled
+ *                    transition) and acts only while it is the PUBLISHED runtime (remoteRuntimeBridge) and
+ *                    Environments are running — a local run costs one indexed host_id read, nothing else;
+ *   gcRunDir()       spec F3: `<remoteRoot>/run` entries older than 24 h, tokens only for runs that are not active;
+ *   session.fence()  spec F1: kill the session spawnKey's earlier remote processes before a cold re-dispatch.
  *
  * Secrets: the orch token is minted locally (orchestrator/orchAuthToken.ts, idempotent per run) and travels to the
  * remote ONLY as the stdin of MachineFs.writeFile into `<remoteRoot>/run/<runId>.token` (mode 0600, directory
@@ -20,8 +26,10 @@
  * caller keeps its existing local path untouched. prepare() refuses a local id.
  */
 import { createHash } from 'node:crypto';
+import { TERMINAL_RUN_STATUSES } from '../../../../shared/types/cyboflow';
 import { isRemoteHostId, redactSecrets, type HostView, type PreflightResult } from '../../../../shared/types/hosts';
 import { isOrchSockAuthDisabled, mintOrchToken } from '../../orchestrator/orchAuthToken';
+import { onRunTerminal as subscribeTransitionsRunTerminal } from '../cyboflow/transitions';
 import { HostsDisabledError, RemoteHostsDisabledError } from '../../orchestrator/hosts/errors';
 import type {
   ExecutionHost,
@@ -41,6 +49,14 @@ import {
   type PathRemap,
   type RemoteHostFacts,
 } from './remoteLaunch';
+import {
+  fenceSpawnKey,
+  gcRemoteRunDir,
+  reapRunPidFiles,
+  type FenceOutcome,
+  type RunDirGcOutcome,
+} from './remoteFencing';
+import { getRemoteRuntime } from './remoteRuntimeBridge';
 import { remoteToolchainPaths } from './toolchain/toolchainPusher';
 import { TOOLCHAIN_HASH_RE, TOOLCHAIN_MANIFEST_NAME } from './toolchain/types';
 
@@ -247,6 +263,13 @@ export interface RemoteRuntimeSession {
   /** Release the orch link lease. Idempotent: only the first call releases. */
   release(): void;
   readonly released: boolean;
+  /**
+   * Spec F1: TERM (then, after ~3 s, KILL) every still-running remote process of `spawnKey` (default the session's)
+   * and clear its pidfiles. Call it right before a COLD spawn under that key — never before a push into a live warm
+   * process, which shares the key. Bounded (~4.5 s), never rejects; resolves null when the fence could not run.
+   * Optional so hand-rolled test sessions need not implement it; RemoteRuntime's sessions always do.
+   */
+  fence?(spawnKey?: string): Promise<FenceOutcome | null>;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -275,6 +298,16 @@ export interface RemoteRuntimeDeps {
   mintToken?: (runId: string) => string;
   /** Kill-switch source for CYBOFLOW_DISABLE_ORCH_SOCK_AUTH; default process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Run-terminal event source (spec F2). Default services/cyboflow/transitions.onRunTerminal; null = do not
+   * subscribe (call onRunTerminal() yourself).
+   */
+  runTerminalEvents?: ((listener: (runId: string) => void) => () => void) | null;
+  /**
+   * Whether this runtime may act on a run-terminal event. Default: it is the runtime published on remoteRuntimeBridge
+   * (hostsComposition start → stop), so a stopped composition never reaches out to a machine.
+   */
+  isPublished?: () => boolean;
 }
 
 export interface PrepareOptions {
@@ -309,7 +342,32 @@ export class RemoteRuntime {
   /** The installed manifest's codex target per host + hash (read once from the remote). */
   private readonly installed = new Map<string, Promise<InstalledToolchain>>();
 
-  constructor(private readonly deps: RemoteRuntimeDeps) {}
+  private readonly unsubscribeRunTerminal: () => void;
+
+  constructor(private readonly deps: RemoteRuntimeDeps) {
+    const subscribe = deps.runTerminalEvents === undefined ? subscribeTransitionsRunTerminal : deps.runTerminalEvents;
+    this.unsubscribeRunTerminal = subscribe === null
+      ? () => undefined
+      : subscribe((runId) => this.handleRunTerminal(runId));
+  }
+
+  /** Stop listening to run-terminal events. Idempotent. */
+  dispose(): void {
+    this.unsubscribeRunTerminal();
+  }
+
+  /** The transitions listener: synchronous, cheap, never throws (it runs right after the status UPDATE). */
+  private handleRunTerminal(runId: string): void {
+    try {
+      const published = this.deps.isPublished ? this.deps.isPublished() : getRemoteRuntime() === this;
+      if (!published || !this.deps.hosts.status().running) return;
+      const hostId = resolveHostIdFromDb(this.deps.db, { runId });
+      if (hostId === null) return;
+      void this.onRunTerminal(runId, hostId);
+    } catch (err) {
+      this.deps.logger.warn('[hosts] run-end cleanup skipped', { runId, error: errorName(err) });
+    }
+  }
 
   /** See resolveHostIdFromDb. */
   resolveHostId(input: HostIdLookup): string | null {
@@ -411,6 +469,68 @@ export class RemoteRuntime {
       await host.fs.unlink({ hostId, path: file });
     } catch (err) {
       this.deps.logger.warn('[hosts] could not remove a run token on the environment', { hostId, runId, error: errorName(err) });
+    }
+  }
+
+  /**
+   * Spec F2 — a run on `hostId` (default: its workflow_runs.host_id) reached a terminal status: delete its token file
+   * and its pidfiles whose process is gone. A local run is a no-op. Best-effort: never rejects.
+   */
+  async onRunTerminal(runId: string, hostIdIn?: string | null): Promise<void> {
+    let hostId: string | null;
+    try {
+      hostId = hostIdIn === undefined ? resolveHostIdFromDb(this.deps.db, { runId }) : normalizeHostId(hostIdIn);
+    } catch (err) {
+      this.deps.logger.warn('[hosts] run-end cleanup could not resolve the environment', { runId, error: errorName(err) });
+      return;
+    }
+    if (hostId === null || !RUN_ID_RE.test(runId)) return;
+    await this.removeRunToken(hostId, runId);
+    try {
+      const host = this.deps.getHost(hostId);
+      const root = host.info.remoteRoot;
+      if (root === null || !root.startsWith('/')) return;
+      await reapRunPidFiles(host.exec, root, runId, { hostId, logger: this.deps.logger });
+    } catch (err) {
+      this.deps.logger.warn('[hosts] could not clear finished run files on the environment', { hostId, runId, error: errorName(err) });
+    }
+  }
+
+  /**
+   * Spec F3 — collect `<remoteRoot>/run` on `hostId` (after a full preflight on a reachable machine): files older than
+   * 24 h, a pidfile only when its process is dead, a token only when its run is not active (no workflow_runs row, or
+   * a terminal status). A removed token's write is forgotten first, so a reopened run rewrites it. Never rejects.
+   */
+  async gcRunDir(hostIdIn: string, remoteRootIn?: string | null): Promise<RunDirGcOutcome | null> {
+    const hostId = normalizeHostId(hostIdIn);
+    if (hostId === null) return null;
+    try {
+      const host = this.deps.getHost(hostId);
+      const root = remoteRootIn ?? host.info.remoteRoot;
+      if (root === null || !root.startsWith('/')) return null;
+      return await gcRemoteRunDir(host.exec, root, {
+        hostId,
+        logger: this.deps.logger,
+        canRemoveToken: (runId) => !this.isRunActive(runId),
+        beforeRemoveTokens: (runIds) => {
+          const generation = this.deps.hosts.generation(hostId);
+          for (const runId of runIds) this.tokenWrites.delete(tokenKey(hostId, generation, remoteRunTokenFile(root, runId)));
+        },
+      });
+    } catch (err) {
+      this.deps.logger.warn('[hosts] run folder cleanup skipped', { hostId, error: errorName(err) });
+      return null;
+    }
+  }
+
+  /** A run row that exists and is not terminal. Fails closed (active) when the db cannot answer. */
+  private isRunActive(runId: string): boolean {
+    try {
+      const row = this.deps.db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status?: string } | undefined;
+      if (!row || typeof row.status !== 'string') return false;
+      return !(TERMINAL_RUN_STATUSES as readonly string[]).includes(row.status);
+    } catch {
+      return true;
     }
   }
 
@@ -548,6 +668,15 @@ export class RemoteRuntime {
       release,
       get released(): boolean {
         return released;
+      },
+      fence: async (key?: string): Promise<FenceOutcome | null> => {
+        let safeKey: string;
+        try {
+          safeKey = remoteSpawnKey(key ?? spawnKey);
+        } catch {
+          return null;
+        }
+        return fenceSpawnKey(host.exec, facts.remoteRoot, safeKey, { hostId, logger });
       },
     };
   }

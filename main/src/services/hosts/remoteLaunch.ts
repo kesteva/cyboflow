@@ -220,7 +220,12 @@ export function remotePidFile(remoteRoot: string, spawnKey: string, nonce: strin
  * never matches key `a.b`'s pidfiles. Spawn keys carry no glob metacharacters (assertSpawnKey).
  */
 export function remotePidFileGlob(remoteRoot: string, spawnKey: string): string {
-  return `${remoteRoot}/run/${assertSpawnKey(spawnKey)}.${'[0-9a-f]'.repeat(SPAWN_NONCE_HEX_CHARS)}.pid`;
+  return `${remoteRoot}/run/${pidFileBasenameGlob(spawnKey)}`;
+}
+
+/** The BASENAME part of remotePidFileGlob (`<spawnKey>.<16 × [0-9a-f]>.pid`), for programs that `cd` into run/ first. */
+export function pidFileBasenameGlob(spawnKey: string): string {
+  return `${assertSpawnKey(spawnKey)}.${'[0-9a-f]'.repeat(SPAWN_NONCE_HEX_CHARS)}.pid`;
 }
 
 /** True when a pidfile BASENAME belongs to `spawnKey` (the JS twin of remotePidFileGlob, any valid nonce width). */

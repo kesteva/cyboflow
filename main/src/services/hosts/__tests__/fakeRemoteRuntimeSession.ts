@@ -88,6 +88,8 @@ export interface FakeRemoteSession extends RemoteRuntimeSession {
   readonly spawned: FakeSpawned[];
   readonly mkdirs: string[];
   readonly releaseCalls: number;
+  /** How many times fence() ran (F1: once per cold spawn, never for a warm push). */
+  readonly fenceCalls: number;
 }
 
 export function createFakeRemoteSession(opts: {
@@ -106,6 +108,7 @@ export function createFakeRemoteSession(opts: {
   const mkdirs: string[] = [];
   let released = false;
   let releaseCalls = 0;
+  let fenceCalls = 0;
   const paths = {
     claude: `${FAKE_TOOLCHAIN}/claude`,
     mcpBundle: `${FAKE_TOOLCHAIN}/cyboflowMcpServer.js`,
@@ -190,6 +193,13 @@ export function createFakeRemoteSession(opts: {
     },
     get releaseCalls() {
       return releaseCalls;
+    },
+    fence: async () => {
+      fenceCalls++;
+      return null;
+    },
+    get fenceCalls() {
+      return fenceCalls;
     },
   };
 }
