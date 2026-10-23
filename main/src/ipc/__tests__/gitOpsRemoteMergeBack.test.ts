@@ -111,6 +111,7 @@ beforeEach(() => {
     refreshBase: vi.fn(async () => 'refreshed'),
     probeLanding: vi.fn(async () => landing),
     recordLanded: vi.fn(async () => undefined),
+    recordClosedOut: vi.fn(async () => undefined),
     mirrorBranch: vi.fn(async () => 'k1'),
     requestCheckpoint: vi.fn(async () => undefined),
     cleanup: vi.fn(async () => true),
@@ -134,6 +135,7 @@ describe('gitOps remote merge-back', () => {
     expect(order.slice(0, 4)).toEqual(['stop', 'import', `guard:${MIRROR}`, `squash:${MIRROR}`]);
     expect(worktreeManager.squashAndMergeWorktreeToMain).toHaveBeenCalledWith('/tmp/project', MIRROR, 'main', 'msg');
     expect(closeOut.calls).toContain('stampMerged');
+    expect(fake.recordClosedOut).toHaveBeenCalledWith('r1'); // boot resume must not repeat this close-out
   });
 
   it('squash: main moved → needsRebase with the refresh-base message, nothing merged', async () => {

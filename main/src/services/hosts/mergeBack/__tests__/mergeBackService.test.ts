@@ -99,6 +99,8 @@ let fetches: number;
 let beforeFetch: (() => void) | null;
 let afterFetch: (() => void) | null;
 let crashAt: MergeBackStep | null;
+/** Runs right before each git command on the "environment" (the agent acting between our check and our write). */
+let beforeRemoteGit: ((args: string[]) => void) | null;
 const wm = new WorktreeManager();
 /** Several full rounds of real git (fetch, worktrees, squash, push) in one test. */
 const LONG_MS = 20_000;
@@ -171,8 +173,10 @@ beforeEach(async () => {
   beforeFetch = null;
   afterFetch = null;
   crashAt = null;
+  beforeRemoteGit = null;
   const host = asRemote(new LocalHost({ appVersion: '1.0.0' }), (args) => {
     if (args[0] === 'status') order.push('status');
+    beforeRemoteGit?.(args);
   });
   const localGit: LocalGitRunner = (cwd, args, opts) => {
     if (args[0] === 'fetch') {
@@ -262,8 +266,11 @@ describe('MergeBackService.mergeSession (real git)', () => {
     expect(git(project, ['log', '-1', '--format=%s', 'main']).trim()).toBe('squashed');
     expect(git(project, ['show', 'main:c.txt'])).toBe('c\n');
     expect(mergeBacks.get('s1')?.importSha).toBe(tip);
+    // Recorded with the merge itself: merged_sha = the main it landed on, the close-out still open.
+    expect(mergeBacks.get('s1')).toMatchObject({ mergedSha: mainSha(), closedOutAt: null });
     await expect(service.whenResynced('s1')).resolves.toBe(true);
     expectResynced();
+    expect(mergeBacks.get('s1')?.mergedSha).toBe(mainSha());
   });
 
   it('refuses uncommitted changes on the environment and keeps the state', async () => {
@@ -594,5 +601,171 @@ describe('MergeBackService delivery probe, checkpoints, archive and boot resume 
     await mergeBacks.transition('s1', { from: ['remote_ready'], to: 'abandoned' });
     await expect(svc.mergeSession(squashInput())).rejects.toMatchObject({ code: 'state' });
     await expect(svc.mergeSession(squashInput('s2'))).rejects.toMatchObject({ code: 'no-row' });
+  });
+});
+
+/** The first command that moves the environment's session branch (the CAS update-ref, or a hard reset). */
+const movesRemoteBranch = (args: string[], key = 'k1'): boolean =>
+  (args[0] === 'update-ref' && args.includes(`refs/heads/${key}`)) || (args[0] === 'reset' && args.includes('--hard'));
+
+describe('MergeBackService data safety (real git)', () => {
+  it('MB-1: a squash whose commit a hook rejects is never taken as landed by boot resume', async () => {
+    const hook = path.join(project, '.git', 'hooks', 'pre-commit');
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    commit(remoteWt(), 'b.txt', 'b\n');
+    const tip = commit(remoteWt(), 'c.txt', 'c\n');
+    const main = mainSha();
+    await expect(svc.mergeSession(squashInput())).rejects.toThrow();
+    expect(mergeBacks.get('s1')?.state).toBe('local_ready');
+    // The failed squash left the mirror reset onto main — exactly the shape that once read as "landed".
+    expect(git(mirrorWorktreePath(project, 'k1'), ['rev-parse', 'HEAD']).trim()).toBe(main);
+
+    const closed: string[] = [];
+    const summary = await svc.resumeAll({ closeOut: async (id) => { closed.push(id); } });
+    await svc.whenIdle();
+    expect(summary).toMatchObject({ closedOut: 0, resynced: 0, left: 1 });
+    expect(closed).toEqual([]);
+    expect(mergeBacks.get('s1')).toMatchObject({ state: 'local_ready', mergedSha: null });
+    expect(mainSha()).toBe(main);
+    expect(git(bare(), ['rev-parse', 'refs/heads/k1']).trim()).toBe(tip);
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(tip);
+    expect(git(remoteWt(), ['show', 'HEAD:c.txt'])).toBe('c\n');
+
+    // Hook gone: the retry lands the untouched work.
+    fs.rmSync(hook);
+    await expect(svc.mergeSession(squashInput())).resolves.toEqual({ kind: 'merged' });
+    expect(git(project, ['show', 'main:c.txt'])).toBe('c\n');
+  });
+
+  it('MB-4: an agent commit between the resync checks and the branch move wins; nothing is reset', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    let agent = '';
+    beforeRemoteGit = (args) => {
+      if (!movesRemoteBranch(args)) return;
+      beforeRemoteGit = null;
+      agent = commit(remoteWt(), 'late.txt', 'late\n');
+    };
+    await expect(svc.mergeSession(squashInput())).resolves.toEqual({ kind: 'merged' });
+    await expect(svc.whenResynced('s1')).resolves.toBe(true);
+    expect(agent).not.toBe('');
+    expect(git(bare(), ['rev-parse', 'refs/heads/k1']).trim()).toBe(agent);
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(agent);
+    expect(fs.readFileSync(path.join(remoteWt(), 'late.txt'), 'utf8')).toBe('late\n');
+    expect(git(remoteWt(), ['status', '--porcelain'])).toBe('');
+    expect(mergeBacks.get('s1')?.state).toBe('remote_ready');
+  });
+
+  it('MB-4: a local change made between the checks and the move is never overwritten; the branch is put back', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    const imported = git(remoteWt(), ['rev-parse', 'HEAD']).trim();
+    const service = new MergeBackService({
+      ...deps,
+      // Main moves on This Mac after the merge, so the resync must bring x.txt to the environment.
+      afterStep: (_s, step) => { if (step === 'merged') commit(project, 'x.txt', 'main x\n'); },
+    });
+    beforeRemoteGit = (args) => {
+      if (!movesRemoteBranch(args)) return;
+      beforeRemoteGit = null;
+      fs.writeFileSync(path.join(remoteWt(), 'x.txt'), 'agent x\n');
+    };
+    await expect(service.mergeSession(squashInput())).resolves.toEqual({ kind: 'merged' });
+    await expect(service.whenResynced('s1')).resolves.toBe(false);
+    expect(fs.readFileSync(path.join(remoteWt(), 'x.txt'), 'utf8')).toBe('agent x\n');
+    expect(git(bare(), ['rev-parse', 'refs/heads/k1']).trim()).toBe(imported);
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(imported);
+    expect(git(remoteWt(), ['status', '--porcelain']).trim()).toBe('?? x.txt');
+    expect(mergeBacks.get('s1')).toMatchObject({ state: 'merged' });
+    expect(mergeBacks.get('s1')?.lastError).toMatch(/^Uncommitted changes on Studio after the merge/);
+  });
+
+  it('LC-5: a merged row whose close-out completed is only resynced at boot, never closed out again', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    const service = new MergeBackService({
+      ...deps,
+      afterStep: (_s, step) => { if (step === 'merged') fs.writeFileSync(path.join(remoteWt(), 'wip.txt'), 'wip\n'); },
+    });
+    await expect(service.mergeSession(squashInput())).resolves.toEqual({ kind: 'merged' });
+    await expect(service.whenResynced('s1')).resolves.toBe(false);
+    await service.recordClosedOut('s1'); // gitOps, after its close-out
+    expect(mergeBacks.get('s1')?.closedOutAt).not.toBeNull();
+
+    const closed: string[] = [];
+    const resume = { closeOut: async (id: string) => { closed.push(id); }, runsCreatedSince: () => 0 };
+    await expect(service.resumeAll(resume)).resolves.toMatchObject({ closedOut: 0, errored: 1 });
+    expect(closed).toEqual([]);
+    // The stray file goes: the next boot finishes the resync — still no close-out.
+    fs.rmSync(path.join(remoteWt(), 'wip.txt'));
+    await expect(service.resumeAll(resume)).resolves.toMatchObject({ closedOut: 0, resynced: 1 });
+    expect(closed).toEqual([]);
+    expectResynced();
+  });
+
+  it('LC-5: an unrecorded close-out is not repeated once the session has runs created after the merge', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    crashAt = 'merged';
+    await expect(svc.mergeSession(squashInput())).rejects.toThrow(/simulated crash/);
+    const row = mergeBacks.get('s1');
+    expect(row).toMatchObject({ state: 'merged', closedOutAt: null });
+    const asked: string[] = [];
+    const closed: string[] = [];
+    await svc.resumeAll({
+      closeOut: async (id) => { closed.push(id); },
+      runsCreatedSince: (id, iso) => { asked.push(`${id}@${iso}`); return 1; },
+    });
+    expect(asked).toEqual([`s1@${row?.mergedAt}`]);
+    expect(closed).toEqual([]);
+    expect(mergeBacks.get('s1')?.closedOutAt).not.toBeNull();
+  });
+
+  it('LC-5: a crash before the close-out completes is closed out once (with the recorded merge sha), then never again', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    crashAt = 'merged';
+    await expect(svc.mergeSession(squashInput())).rejects.toThrow(/simulated crash/);
+    const merged = mergeBacks.get('s1')?.mergedSha;
+    expect(merged).toBe(mainSha());
+    commit(project, 'later.txt', 'later\n'); // main moves before the boot: the close-out still names the merge
+    fs.writeFileSync(path.join(remoteWt(), 'wip.txt'), 'wip\n'); // keeps the resync failing across boots
+    const closed: Array<[string, string | undefined]> = [];
+    const resume = { closeOut: async (id: string, sha: string | undefined) => { closed.push([id, sha]); }, runsCreatedSince: () => 0 };
+    await svc.resumeAll(resume);
+    await svc.resumeAll(resume);
+    expect(closed).toEqual([['s1', merged]]);
+    expect(mergeBacks.get('s1')?.state).toBe('merged');
+  });
+
+  it('MB-5: cleanup with the environment away still removes This Mac\'s half; the remote half is retried later', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    await svc.withMirror({ sessionId: 's1', projectPath: project }, async () => undefined);
+    await svc.requestCheckpoint('s1');
+    await mergeBacks.transition('s1', { from: ['local_ready'], to: 'abandoned' });
+    const away = new MergeBackService({ ...deps, status: () => ({ running: false, killed: false }) });
+    await expect(away.cleanup('s1')).resolves.toBe(false);
+    expect(mergeBacks.get('s1')?.state).toBe('abandoned');
+    expect(mergeBacks.get('s1')?.lastError).toMatch(/on its environment/);
+    expect(refExists(project, 'refs/cyboflow/import/k1')).toBe(false);
+    expect(refExists(project, 'refs/cyboflow/checkpoint/k1')).toBe(false);
+    expect(refExists(project, 'refs/heads/k1')).toBe(false);
+    expect(fs.existsSync(mirrorWorktreePath(project, 'k1'))).toBe(false);
+    expect(fs.existsSync(remoteWt())).toBe(true);
+    // Back: the boot resume finishes the remote half.
+    await expect(svc.resumeAll({ closeOut: async () => undefined })).resolves.toMatchObject({ cleaned: 1, errored: 0 });
+    expectCleaned();
+  });
+
+  it('MB-5 / LC-4: boot resume abandons and cleans the live row of an archived session (incl. a half-provisioned one)', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    await svc.withMirror({ sessionId: 's1', projectPath: project }, async () => undefined);
+    // s2: provisioning stopped at bare_ready (crash); the boot sweep archived the session.
+    await mergeBacks.create({ sessionId: 's2', hostId, projectId: 7, mergeKey: 'k2', branch: 'k2', baseSha: mainSha(), state: 'bare_ready' });
+    // s3: fully provisioned and NOT archived — untouched.
+    await setupSession('s3', 'k3');
+    const archived = new Set(['s1', 's2']);
+    const summary = await svc.resumeAll({ closeOut: async () => undefined, isArchived: (id) => archived.has(id) });
+    expect(summary).toMatchObject({ cleaned: 2, errored: 0, closedOut: 0 });
+    expectCleaned('k1', 's1');
+    expect(mergeBacks.get('s2')?.state).toBe('cleaned');
+    expect(mergeBacks.get('s3')?.state).toBe('remote_ready');
+    expect(fs.existsSync(remoteWt('k3'))).toBe(true);
   });
 });

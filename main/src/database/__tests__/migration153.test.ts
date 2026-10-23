@@ -36,7 +36,8 @@ describe('migration 153 — session_merge_backs', () => {
     const cols = (db.prepare('PRAGMA table_info(session_merge_backs)').all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toEqual([
       'session_id', 'host_id', 'project_id', 'merge_key', 'branch', 'remote_worktree_path', 'state', 'base_sha',
-      'import_sha', 'checkpoint_sha', 'local_worktree_path', 'last_error', 'created_at', 'updated_at',
+      'import_sha', 'checkpoint_sha', 'local_worktree_path', 'merged_sha', 'merged_at', 'closed_out_at', 'last_error',
+      'created_at', 'updated_at',
     ]);
     db.close();
   });
@@ -57,6 +58,58 @@ describe('migration 153 — session_merge_backs', () => {
     db.exec(`INSERT INTO sessions (id, status) VALUES ('s2', 'x')`);
     expect(() => insert(db, 's2', 'nohost')).toThrow(/FOREIGN KEY/);
     db.close();
+  });
+
+  it('cascades a deleted session or project to its rows', () => {
+    const db = freshDb();
+    db.exec(`INSERT INTO projects (id, name) VALUES (2, 'q'); INSERT INTO sessions (id, status) VALUES ('s2', 'x'), ('s3', 'x')`);
+    insert(db, 's1');
+    db.prepare(
+      `INSERT INTO session_merge_backs (session_id, host_id, project_id, merge_key, branch, state, created_at, updated_at)
+       VALUES (?, 'h1', 2, ?, 'b', 'cleaned', ?, ?)`,
+    ).run('s2', 'k2', NOW, NOW);
+    db.prepare(
+      `INSERT INTO session_merge_backs (session_id, host_id, project_id, merge_key, branch, state, created_at, updated_at)
+       VALUES (?, 'h1', 2, ?, 'b', 'remote_ready', ?, ?)`,
+    ).run('s3', 'k3', NOW, NOW);
+    db.exec(`DELETE FROM sessions WHERE id = 's1'`);
+    db.exec('DELETE FROM projects WHERE id = 2');
+    expect((db.prepare('SELECT COUNT(*) AS n FROM session_merge_backs').get() as { n: number }).n).toBe(0);
+    db.close();
+  });
+
+  it('a project whose remote sessions (live and cleaned) have rows deletes through DatabaseService', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-mig153-del-'));
+    const svc = new DatabaseService(join(dir, 'test.db'));
+    try {
+      svc.initialize();
+      const db = svc.getDb();
+      db.prepare(
+        `INSERT INTO hosts (id, label, kind, config_json, detected_tier, lifecycle_state, created_at, updated_at)
+         VALUES ('h-ssh', 'Studio', 'ssh', '{}', 'full', 'online', ?, ?)`,
+      ).run(NOW, NOW);
+      const project = svc.createProject('p', join(dir, 'repo'));
+      const keep = svc.createProject('keep', join(dir, 'other'));
+      for (const [id, pid] of [['r1', project.id], ['r2', project.id], ['r3', keep.id]] as const) {
+        svc.createSession({ id, name: id, initial_prompt: '', worktree_name: id, worktree_path: `/remote/wt/${id}`, project_id: pid, host_id: 'h-ssh' });
+      }
+      const row = db.prepare(
+        `INSERT INTO session_merge_backs (session_id, host_id, project_id, merge_key, branch, state, created_at, updated_at)
+         VALUES (?, 'h-ssh', ?, ?, ?, ?, ?, ?)`,
+      );
+      row.run('r1', project.id, 'r1', 'r1', 'cleaned', NOW, NOW);
+      row.run('r2', project.id, 'r2', 'r2', 'remote_ready', NOW, NOW);
+      row.run('r3', keep.id, 'r3', 'r3', 'remote_ready', NOW, NOW);
+      db.prepare(`INSERT INTO host_project_checkouts (host_id, project_id, remote_repo_path) VALUES ('h-ssh', ?, '/r/1.git')`).run(project.id);
+
+      expect(svc.deleteProject(project.id)).toBe(true);
+      const left = (db.prepare('SELECT session_id FROM session_merge_backs ORDER BY session_id').all() as Array<{ session_id: string }>)
+        .map((r) => r.session_id);
+      expect(left).toEqual(['r3']);
+    } finally {
+      try { svc.close(); } catch { /* ignore */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('has no CHECK constraint and no datetime(now) default', () => {

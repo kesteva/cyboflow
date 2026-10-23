@@ -41,6 +41,7 @@ import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecove
 import { captureSeamError } from './services/telemetry';
 import { backfillLandedSprintCloseOuts, closeOutSessionAfterLanding } from './ipc/gitOps';
 import { getMergeBackService } from './services/hosts/mergeBack/mergeBackBridge';
+import { findHalfProvisionedRemoteSessions, remoteResumeReads } from './services/hosts/mergeBack/remoteSessionBootReads';
 import {
   recoverActiveStateOrphans,
   recoverArchivedSessionRunOrphans,
@@ -256,9 +257,21 @@ export async function runBootRecovery(deps: BootRecoveryDeps): Promise<void> {
   }
 
   await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
-  // M2 merge-back resume (remote sessions): merged rows are resynced, abandoned rows cleaned up, an import whose work
-  // already landed is closed out. Reached through the bridge hostsComposition published at start() (absent = nothing to do);
-  // NOT awaited — the cleanup talks to environments over ssh, and boot must not wait on a machine that is away.
+  // M2: a remote session a crash or quit left half-provisioned (never announced, no run) is hidden now, before the
+  // renderer loads (DB only; the in-memory task queue means nothing is provisioning at boot). Its environment half
+  // goes with the resume below, which abandons + cleans an archived session's live merge-back row.
+  try {
+    for (const sessionId of findHalfProvisionedRemoteSessions(db)) {
+      databaseService.archiveSession(sessionId);
+      console.log(`[Main] Archived half-provisioned remote session ${sessionId}`);
+    }
+  } catch (sweepErr) {
+    console.warn('[Main] half-provisioned remote session sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
+  }
+  // M2 merge-back resume (remote sessions): merged rows are resynced (closed out only if that never completed),
+  // abandoned / archived rows cleaned up, an import whose work already landed is closed out. Reached through the bridge
+  // hostsComposition published at start() (absent = nothing to do); NOT awaited — the cleanup talks to environments
+  // over ssh, and boot must not wait on a machine that is away.
   const mergeBack = getMergeBackService();
   if (mergeBack) {
     void mergeBack
@@ -266,6 +279,7 @@ export async function runBootRecovery(deps: BootRecoveryDeps): Promise<void> {
         closeOut: async (sessionId, mergeSha) => {
           await closeOutSessionAfterLanding(databaseService, sessionId, { mergeSha });
         },
+        ...remoteResumeReads(db),
       })
       .then((r) => {
         if (r.resynced + r.cleaned + r.closedOut + r.errored > 0) {

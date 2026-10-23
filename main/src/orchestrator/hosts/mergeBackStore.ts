@@ -38,6 +38,12 @@ export interface MergeBackRow {
   importSha: string | null;
   checkpointSha: string | null;
   localWorktreePath: string | null;
+  /** The local main the last merge landed on (stamped with `merged`). */
+  mergedSha: string | null;
+  /** When the last `merged` was recorded (ISO). */
+  mergedAt: string | null;
+  /** When that merge's run / lane close-out completed (ISO); null = not (yet) recorded. */
+  closedOutAt: string | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
@@ -60,6 +66,9 @@ export interface MergeBackPatch {
   importSha?: string | null;
   checkpointSha?: string | null;
   localWorktreePath?: string | null;
+  mergedSha?: string | null;
+  mergedAt?: string | null;
+  closedOutAt?: string | null;
   lastError?: string | null;
 }
 
@@ -82,6 +91,9 @@ interface RawRow {
   import_sha: string | null;
   checkpoint_sha: string | null;
   local_worktree_path: string | null;
+  merged_sha?: string | null;
+  merged_at?: string | null;
+  closed_out_at?: string | null;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -93,6 +105,9 @@ const PATCH_COLUMNS: Record<keyof MergeBackPatch, string> = {
   importSha: 'import_sha',
   checkpointSha: 'checkpoint_sha',
   localWorktreePath: 'local_worktree_path',
+  mergedSha: 'merged_sha',
+  mergedAt: 'merged_at',
+  closedOutAt: 'closed_out_at',
   lastError: 'last_error',
 };
 
@@ -110,6 +125,9 @@ function toRow(r: RawRow): MergeBackRow {
     importSha: r.import_sha,
     checkpointSha: r.checkpoint_sha,
     localWorktreePath: r.local_worktree_path,
+    mergedSha: r.merged_sha ?? null,
+    mergedAt: r.merged_at ?? null,
+    closedOutAt: r.closed_out_at ?? null,
     lastError: r.last_error,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -227,10 +245,13 @@ export class MergeBackStore {
         throw new MergeBackStateConflictError(sessionId, cur ? cur.state : null, opts.from);
       }
       if (!canTransition(cur.state, opts.to)) throw new InvalidMergeBackTransitionError(cur.state, opts.to);
+      const ts = this.now().toISOString();
       const sets = ['state = ?', 'updated_at = ?'];
-      const params: unknown[] = [opts.to, this.now().toISOString()];
+      const params: unknown[] = [opts.to, ts];
+      // Entering `merged` records WHEN in the same write, and opens a fresh close-out (stamped by markClosedOut).
+      const patch: MergeBackPatch = opts.to === 'merged' ? { mergedAt: ts, closedOutAt: null, ...opts.patch } : { ...opts.patch };
       for (const key of Object.keys(PATCH_COLUMNS) as Array<keyof MergeBackPatch>) {
-        const v = opts.patch?.[key];
+        const v = patch[key];
         if (v !== undefined) {
           sets.push(`${PATCH_COLUMNS[key]} = ?`);
           params.push(v);
@@ -246,6 +267,23 @@ export class MergeBackStore {
         result: row,
         change: { sessionId, hostId: row.hostId, state: row.state, previous: cur.state },
       };
+    });
+  }
+
+  /**
+   * Records that the close-out of the last merge completed (closed_out_at := now) without touching state. A no-op
+   * (null) for a row that never merged or already carries the stamp.
+   */
+  markClosedOut(sessionId: string): Promise<MergeBackRow | null> {
+    return this.write(() => {
+      const cur = this.get(sessionId);
+      if (!cur || cur.mergedAt === null || cur.closedOutAt !== null) return { result: null, change: null };
+      const ts = this.now().toISOString();
+      this.stmt(
+        'UPDATE session_merge_backs SET closed_out_at = ?, updated_at = ? WHERE session_id = ? AND closed_out_at IS NULL',
+      ).run(ts, ts, sessionId);
+      const row = this.get(sessionId) as MergeBackRow;
+      return { result: row, change: { sessionId, hostId: row.hostId, state: row.state, previous: row.state } };
     });
   }
 

@@ -105,6 +105,27 @@ describe('MergeBackStore', () => {
     expect(await store.setError('nope', 'x')).toBeNull();
   });
 
+  it('entering merged stamps merged_at and reopens the close-out; markClosedOut stamps it once', async () => {
+    await store.create({ sessionId: 's1', ...base, state: 'local_ready' as never });
+    expect(await store.markClosedOut('s1')).toBeNull(); // never merged: nothing to close out
+    const merged = await store.transition('s1', { from: ['local_ready'], to: 'merged', patch: { mergedSha: 'm1' } });
+    expect(merged).toMatchObject({ state: 'merged', mergedSha: 'm1', closedOutAt: null });
+    expect(merged.mergedAt).toMatch(ISO);
+    const closed = await store.markClosedOut('s1');
+    expect(closed?.closedOutAt).toMatch(ISO);
+    expect(closed?.state).toBe('merged');
+    expect(await store.markClosedOut('s1')).toBeNull(); // already stamped: unchanged
+    expect(store.get('s1')?.closedOutAt).toBe(closed?.closedOutAt);
+    // The next round: back to remote_ready keeps the history; a new merged reopens the close-out.
+    await store.transition('s1', { from: ['merged'], to: 'remote_ready' });
+    expect(store.get('s1')?.closedOutAt).toBe(closed?.closedOutAt);
+    await store.transition('s1', { from: ['remote_ready'], to: 'import_intent' });
+    await store.transition('s1', { from: ['import_intent'], to: 'imported' });
+    const again = await store.transition('s1', { from: ['imported'], to: 'merged', patch: { mergedSha: 'm2' } });
+    expect(again).toMatchObject({ mergedSha: 'm2', closedOutAt: null });
+    expect(again.mergedAt! > merged.mergedAt!).toBe(true);
+  });
+
   it('a throwing listener does not fail the write', async () => {
     const s = new MergeBackStore(raw as unknown as DatabaseLike, { onChange: () => { throw new Error('x'); } });
     await expect(s.create({ sessionId: 's1', ...base })).resolves.toMatchObject({ sessionId: 's1' });

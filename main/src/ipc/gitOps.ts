@@ -46,7 +46,7 @@ import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCo
 import { resolveSessionDiffBaseRef } from './sessionFileStats';
 import type { WorktreeStatusPayload, DiffGroupScope } from '../../../shared/types/runFiles';
 import { isRemoteSession, remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
-import { requireMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
+import { getMergeBackService, requireMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1313,6 +1313,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // the merge result. (finalizeSprintLanesOnSessionMerge is folded into
       // stampMergedOutcomeForSession -> closeOutSessionAfterLanding, TASK-296.)
       await stampMergedOutcomeForSession(sessionId, project?.path);
+      // Remote: the close-out above completed, so boot resume must not repeat it (only the resync may retry).
+      if (isRemoteSession(session)) await getMergeBackService()?.recordClosedOut?.(sessionId);
 
       // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
       // Session-hosted runs can't close out via runs.merge (assertNotSessionHosted),
@@ -1453,6 +1455,8 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // the merge result. (finalizeSprintLanesOnSessionMerge is folded into
       // stampMergedOutcomeForSession -> closeOutSessionAfterLanding, TASK-296.)
       await stampMergedOutcomeForSession(sessionId, project?.path);
+      // Remote: the close-out above completed, so boot resume must not repeat it (only the resync may retry).
+      if (isRemoteSession(session)) await getMergeBackService()?.recordClosedOut?.(sessionId);
 
       // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
       // Session-hosted runs can't close out via runs.merge (assertNotSessionHosted),

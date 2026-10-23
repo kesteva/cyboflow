@@ -47,6 +47,10 @@ vi.mock('../../services/demo/demoInsightsSeed', () => ({ seedDemoInsightsHistory
 
 import { registerProjectHandlers } from '../project';
 import type { AppServices } from '../types';
+import { setRemoteCheckout } from '../../services/hosts/remoteCheckoutBridge';
+import type { RemoteCheckoutLike } from '../../services/hosts/remoteCheckout';
+import { setMergeBackService } from '../../services/hosts/mergeBack/mergeBackBridge';
+import type { MergeBackServiceLike } from '../../services/hosts/mergeBack/mergeBackService';
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
@@ -70,6 +74,7 @@ interface SessRow {
   base_branch?: string;
   substrate?: string;
   chat_run_id?: string;
+  host_id?: string | null;
 }
 
 function makeServices(opts: {
@@ -369,6 +374,68 @@ describe('projects:delete — hosted-run cancellation', () => {
     expect(made.cancelHostedRuns).toHaveBeenCalledTimes(2);
     // …and worktree cleanup + project deletion still proceeded normally.
     expect(made.removeWorktree).toHaveBeenCalledTimes(2);
+    expect(made.deleteProject).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2 (MB-2 / SEC-2): a remote session's worktree and branch live on its
+// environment. Project deletion must route it through RemoteCheckout + the
+// merge-back local half — never the LOCAL removeWorktree / `branch -D <name>`,
+// which could force-delete the user's own branch that shares the name.
+// ---------------------------------------------------------------------------
+
+describe('projects:delete — remote sessions', () => {
+  it('cleans a remote session on its environment and This Mac\'s mirror; never touches the local repo for it', async () => {
+    const order: string[] = [];
+    const removeSessionWorktree = vi.fn(async (id: string) => { order.push(`remote:${id}`); return true; });
+    const cleanupLocal = vi.fn(async (id: string) => { order.push(`local:${id}`); return true; });
+    setRemoteCheckout({ removeSessionWorktree } as unknown as RemoteCheckoutLike);
+    setMergeBackService({ cleanupLocal } as unknown as MergeBackServiceLike);
+    try {
+      const made = makeServices({
+        project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+        sessions: [
+          { id: 'r1', project_id: 1, worktree_name: 'feature-x', base_branch: 'main', host_id: 'h-ssh' },
+          { id: 's2', project_id: 1, worktree_name: 'wt-2', base_branch: 'main', host_id: 'local' },
+        ],
+      });
+      made.deleteProject.mockImplementation(() => { order.push('delete'); return true; });
+      const handlers = register(made.services);
+
+      const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+      expect(result.success).toBe(true);
+      expect(order).toEqual(['remote:r1', 'local:r1', 'delete']);
+      // The local session (host 'local') is still torn down locally; the remote one never is.
+      expect(made.removeWorktree.mock.calls.map((c) => c[1])).toEqual(['wt-2']);
+      expect(made.deleteBranch.mock.calls.map((c) => c[1])).toEqual(['wt-2']);
+    } finally {
+      setRemoteCheckout(null);
+      setMergeBackService(null);
+    }
+  });
+
+  it('a failing environment cleanup (or none wired) never falls back to local git and never blocks the deletion', async () => {
+    setRemoteCheckout({ removeSessionWorktree: vi.fn(async () => { throw new Error('ssh down'); }) } as unknown as RemoteCheckoutLike);
+    try {
+      const made = makeServices({
+        sessions: [{ id: 'r1', project_id: 1, worktree_name: 'feature-x', base_branch: 'main', host_id: 'h-ssh' }],
+      });
+      const handlers = register(made.services);
+      const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+      expect(result.success).toBe(true);
+      expect(made.removeWorktree).not.toHaveBeenCalled();
+      expect(made.deleteBranch).not.toHaveBeenCalled();
+      expect(made.deleteProject).toHaveBeenCalledTimes(1);
+    } finally {
+      setRemoteCheckout(null);
+    }
+    const made = makeServices({
+      sessions: [{ id: 'r1', project_id: 1, worktree_name: 'feature-x', base_branch: 'main', host_id: 'h-ssh' }],
+    });
+    await invoke(register(made.services), 'projects:delete', '1');
+    expect(made.removeWorktree).not.toHaveBeenCalled();
+    expect(made.deleteBranch).not.toHaveBeenCalled();
     expect(made.deleteProject).toHaveBeenCalledTimes(1);
   });
 });

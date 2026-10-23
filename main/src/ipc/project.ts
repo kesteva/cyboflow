@@ -8,6 +8,9 @@ import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import { makeLoggerLike } from '../orchestrator/loggerAdapter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
 import { seedDemoInsightsHistory } from '../services/demo/demoInsightsSeed';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { getRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
+import { getMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -324,6 +327,23 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           } catch (error) {
             console.warn(`[Main] Failed to kill live interactive REPL for session ${session.id}:`, error);
           }
+        }
+
+        // M2: a remote session's worktree and branch live on its environment — never in the local repo (a local
+        // `branch -D <name>` could delete the user's own branch of that name). The environment half goes through
+        // RemoteCheckout (as sessions:delete does), This Mac's half (mirror, import/checkpoint refs) is awaited
+        // here because the project path is gone once the row is deleted. Fail-soft: never blocks the deletion.
+        if (isRemoteHostId(session.host_id)) {
+          try {
+            if (!(await getRemoteCheckout()?.removeSessionWorktree(session.id))) {
+              console.warn(`[Main] The environment worktree of session ${session.id} was not fully removed`);
+            }
+            await getMergeBackService()?.cleanupLocal(session.id);
+            worktreeCleanupCount++;
+          } catch (error) {
+            console.error(`[Main] Failed to clean up remote session ${session.id}:`, error);
+          }
+          continue;
         }
 
         try {
