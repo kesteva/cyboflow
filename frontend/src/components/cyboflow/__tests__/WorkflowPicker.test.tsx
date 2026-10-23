@@ -191,6 +191,8 @@ vi.mock('../WorkflowEditorModal', () => ({
 
 // Import after mocks so vi.mock hoisting is in effect
 import { WorkflowPicker } from '../WorkflowPicker';
+import { useHostsStore } from '../../../stores/hostsStore';
+import { makeHost, makeHostsStatus, makeLocalHost, makePreflight } from '../../agentsEnv/__tests__/fixtures';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useConfigStore } from '../../../stores/configStore';
 import { panelApi } from '../../../services/panelApi';
@@ -2719,5 +2721,59 @@ describe('WorkflowPicker — editor "Save as new flow" scope notice (TASK-220)',
 
     expect(screen.queryByTestId('workflow-editor-modal-stub')).not.toBeInTheDocument();
     expect(screen.queryByTestId('workflow-picker-editor-saved-toast')).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkflowPicker — environment picker (M2 C4)', () => {
+  const readyHost = makeHost({
+    id: 'h2',
+    label: 'm2-studio',
+    effectiveTier: 'full',
+    detectedTier: 'full',
+    remoteReady: true,
+    preflight: makePreflight({ runtimes: { claudeSdk: true, codexSdk: true, claudeCli: true, codexCli: true } }),
+  });
+
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', tuning_level: 'standard', runtime_mix: 'claude', created_at: '', archived_at: null },
+    ]);
+  });
+
+  afterEach(() => {
+    act(() => {
+      useHostsStore.setState({ hosts: [], featureStatus: null });
+    });
+  });
+
+  it('is hidden without a remote environment and the launch carries no hostId', async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await chooseRuntime('claude-sdk');
+    await act(async () => {
+      fireEvent.click(await findEnabledStartRun());
+    });
+    await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
+    expect(screen.queryByTestId('workflow-picker-environment')).not.toBeInTheDocument();
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('hostId');
+  });
+
+  it('a remote pick threads hostId into the host session create', async () => {
+    act(() => {
+      useHostsStore.setState({ hosts: [makeLocalHost(), readyHost], featureStatus: makeHostsStatus() });
+    });
+    render(<WorkflowPicker projectId={1} />);
+    const startRun = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-environment-option-h2'));
+    });
+    await act(async () => {
+      fireEvent.click(startRun);
+    });
+    await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ hostId: 'h2', agentRuntime: 'claude-sdk' }),
+    );
   });
 });

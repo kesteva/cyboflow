@@ -37,7 +37,7 @@ const { mockCreateQuick, mockCreatePanel, mockGetState, mockSessionGetState } = 
   // Only the `sessions` array (id + inPlace/isMainRepo flags) is read by the
   // raw-checkout guard; default to an empty list (the selection is not in-place).
   mockSessionGetState: vi.fn<
-    () => { sessions: Array<{ id: string; inPlace?: boolean; isMainRepo?: boolean }> }
+    () => { sessions: Array<{ id: string; inPlace?: boolean; isMainRepo?: boolean; hostId?: string | null }> }
   >(() => ({ sessions: [] })),
 }));
 
@@ -241,6 +241,37 @@ describe('ensureSessionForLaunch', () => {
 
     expect(mockCreateQuick).toHaveBeenCalledTimes(1);
     expect(mockCreateQuick.mock.calls[0][0]).toMatchObject({ substrate: 'sdk' });
+  });
+
+  describe('environment (hostId)', () => {
+    it('threads a remote hostId into createQuick', async () => {
+      await ensureSessionForLaunch(7, { forceNew: true, hostId: 'h2' });
+      expect(mockCreateQuick.mock.calls[0][0]).toMatchObject({ hostId: 'h2' });
+    });
+
+    it("never sends hostId for This Mac ('local' or omitted)", async () => {
+      await ensureSessionForLaunch(7, { forceNew: true });
+      await ensureSessionForLaunch(7, { forceNew: true, hostId: 'local' });
+      for (const call of mockCreateQuick.mock.calls) expect(call[0]).not.toHaveProperty('hostId');
+    });
+
+    it('reuses a free selection only when its host matches (null and local are equal)', async () => {
+      mockGetState.mockReturnValue({ selectedSessionId: 'sess-existing' });
+      mockSessionGetState.mockReturnValue({ sessions: [{ id: 'sess-existing', hostId: null }] });
+      expect(await ensureSessionForLaunch(7)).toBe('sess-existing');
+      expect(await ensureSessionForLaunch(7, { hostId: 'local' })).toBe('sess-existing');
+      expect(mockCreateQuick).not.toHaveBeenCalled();
+    });
+
+    it('creates a fresh session when the selection lives on a different host', async () => {
+      mockGetState.mockReturnValue({ selectedSessionId: 'sess-existing' });
+      mockSessionGetState.mockReturnValue({ sessions: [{ id: 'sess-existing', hostId: null }] });
+      expect(await ensureSessionForLaunch(7, { hostId: 'h2' })).toBe('sess-new');
+      mockSessionGetState.mockReturnValue({ sessions: [{ id: 'sess-existing', hostId: 'h2' }] });
+      mockCreateQuick.mockClear();
+      expect(await ensureSessionForLaunch(7)).toBe('sess-new');
+      expect(mockCreateQuick).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('throws when createQuick fails', async () => {

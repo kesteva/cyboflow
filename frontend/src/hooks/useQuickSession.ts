@@ -49,6 +49,11 @@ import {
 
 interface UseQuickSessionOptions {
   projectId: number | null;
+  /**
+   * Remote environment (host id) the started session runs on. Omitted / null / 'local' = This Mac: the request
+   * then carries no hostId at all. An options-bag field (not a `start` positional) — start's arity is guarded.
+   */
+  hostId?: string | null;
   onSuccess?: (sessionId: string) => void;
 }
 
@@ -245,6 +250,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // Base branch for the session worktree (wizard Advanced) — omitted →
           // the project checkout's HEAD.
           ...(baseBranch !== undefined ? { baseBranch } : {}),
+          // Remote environment — only sent when remote; local payloads never carry hostId.
+          ...(opts.hostId ? (opts.hostId !== 'local' ? { hostId: opts.hostId } : {}) : {}),
         });
 
         if (!result.success || !result.data) {
@@ -346,7 +353,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     // every time isStarting flips — the guard (`isStarting`) still holds because
     // setIsStarting is synchronous within the render cycle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [opts.projectId, opts.onSuccess],
+    [opts.projectId, opts.onSuccess, opts.hostId],
   );
 
   const startWithDefaults = useCallback(

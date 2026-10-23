@@ -73,6 +73,15 @@ export interface EnsureSessionForLaunchOptions {
    * checkout's HEAD (legacy behavior).
    */
   baseBranch?: string;
+  /**
+   * Remote environment (host id) the session runs on. Omitted / 'local' = This Mac. A selected session is
+   * reused only when its host matches (null and 'local' are equal); otherwise a fresh session is created there.
+   */
+  hostId?: string;
+}
+
+function normalizeHost(id: string | null | undefined): string {
+  return id === undefined || id === null || id === '' ? 'local' : id;
 }
 
 /**
@@ -102,7 +111,8 @@ export async function ensureSessionForLaunch(
     // fresh worktree-backed session. Mirrors the backend RunLauncher guard.
     const selectedSession = useSessionStore.getState().sessions.find((s) => s.id === sel);
     const selectionIsRawCheckout = selectedSession?.inPlace === true || selectedSession?.isMainRepo === true;
-    if (!selectionIsBusy && !selectionIsRawCheckout) return sel;
+    const selectionHostMatches = normalizeHost(selectedSession?.hostId) === normalizeHost(opts.hostId);
+    if (!selectionIsBusy && !selectionIsRawCheckout && selectionHostMatches) return sel;
   }
 
   // Otherwise create a fresh quick session for this launch. Pin the worktree mode
@@ -125,6 +135,7 @@ export async function ensureSessionForLaunch(
     ...(opts.agentModel ? { agentModel: opts.agentModel } : {}),
     ...(opts.agentRuntime ? {} : { substrate: 'sdk' as const }),
     ...(opts.baseBranch !== undefined ? { baseBranch: opts.baseBranch } : {}),
+    ...(opts.hostId !== undefined && opts.hostId !== 'local' ? { hostId: opts.hostId } : {}),
   });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');
