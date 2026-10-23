@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,10 +12,20 @@ import {
   type HostsChangedEvent,
   type PreflightCheckResult,
   type PreflightProgressEvent,
+  type PreflightRemoteFacts,
   type PreflightResult,
 } from '../../../../../shared/types/hosts';
 import type { ExecutionHost } from '../../../orchestrator/trpc/contracts/executionHost';
-import { HostsService, summarizePreflight, type HostTerminalsLike } from '../hostsService';
+import {
+  HostLinkUnavailableError,
+  HostsService,
+  isRemoteReady,
+  summarizePreflight,
+  type HostLinksDeps,
+  type HostTerminalsLike,
+} from '../hostsService';
+import { HostLinkNotReadyError, type HostLinkEvent, type HostLinkTimers } from '../hostLink';
+import type { ForwardHandle, ForwardSpec } from '../sshTransport';
 import { REMOTE_HOSTS_KILL_SWITCH_ENV, HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../flags';
 import type { LoggerLike } from '../../../orchestrator/types';
 
@@ -450,5 +461,191 @@ describe('summarizePreflight', () => {
   it('a reachable run whose probe did not finish says so instead of counting skipped rows', () => {
     const r = result('h', { probeComplete: false, results: [check('ssh-reachable', 'pass'), check('arch', 'skipped')] });
     expect(summarizePreflight(r)).toBe('Reachable, but the check did not finish (connection dropped or timed out)');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// remote readiness + orchestrator links
+// ---------------------------------------------------------------------------------------------------------------
+
+const REMOTE: PreflightRemoteFacts = {
+  home: '/Users/k', remoteRoot: '/Users/k/cf-remote/h', user: 'k', logname: 'k', shell: '/bin/zsh', tmpdir: null,
+  lang: null, nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git', codexPath: null, arch: 'arm64',
+  socketPathOk: true,
+};
+
+function hashPass(id: string, remote: PreflightRemoteFacts | null = REMOTE): PreflightResult {
+  return result(id, {
+    results: PREFLIGHT_CHECK_IDS.map((c) => check(c, 'pass')),
+    ...(remote ? { remote } : {}),
+  });
+}
+
+describe('HostView.remoteReady', () => {
+  it('is true only for an SSH machine whose complete preflight passed sdk-binary-hash and recorded facts', async () => {
+    const { id } = await service.addSsh({ label: 'Box', sshTarget: 'box' });
+    await flush();
+    hostFor(id).runs[0].d.resolve(hashPass(id));
+    await flush();
+    await store._queue().onIdle();
+    expect(service.get(id).remoteReady).toBe(true);
+    expect(service.get('local').remoteReady).toBe(false);
+    expect(isRemoteReady({ kind: 'ssh', preflight: result(id, { remote: REMOTE }) })).toBe(false); // hash skipped
+    expect(isRemoteReady({ kind: 'ssh', preflight: hashPass(id, null) })).toBe(false); // no facts
+    expect(isRemoteReady({ kind: 'ssh', preflight: { ...hashPass(id), probeComplete: false } })).toBe(false);
+    expect(isRemoteReady({ kind: 'ssh', preflight: null })).toBe(false);
+  });
+
+  it('a settled cli host is not remote-ready and its link is idle', async () => {
+    const id = await addSettled();
+    expect(service.get(id)).toMatchObject({ remoteReady: false, linkState: 'idle' });
+    expect(service.get('local')).toMatchObject({ linkState: 'idle' });
+  });
+});
+
+/** A forward the test drives by hand. */
+class FakeForward implements ForwardHandle {
+  readonly emitter = new EventEmitter();
+  closed = false;
+  exited = false;
+  readonly ready: Promise<void>;
+  private settle!: (err?: Error) => void;
+  constructor(readonly target: string, readonly spec: ForwardSpec) {
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.settle = (err) => (err ? reject(err) : resolve());
+    });
+    this.ready.catch(() => undefined);
+  }
+  up(): void {
+    this.settle();
+  }
+  drop(): void {
+    this.exited = true;
+    this.settle(new Error('exited'));
+    this.emitter.emit('exit', 255, 'Connection reset');
+  }
+  close(): void {
+    this.closed = true;
+    this.drop();
+  }
+  on(event: 'exit', listener: (code: number | null, stderrTail: string) => void): void {
+    this.emitter.on(event, listener);
+  }
+}
+
+describe('orchestrator links', () => {
+  let forwards: FakeForward[];
+  let orchSock: string | null;
+  let linked: HostsService;
+  const timers: HostLinkTimers = { setTimer: () => () => undefined };
+
+  function linksDeps(): HostLinksDeps {
+    return {
+      transport: {
+        openForward: (target, spec) => {
+          const f = new FakeForward(target, spec);
+          forwards.push(f);
+          return f;
+        },
+      },
+      getOrchSocketPath: () => orchSock,
+      timers,
+    };
+  }
+
+  beforeEach(() => {
+    forwards = [];
+    orchSock = '/Users/me/.cyboflow/sockets/orch.sock';
+    linked = new HostsService({
+      store, registry, terminals, appVersion: '1.0.0',
+      isAvailable: () => available, isEnabled: () => available && enabled, env, logger, captureError,
+      links: linksDeps(),
+    });
+  });
+
+  async function addReady(): Promise<string> {
+    const { id } = await linked.addSsh({ label: 'Box', sshTarget: 'box' });
+    await flush();
+    hostFor(id).runs[0].d.resolve(hashPass(id));
+    await flush();
+    await store._queue().onIdle();
+    return id;
+  }
+
+  it('forwards <remoteRoot>/s/o.sock to the local orch socket; link-up/down reach the view and listeners', async () => {
+    const id = await addReady();
+    const seen: HostLinkEvent[] = [];
+    linked.onLinkEvent((e) => seen.push(e));
+    const handle = linked.linkFor(id);
+    const lease = handle.acquire();
+    await flush();
+    expect(forwards).toHaveLength(1);
+    expect(forwards[0].target).toBe('box');
+    expect(forwards[0].spec).toEqual({ remoteSock: '/Users/k/cf-remote/h/s/o.sock', localSock: orchSock });
+    changes = [];
+    forwards[0].up();
+    await expect(lease).resolves.toEqual({ remoteSock: '/Users/k/cf-remote/h/s/o.sock' });
+    expect(linked.get(id).linkState).toBe('up');
+    expect(changes).toContainEqual({ kind: 'hosts', hostId: id });
+    expect(seen).toEqual([{ type: 'link-up', hostId: id, remoteSock: '/Users/k/cf-remote/h/s/o.sock' }]);
+    forwards[0].drop();
+    expect(linked.get(id).linkState).toBe('down');
+    expect(seen.map((e) => e.type)).toEqual(['link-up', 'link-down']);
+    handle.release();
+    expect(linked.get(id).linkState).toBe('idle');
+  });
+
+  it('acquire needs a recorded remote root and a local orch socket', async () => {
+    const id = await addSettled('Plain', 'plain');
+    const ready = await addReady();
+    await expect(linked.linkFor(id).acquire()).rejects.toBeInstanceOf(HostLinkNotReadyError);
+    orchSock = null;
+    await expect(linked.linkFor(ready).acquire()).rejects.toBeInstanceOf(HostLinkUnavailableError);
+    expect(forwards).toHaveLength(0);
+  });
+
+  it('refuses This Mac, unknown hosts, the gates, and an unwired service', async () => {
+    const id = await addReady();
+    expect(() => linked.linkFor('local')).toThrow(HostLinkUnavailableError);
+    expect(() => linked.linkFor('nope')).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.notFound }));
+    expect(() => service.linkFor(id)).toThrow(HostLinkUnavailableError);
+    env[REMOTE_HOSTS_KILL_SWITCH_ENV] = '1';
+    expect(() => linked.linkFor(id)).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.killed }));
+    delete env[REMOTE_HOSTS_KILL_SWITCH_ENV];
+    enabled = false;
+    expect(() => linked.linkFor(id)).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.disabled }));
+  });
+
+  it('archive, a target change and shutdown close the forward', async () => {
+    const a = await addReady();
+    const lease = linked.linkFor(a).acquire();
+    await flush();
+    forwards[0].up();
+    await lease;
+    linked.linkFor(a).release();
+    await linked.archive(a);
+    expect(forwards[0].closed).toBe(true);
+    expect(linked.get(a).linkState).toBe('idle');
+
+    const b = await addReady();
+    const lb = linked.linkFor(b).acquire();
+    await flush();
+    forwards[1].up();
+    await lb;
+    await linked.update(b, { sshTarget: 'box2' });
+    expect(forwards[1].closed).toBe(true);
+    await flush();
+    hostFor(b).runs[1].d.resolve(hashPass(b));
+    await flush();
+    await store._queue().onIdle();
+
+    const lc = linked.linkFor(b).acquire();
+    await flush();
+    expect(forwards[2].target).toBe('box2');
+    forwards[2].up();
+    await lc;
+    linked.shutdown();
+    expect(forwards[2].closed).toBe(true);
+    expect(linked.get(b).linkState).toBe('idle');
   });
 });

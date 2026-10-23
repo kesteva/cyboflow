@@ -10,9 +10,15 @@
  * most recent attempt per host (HostView.lastAttempt — an unreachable run is not persisted beyond lifecycle).
  * Events: emitPreflightProgress per decided check and once with done:true; emitHostsChanged whenever the
  * view changes in memory (HostStore emits for its own writes).
+ *
+ * Orchestrator links (spec A7): the service owns ONE HostLinkPool (one refcounted `ssh -N -R` orch-socket forward
+ * per SSH machine). linkFor(id) hands later stages an acquire/release handle; link-up / link-down refresh the view
+ * (HostView.linkState) and reach onLinkEvent listeners. A target change or archive closes that machine's link;
+ * shutdown() closes them all.
  */
 import type {
   CapabilityTier,
+  HostLinkViewState,
   HostsFeatureStatus,
   HostView,
   PreflightResult,
@@ -28,9 +34,10 @@ import type { HostRow, HostStore } from '../../orchestrator/hosts/hostStore';
 import { effectiveTier } from '../../orchestrator/hosts/tierRule';
 import type { LoggerLike } from '../../orchestrator/types';
 import { isHostPreflightScheduleKilled, isRemoteHostsKilled } from './flags';
-import type { HostRegistry } from './hostRegistry';
+import { HostLink, HostLinkPool, type HostLinkEvent, type HostLinkLease, type HostLinkTimers } from './hostLink';
+import { remoteFactsFromPreflight, type HostRegistry } from './hostRegistry';
 import type { CaptureErrorFn } from './preflight/preflightEngine';
-
+import type { SshTransportLike } from './sshTransport';
 
 /** Structural shape of HostTerminalManager (hostTerminalManager.ts); the service depends on nothing else. */
 export interface HostTerminalsLike {
@@ -51,6 +58,29 @@ export type HostStoreLike = Pick<
   'list' | 'get' | 'activeWork' | 'addSsh' | 'update' | 'setUserCap' | 'recordPreflight' | 'archive' | 'setProjectDefault'
 >;
 
+/** linkFor() cannot hand out a link: This Mac, links not wired, or no local orch socket to forward. */
+export class HostLinkUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostLinkUnavailableError';
+  }
+}
+
+/** What linkFor() returns: one release() per successful acquire(). */
+export interface HostLinkHandle {
+  /** Resolves with the remote socket path once the forward is up (opens it on first use). */
+  acquire(): Promise<HostLinkLease>;
+  release(): void;
+}
+
+export interface HostLinksDeps {
+  /** The SAME SshTransport the registry uses (forwards are dedicated connections, not the shared master). */
+  transport: Pick<SshTransportLike, 'openForward'>;
+  /** This Mac's orch socket path; null when there is none to forward (Windows named pipe / not started). */
+  getOrchSocketPath(): string | null;
+  timers?: HostLinkTimers;
+}
+
 export interface HostsServiceDeps {
   store: HostStoreLike;
   registry: Pick<HostRegistry, 'get' | 'invalidate' | 'closeAllMasters'>;
@@ -64,6 +94,8 @@ export interface HostsServiceDeps {
   env?: NodeJS.ProcessEnv;
   logger: LoggerLike;
   captureError?: CaptureErrorFn;
+  /** Orchestrator links; absent ⇒ linkFor() throws HostLinkUnavailableError (tests / stripped wiring). */
+  links?: HostLinksDeps;
 }
 
 interface LastAttempt {
@@ -94,11 +126,31 @@ export function summarizePreflight(result: PreflightResult): string {
   return parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}`).join(' · ') || 'No checks ran';
 }
 
+/** HostView.remoteReady: an SSH machine whose latest complete preflight passed sdk-binary-hash and recorded facts. */
+export function isRemoteReady(row: Pick<HostRow, 'kind' | 'preflight'>): boolean {
+  if (row.kind !== 'ssh' || remoteFactsFromPreflight(row.preflight) === null) return false;
+  return row.preflight?.results.some((r) => r.id === 'sdk-binary-hash' && r.status === 'pass') === true;
+}
+
+function linkViewState(link: HostLink | undefined): HostLinkViewState {
+  if (link === undefined) return 'idle';
+  if (link.state === 'up') return 'up';
+  if (link.state === 'reconnecting') return 'down';
+  return 'idle';
+}
+
 export class HostsService implements HostsFacade {
   private readonly inflight = new Map<string, InFlight>();
   private readonly lastAttempts = new Map<string, LastAttempt>();
+  /** The pool's current link per host (for HostView.linkState); a disposed one reads as idle. */
+  private readonly links = new Map<string, HostLink>();
+  private readonly linkPool: HostLinkPool | null;
+  private readonly linkListeners = new Set<(e: HostLinkEvent) => void>();
 
-  constructor(private readonly deps: HostsServiceDeps) {}
+  constructor(private readonly deps: HostsServiceDeps) {
+    const linkDeps = deps.links;
+    this.linkPool = linkDeps ? new HostLinkPool((hostId) => this.createLink(hostId, linkDeps)) : null;
+  }
 
   // ---------------------------------------------------------------- gates
 
@@ -159,6 +211,8 @@ export class HostsService implements HostsFacade {
       preflightAt: row.preflightAt,
       lastAttempt: this.lastAttempts.get(row.id) ?? null,
       preflightRunning: this.inflight.has(row.id),
+      remoteReady: isRemoteReady(row),
+      linkState: isLocal ? 'idle' : linkViewState(this.links.get(row.id)),
       runningSessions: work.sessions,
       runningRuns: work.runs,
       archivedAt: row.archivedAt,
@@ -203,6 +257,7 @@ export class HostsService implements HostsFacade {
       this.inflight.delete(id);
     }
     this.deps.registry.invalidate(id);
+    this.disposeLink(id);
     this.lastAttempts.delete(id);
     this.kickPreflight(id);
   }
@@ -220,6 +275,7 @@ export class HostsService implements HostsFacade {
     this.inflight.get(id)?.controller.abort();
     this.lastAttempts.delete(id);
     this.deps.terminals.closeForHost(id);
+    this.disposeLink(id);
     this.deps.registry.invalidate(id);
   }
 
@@ -297,6 +353,84 @@ export class HostsService implements HostsFacade {
     });
   }
 
+  // ------------------------------------------------------------ orchestrator links
+
+  /**
+   * The orch-socket forward of an SSH machine, for a remote spawn: acquire() before the process starts, release()
+   * when it exits. Throws (gates, unknown/archived host, This Mac, links not wired) synchronously; acquire() also
+   * rejects with HostLinkUnavailableError when this Mac has no orch socket, and with the HostLink errors
+   * (not checked yet, link down, socket path too long).
+   */
+  linkFor(hostId: string): HostLinkHandle {
+    this.guard();
+    this.guardRemote();
+    const row = this.requireLive(hostId);
+    if (row.kind !== 'ssh' || row.sshTarget === null) {
+      throw new HostLinkUnavailableError('This Mac needs no orchestrator link.');
+    }
+    const pool = this.linkPool;
+    if (pool === null) throw new HostLinkUnavailableError('Orchestrator links are not available in this build.');
+    const link = pool.get(hostId);
+    return {
+      acquire: async (): Promise<HostLinkLease> => {
+        if ((this.deps.links?.getOrchSocketPath() ?? null) === null) {
+          throw new HostLinkUnavailableError('The cyboflow orchestrator socket is not running on this Mac.');
+        }
+        return link.acquire();
+      },
+      release: (): void => {
+        const before = linkViewState(link);
+        link.release();
+        // The last release ends a reconnect loop without an event: refresh the view so 'down' does not linger.
+        if (linkViewState(link) !== before) emitHostsChanged({ kind: 'hosts', hostId });
+      },
+    };
+  }
+
+  /** link-up / link-down for every SSH machine. Returns the unsubscribe function. */
+  onLinkEvent(listener: (e: HostLinkEvent) => void): () => void {
+    this.linkListeners.add(listener);
+    return () => this.linkListeners.delete(listener);
+  }
+
+  private createLink(hostId: string, linkDeps: HostLinksDeps): HostLink {
+    const row = this.deps.store.get(hostId);
+    if (!row || row.sshTarget === null) throw new HostNotFoundError();
+    const link = new HostLink({
+      hostId,
+      sshTarget: row.sshTarget,
+      transport: linkDeps.transport,
+      remoteRoot: () => remoteFactsFromPreflight(this.deps.store.get(hostId)?.preflight)?.remoteRoot ?? null,
+      // acquire() refuses before this is ever read without a path; a reconnect that finds none fails and backs off.
+      localSock: () => linkDeps.getOrchSocketPath() ?? '',
+      timers: linkDeps.timers,
+      logger: this.deps.logger,
+    });
+    link.onEvent((e) => this.onLinkEventInternal(e));
+    this.links.set(hostId, link);
+    return link;
+  }
+
+  private onLinkEventInternal(e: HostLinkEvent): void {
+    if (e.type === 'link-up') this.deps.logger.info('[hosts] orchestrator link up', { hostId: e.hostId });
+    else this.deps.logger.warn('[hosts] orchestrator link down', { hostId: e.hostId, reason: e.reason });
+    emitHostsChanged({ kind: 'hosts', hostId: e.hostId });
+    for (const l of this.linkListeners) {
+      try {
+        l(e);
+      } catch {
+        /* a listener never breaks the link */
+      }
+    }
+  }
+
+  private disposeLink(hostId: string): void {
+    if (!this.links.has(hostId)) return;
+    this.linkPool?.dispose(hostId);
+    this.links.delete(hostId);
+    emitHostsChanged({ kind: 'hosts', hostId });
+  }
+
   // ------------------------------------------------------------ terminals
 
   async terminalOpen(hostId: string): Promise<{ terminalId: string }> {
@@ -330,9 +464,18 @@ export class HostsService implements HostsFacade {
 
   // ------------------------------------------------------------ lifecycle
 
-  /** Quit drain (sync): abort in-flight preflights, kill terminals, close shared ssh masters. Never throws. */
+  /**
+   * Quit drain (sync): abort in-flight preflights, close orchestrator links, kill terminals, close shared ssh
+   * masters. Never throws.
+   */
   shutdown(): void {
     for (const f of this.inflight.values()) f.controller.abort();
+    try {
+      this.linkPool?.disposeAll();
+      this.links.clear();
+    } catch (err) {
+      this.deps.logger.warn('[hosts] link teardown failed', { error: err instanceof Error ? err.name : 'unknown' });
+    }
     try {
       this.deps.terminals.destroyAll();
     } catch (err) {

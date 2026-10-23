@@ -12,6 +12,24 @@ import { shQuote } from './sshTransport';
 
 export interface ProbeRecord {
   home: string | null;
+  /** `id -un`. */
+  user: string | null;
+  /** $LOGNAME, else `logname`, else `user`. */
+  logname: string | null;
+  /** $SHELL, else the passwd entry via `getent` (absent on macOS, where sshd always sets $SHELL). */
+  shell: string | null;
+  /** Darwin: `getconf DARWIN_USER_TEMP_DIR`; else $TMPDIR. */
+  tmpdir: string | null;
+  lang: string | null;
+  /**
+   * The git binary that produced `gitVersion` — never the Darwin `/usr/bin/git` shim unless the Command Line
+   * Tools are installed (`xcode-select -p` succeeds or /Library/Developer/CommandLineTools exists).
+   */
+  gitPath: string | null;
+  /** The configured remote root, shell-expanded (`~/x` → `$HOME/x`); not resolved, it may not exist yet. */
+  remoteRoot: string | null;
+  /** Byte length of `<remoteRoot>/s/o.sock` (the orch forward's remote socket). */
+  sockPathBytes: number | null;
   unameS: string | null;
   unameM: string | null;
   osVersion: string | null;
@@ -37,7 +55,8 @@ export interface ProbeRecord {
 }
 
 const EMPTY_PROBE: ProbeRecord = {
-  home: null, unameS: null, unameM: null, osVersion: null, xcodeClt: null, gitVersion: null,
+  home: null, user: null, logname: null, shell: null, tmpdir: null, lang: null, gitPath: null, remoteRoot: null,
+  sockPathBytes: null, unameS: null, unameM: null, osVersion: null, xcodeClt: null, gitVersion: null,
   nodePath: null, nodeVersion: null, claudePath: null, claudeVersion: null, codexPath: null,
   codexVersion: null, codexAuth: null, envExists: null, envMode: null, envWellformed: null, envLines: null,
   sleepValue: null, sleepPrevented: null, diskFreeKb: null, complete: false,
@@ -67,32 +86,44 @@ export function buildProbeScript(remoteRoot: string): string {
   return [
     'kv() { printf \'%s=%s\\n\' "$1" "$(printf \'%s\' "$2" | head -n 1 | tr -d \'\\r\')"; }',
     'kv home "$HOME"',
+    'u=$(id -un 2>/dev/null)',
+    'kv user "$u"',
+    // $LOGNAME first: sshd sets it, while logname(1) asks getlogin(), which can name another account.
+    'ln=$LOGNAME; [ -z "$ln" ] && ln=$(logname 2>/dev/null)',
+    'kv logname "${ln:-$u}"',
+    'sh_=$SHELL',
+    'if [ -z "$sh_" ] && [ -n "$u" ]; then sh_=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); fi',
+    'kv shell "$sh_"',
+    'kv lang "$LANG"',
     'uname_s=$(uname -s 2>/dev/null)',
     'kv uname_s "$uname_s"',
     'kv uname_m "$(uname -m 2>/dev/null)"',
     'if [ "$uname_s" = Darwin ]; then',
+    '  td=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)',
+    '  kv tmpdir "${td:-$TMPDIR}"',
     '  kv os_version "$(sw_vers -productVersion 2>/dev/null)"',
     'else',
+    '  kv tmpdir "$TMPDIR"',
     '  kv os_version "$(sed -n \'s/^PRETTY_NAME=//p\' /etc/os-release 2>/dev/null | tr -d \'"\')"',
     'fi',
     // git: on Darwin /usr/bin/git is a shim that pops the Command Line Tools installer when CLT is missing,
-    // so it is only run when xcode-select -p succeeds; otherwise only a Homebrew git is tried.
-    'git_v=',
+    // so it is only run when xcode-select -p succeeds (or the CLT folder exists); otherwise only a Homebrew git
+    // is tried. git_path is the binary that answered.
+    'git_v=; git_p=',
     'if [ "$uname_s" = Darwin ]; then',
-    '  if xcode-select -p >/dev/null 2>&1; then',
-    '    kv xcode_clt 1',
-    '    git_v=$(/usr/bin/git --version 2>/dev/null)',
-    '  else',
-    '    kv xcode_clt 0',
-    '    for c in /opt/homebrew/bin/git /usr/local/bin/git; do',
-    '      if [ -x "$c" ]; then git_v=$("$c" --version 2>/dev/null); [ -n "$git_v" ] && break; fi',
-    '    done',
-    '  fi',
+    '  clt=',
+    '  if xcode-select -p >/dev/null 2>&1; then kv xcode_clt 1; clt=1; else kv xcode_clt 0; fi',
+    '  [ -d /Library/Developer/CommandLineTools ] && clt=1',
+    '  if [ -n "$clt" ]; then set -- /usr/bin/git /opt/homebrew/bin/git /usr/local/bin/git; else set -- /opt/homebrew/bin/git /usr/local/bin/git; fi',
+    '  for c in "$@"; do',
+    '    if [ -x "$c" ]; then git_v=$("$c" --version 2>/dev/null); if [ -n "$git_v" ]; then git_p=$c; break; fi; fi',
+    '  done',
     'else',
     '  gp=$(command -v git 2>/dev/null)',
-    '  if [ -n "$gp" ]; then git_v=$("$gp" --version 2>/dev/null); fi',
+    '  if [ -n "$gp" ]; then git_v=$("$gp" --version 2>/dev/null); [ -n "$git_v" ] && git_p=$gp; fi',
     'fi',
     'kv git_version "$git_v"',
+    'kv git_path "$git_p"',
     // node first: claude / codex are often node-shebang scripts, so the found node joins PATH.
     'probe_bin() {',
     '  name=$1; shift',
@@ -114,6 +145,9 @@ export function buildProbeScript(remoteRoot: string): string {
     `probe_bin codex ${candidates('codex')} "$(command -v codex 2>/dev/null)"`,
     'if [ -s "$HOME/.codex/auth.json" ]; then kv codex_auth 1; else kv codex_auth 0; fi',
     `root=${remoteRootShellExpr(remoteRoot)}`,
+    'kv remote_root "$root"',
+    // The orch forward's remote socket must fit sun_path (104 on macOS): `wc -c` counts bytes.
+    'kv sock_path_bytes "$(printf \'%s\' "$root/s/o.sock" | wc -c | tr -d \' \')"',
     'envf="$root/env"',
     'if [ -f "$envf" ]; then',
     '  kv env_exists 1',
@@ -172,6 +206,14 @@ export function parseProbeOutput(stdout: string): ProbeRecord {
   return {
     ...EMPTY_PROBE,
     home: str(g('home')),
+    user: str(g('user')),
+    logname: str(g('logname')),
+    shell: str(g('shell')),
+    tmpdir: str(g('tmpdir')),
+    lang: str(g('lang')),
+    gitPath: str(g('git_path')),
+    remoteRoot: str(g('remote_root')),
+    sockPathBytes: int(g('sock_path_bytes')),
     unameS: str(g('uname_s')),
     unameM: str(g('uname_m')),
     osVersion: str(g('os_version')),

@@ -248,6 +248,8 @@ export function makeHost(over: Partial<HostView> = {}): HostView {
     preflightAt: '2026-10-09T10:00:05.000Z',
     lastAttempt: null,
     preflightRunning: false,
+    remoteReady: false,
+    linkState: 'idle',
     runningSessions: 0,
     runningRuns: 0,
     archivedAt: null,

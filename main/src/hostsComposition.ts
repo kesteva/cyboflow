@@ -6,7 +6,11 @@
  *
  * Constructing touches no network and spawns nothing. start() only starts the (self-gating) scheduler and
  * relays config changes to the renderer; the feature gates are read live per call by the service.
- * stop() is the synchronous quit-drain hook.
+ * stop() is the synchronous quit-drain hook (it also closes every orchestrator link).
+ *
+ * Orchestrator links (ssh -R of this Mac's orch socket, spec A7) ride the SAME SshTransport as the registry. The
+ * local socket path defaults to the one orchSocketComposition binds (`<cyboflow dir>/sockets/orch.sock`, POSIX
+ * only — a Windows named pipe cannot be forwarded); boot may inject a live getter instead.
  *
  * Host terminal lifecycle guards (the renderer modal owns a terminal, but cannot always close it):
  *  - a config change that leaves the feature not running (or remote hosts kill-switched) destroys every terminal;
@@ -19,6 +23,7 @@ import type { BrowserWindow } from 'electron';
 import type { ConfigManager } from './services/configManager';
 import type { DatabaseLike, LoggerLike } from './orchestrator/types';
 import { emitHostsChanged, emitHostTerminalExit, setHostsFacade } from './orchestrator/hostsBridge';
+import { getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { HostStore } from './orchestrator/hosts/hostStore';
 import { captureSeamError } from './services/telemetry';
 import { HostRegistry } from './services/hosts/hostRegistry';
@@ -34,6 +39,16 @@ export interface HostsCompositionDeps {
   logger: LoggerLike;
   appVersion: string;
   getMainWindow: () => Pick<BrowserWindow, 'webContents'> | null | undefined;
+  /**
+   * This Mac's orch socket path for the per-host forwards; null = none to forward. Default: the fixed path
+   * orchSocketComposition binds on POSIX (`<cyboflow dir>/sockets/orch.sock`), null on Windows.
+   */
+  getOrchSocketPath?: () => string | null;
+}
+
+/** The path orchSocketComposition binds (POSIX); a Windows named pipe is not forwardable, so null there. */
+export function defaultOrchSocketPath(platform: NodeJS.Platform = process.platform): string | null {
+  return platform === 'win32' ? null : getCyboflowSubdirectory('sockets', 'orch.sock');
 }
 
 export interface HostsComposition {
@@ -112,6 +127,7 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
     isEnabled: () => configManager.isEnvironmentsEnabled(),
     logger,
     captureError: captureSeamError,
+    links: { transport, getOrchSocketPath: deps.getOrchSocketPath ?? (() => defaultOrchSocketPath()) },
   });
   const scheduler = new PreflightScheduler({
     listHosts: () => store.list({ includeArchived: false }),

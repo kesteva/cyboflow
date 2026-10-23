@@ -29,7 +29,7 @@ vi.mock('@homebridge/node-pty-prebuilt-multiarch', () => ({
   },
 }));
 
-import { composeHosts, type HostsComposition } from '../hostsComposition';
+import { composeHosts, defaultOrchSocketPath, type HostsComposition } from '../hostsComposition';
 import { dbAdapter } from '../orchestrator/__test_fixtures__/dbAdapter';
 import {
   _resetHostsFacadeForTesting,
@@ -220,5 +220,17 @@ describe('composeHosts', () => {
     } finally {
       hostEvents.off(hostTerminalChannel(terminalId), onExit);
     }
+  });
+});
+
+describe('defaultOrchSocketPath', () => {
+  it('is the orch socket orchSocketComposition binds on POSIX, and null for a Windows named pipe', () => {
+    expect(defaultOrchSocketPath('darwin')).toMatch(/[/\\]sockets[/\\]orch\.sock$/);
+    expect(defaultOrchSocketPath('win32')).toBeNull();
+  });
+
+  it('composes a service that can hand out orchestrator links', () => {
+    expect(typeof comp.service.linkFor).toBe('function');
+    expect(() => comp.service.linkFor('local')).toThrow(/needs no orchestrator link/);
   });
 });

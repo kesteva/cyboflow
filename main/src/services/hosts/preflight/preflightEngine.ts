@@ -14,17 +14,22 @@
  *    are null — HostStore then keeps the last complete preflight and only marks the machine online.
  *  - In M1 the SDK runtimes are never present remotely (sdk-binary-hash / mcp-roundtrip are skipped), so a
  *    healthy machine detects as `cli`.
+ *  - A complete probe that reported the remote home also records `remote` (PreflightRemoteFacts): the expanded
+ *    remote root, the spawn env base and the tool paths a remote launch needs — read back from the persisted
+ *    result, never parsed out of a check's detail.
  */
 import {
   PREFLIGHT_CHECK_IDS,
   redactSecrets,
   type PreflightCheckId,
   type PreflightCheckResult,
+  type PreflightRemoteFacts,
   type PreflightResult,
   type PreflightRuntimes,
 } from '../../../../../shared/types/hosts';
 import { computeDetectedTier } from '../../../orchestrator/hosts/tierRule';
 import type { LoggerLike } from '../../../orchestrator/types';
+import { REMOTE_SOCK_MAX_BYTES, remoteOrchSocketPath } from '../hostLink';
 import { buildProbeScript, expandRemoteRoot, parseProbeOutput, type ProbeRecord } from '../remoteProbe';
 import { classifySshFailure, type SshTransportLike } from '../sshTransport';
 import {
@@ -82,6 +87,38 @@ function runtimesFrom(probe: ProbeRecord | null): PreflightRuntimes {
 function osVersionFrom(probe: ProbeRecord | null): string | null {
   if (probe === null || probe.osVersion === null) return null;
   return probe.unameS === 'Darwin' ? `macOS ${probe.osVersion}` : probe.osVersion;
+}
+
+/**
+ * The persisted remote facts of a COMPLETE probe; undefined when the remote home (hence the absolute remote root)
+ * is unknown. socketPathOk checks the path HostLink will actually forward to (`remoteOrchSocketPath`) and the
+ * probe's own byte count of `<root>/s/o.sock` when it reported one.
+ */
+export function remoteFactsFrom(probe: ProbeRecord, configuredRoot: string): PreflightRemoteFacts | undefined {
+  if (probe.home === null) return undefined;
+  const expanded = expandRemoteRoot(configuredRoot, probe.home) ?? probe.remoteRoot;
+  if (expanded === null || !expanded.startsWith('/')) return undefined;
+  const remoteRoot = expanded.replace(/\/+$/, '') || '/';
+  let socketPathOk = probe.sockPathBytes === null || probe.sockPathBytes < REMOTE_SOCK_MAX_BYTES;
+  try {
+    remoteOrchSocketPath(remoteRoot);
+  } catch {
+    socketPathOk = false;
+  }
+  return {
+    home: probe.home,
+    remoteRoot,
+    user: probe.user,
+    logname: probe.logname,
+    shell: probe.shell,
+    tmpdir: probe.tmpdir,
+    lang: probe.lang,
+    nodePath: probe.nodePath,
+    gitPath: probe.gitPath,
+    codexPath: probe.codexPath,
+    arch: probe.unameM,
+    socketPathOk,
+  };
 }
 
 function errorMessage(err: unknown): string {
@@ -206,6 +243,7 @@ export async function runSshPreflight(
   // Only a finished probe (probe_done) whose checks all ran describes the machine; anything less is not recorded.
   const complete = reachable && probeComplete && !signal?.aborted;
   const runtimes = runtimesFrom(complete ? probe : null);
+  const remote = complete && probe !== null ? remoteFactsFrom(probe, ctx.remoteRoot) : undefined;
   return {
     hostId: ctx.hostId,
     mode,
@@ -220,5 +258,6 @@ export async function runSshPreflight(
     osVersion: complete ? osVersionFrom(probe) : null,
     toolchainHash: null,
     appVersion: ctx.appVersion,
+    ...(remote !== undefined ? { remote } : {}),
   };
 }

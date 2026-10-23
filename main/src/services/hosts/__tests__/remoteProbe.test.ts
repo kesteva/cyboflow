@@ -14,16 +14,24 @@ const posix = process.platform !== 'win32';
 
 const FULL = [
   'home=/Users/k',
+  'user=k',
+  'logname=k',
+  'shell=/bin/zsh',
+  'lang=en_US.UTF-8',
+  'tmpdir=/var/folders/xy/T/',
   'uname_s=Darwin',
   'uname_m=arm64',
   'os_version=15.1',
   'xcode_clt=1',
   'git_version=git version 2.39.5 (Apple Git-154)',
+  'git_path=/usr/bin/git',
   'node_path=/opt/homebrew/bin/node',
   'node_version=v22.11.0',
   'claude_path=/Users/k/.local/bin/claude',
   'claude_version=2.1.290 (Claude Code)',
   'codex_auth=0',
+  'remote_root=/Users/k/cf-remote/abc',
+  'sock_path_bytes=33',
   'env_exists=1',
   'env_mode=600',
   'env_wellformed=1',
@@ -43,6 +51,16 @@ describe('parseProbeOutput', () => {
       claudePath: '/Users/k/.local/bin/claude', codexPath: null, codexVersion: null, codexAuth: false,
       envExists: true, envMode: '600', envWellformed: 1, envLines: 1, sleepValue: '0', sleepPrevented: false,
       diskFreeKb: 123456789, complete: true,
+      user: 'k', logname: 'k', shell: '/bin/zsh', lang: 'en_US.UTF-8', tmpdir: '/var/folders/xy/T/',
+      gitPath: '/usr/bin/git', remoteRoot: '/Users/k/cf-remote/abc', sockPathBytes: 33,
+    });
+  });
+
+  it('leaves the remote facts null when the probe did not report them', () => {
+    const p = parseProbeOutput('home=/Users/k\nsock_path_bytes=x\nprobe_done=1\n');
+    expect(p).toMatchObject({
+      user: null, logname: null, shell: null, lang: null, tmpdir: null, gitPath: null, remoteRoot: null,
+      sockPathBytes: null, complete: true,
     });
   });
 
@@ -88,6 +106,20 @@ describe('buildProbeScript secrets rules', () => {
       expect(ok, line).toBe(true);
     }
     expect(script).not.toMatch(/grep (?!-c)[^|]*CLAUDE_CODE_OAUTH_TOKEN/);
+  });
+
+  it('never runs the Darwin /usr/bin/git shim without the Command Line Tools', () => {
+    const lines = script.split('\n');
+    const shimLine = lines.find((l) => l.includes('set -- /usr/bin/git'));
+    expect(shimLine).toMatch(/if \[ -n "\$clt" \]; then set -- \/usr\/bin\/git/);
+    expect(shimLine).toMatch(/else set -- \/opt\/homebrew\/bin\/git \/usr\/local\/bin\/git; fi/);
+    expect(script).toContain('[ -d /Library/Developer/CommandLineTools ] && clt=1');
+    expect(script).toContain('kv git_path "$git_p"');
+  });
+
+  it('reports the expanded remote root and the byte length of its orch socket path', () => {
+    expect(script).toContain('kv remote_root "$root"');
+    expect(script).toMatch(/kv sock_path_bytes "\$\(printf '%s' "\$root\/s\/o\.sock" \| wc -c/);
   });
 
   it('reads /etc/os-release with sed -n for PRETTY_NAME only', () => {
@@ -140,5 +172,31 @@ describe.skipIf(!posix)('buildProbeScript run by a local /bin/sh (no ssh)', () =
     expect(p.envWellformed).toBe(1);
     expect(p.codexAuth).toBe(false);
     expect(p.diskFreeKb).toBeGreaterThan(0);
+    expect(p.user).toBe(execFileSync('id', ['-un'], { encoding: 'utf8' }).trim());
+    expect(p.remoteRoot).toBe(`${home}/cf-remote/abc`);
+    expect(p.sockPathBytes).toBe(Buffer.byteLength(`${home}/cf-remote/abc/s/o.sock`));
+    if (p.gitPath !== null) expect(p.gitPath.startsWith('/')).toBe(true);
+  }, 60_000);
+
+  it('falls back to $LOGNAME / $TMPDIR / $LANG / $SHELL from the environment', () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'cf-probe-')));
+    const out = execFileSync('/bin/sh', ['-s'], {
+      input: buildProbeScript('~/cf-remote/abc'),
+      encoding: 'utf8',
+      env: {
+        HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LOGNAME: 'probe-logname', SHELL: '/bin/probe-sh',
+        LANG: 'C.UTF-8', TMPDIR: '/probe/tmp/',
+      },
+      timeout: 60_000,
+    });
+    const p = parseProbeOutput(out);
+    expect(p.complete).toBe(true);
+    expect(p.shell).toBe('/bin/probe-sh');
+    expect(p.lang).toBe('C.UTF-8');
+    // $LOGNAME wins over logname(1), whose getlogin() can name another account.
+    expect(p.logname).toBe('probe-logname');
+    // Darwin answers DARWIN_USER_TEMP_DIR first; elsewhere $TMPDIR.
+    if (process.platform !== 'darwin') expect(p.tmpdir).toBe('/probe/tmp/');
+    else expect(p.tmpdir).toMatch(/^\//);
   }, 60_000);
 });

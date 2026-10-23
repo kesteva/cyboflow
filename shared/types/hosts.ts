@@ -40,6 +40,28 @@ export interface PreflightRuntimes {
   codexCli: boolean;
 }
 
+/**
+ * What a COMPLETE probe learned about an SSH machine that a remote launch needs (spawn env base, tool paths,
+ * the orch forward's socket). Persisted inside the preflight JSON; never parsed back out of check `detail`s.
+ */
+export interface PreflightRemoteFacts {
+  home: string;
+  /** The configured remote root, expanded to an absolute path (`~/cf-remote/<id>` → `/Users/k/cf-remote/<id>`). */
+  remoteRoot: string;
+  user: string | null;
+  logname: string | null;
+  shell: string | null;
+  tmpdir: string | null;
+  lang: string | null;
+  nodePath: string | null;
+  gitPath: string | null;
+  /** The user's own codex CLI (not the cyboflow toolchain's). */
+  codexPath: string | null;
+  arch: string | null;
+  /** `<remoteRoot>/s/o.sock` fits a unix socket path (< 100 bytes). */
+  socketPathOk: boolean;
+}
+
 export interface PreflightResult {
   hostId: string;
   mode: 'full' | 'prelaunch';
@@ -60,6 +82,11 @@ export interface PreflightResult {
   osVersion: string | null;
   toolchainHash: string | null;
   appVersion: string;
+  /**
+   * SSH only, and only for a complete probe that reported the remote home (probeComplete true). Absent for This
+   * Mac, for an unreachable / incomplete run, and in results persisted before remote flows.
+   */
+  remote?: PreflightRemoteFacts;
 }
 
 export interface SshHostConfig {
@@ -87,11 +114,25 @@ export interface HostView {
   /** In-memory, most recent run. */
   lastAttempt: { at: string; reachable: boolean; summary: string } | null;
   preflightRunning: boolean;
+  /**
+   * SSH only: the latest complete preflight passed `sdk-binary-hash` (cyboflow tools installed and matching) and
+   * recorded the remote facts — the machine can host SDK sessions/flows. Always false for This Mac (it needs no
+   * remote toolchain; pickers check `kind` first).
+   */
+  remoteReady: boolean;
+  /**
+   * The orchestrator link (ssh -R forward of the orch socket) for this machine: 'up' while forwarded, 'down' while
+   * reconnecting after an unexpected drop, 'idle' otherwise (none needed yet / closed). Always 'idle' for This Mac.
+   */
+  linkState: HostLinkViewState;
   runningSessions: number;
   runningRuns: number;
   archivedAt: string | null;
   createdAt: string;
 }
+
+export const HOST_LINK_VIEW_STATES = ['idle', 'up', 'down'] as const;
+export type HostLinkViewState = (typeof HOST_LINK_VIEW_STATES)[number];
 
 export interface HostsFeatureStatus {
   available: boolean;
