@@ -12,14 +12,23 @@
  * the entry carries both owner ids for display.
  *
  * Staleness (v1) is strict: a path is `orphan` iff NO session row and NO run row
- * references it. Age, idleness and terminal run/session status are never folded
- * into the tag.
+ * references it — in THIS instance's DB or in any sibling instance's (see
+ * services/siblingInstances.ts). Age, idleness and terminal run/session status
+ * are never folded into the tag.
+ *
+ * A path only a sibling's DB references is `other-instance` (`prunable: false`):
+ * it is live over there, and reaping it here would pull a worktree out from under
+ * that app. When a sibling DB exists but cannot be read, ownership is unknowable,
+ * so every would-be orphan is `other-instance` with `claimVerified: false` — the
+ * guard fails closed rather than offer a destructive prune on a guess.
  *
  * `in_place` / `is_main_repo` entries carry `prunable: false` in the returned
  * shape itself (a literal type), so no caller has to remember the guard.
  */
 
-export type WorktreeTag = 'session-owned' | 'run-owned' | 'orphan' | 'in_place' | 'is_main_repo';
+import type { SiblingWorktreeClaims } from './siblingInstances';
+
+export type WorktreeTag = 'session-owned' | 'run-owned' | 'orphan' | 'in_place' | 'is_main_repo' | 'other-instance';
 
 export interface RegistrySessionRow {
   id: string;
@@ -44,6 +53,8 @@ export interface WorktreeRegistryInput {
   sessions: readonly RegistrySessionRow[];
   runs: readonly RegistryRunRow[];
   gitWorktrees: readonly GitWorktreeEntry[];
+  /** Sibling instances' worktree claims. Omitted ⇒ none (no sibling data dirs). */
+  siblingClaims?: SiblingWorktreeClaims;
 }
 
 interface WorktreeRegistryEntryBase {
@@ -66,7 +77,20 @@ export interface OwnedOrOrphanWorktreeRegistryEntry extends WorktreeRegistryEntr
   prunable: true;
 }
 
-export type WorktreeRegistryEntry = GuardedWorktreeRegistryEntry | OwnedOrOrphanWorktreeRegistryEntry;
+/** Referenced only by a sibling instance's DB (or unverifiable): live elsewhere, never prunable here. */
+export interface OtherInstanceWorktreeRegistryEntry extends WorktreeRegistryEntryBase {
+  tag: 'other-instance';
+  prunable: false;
+  /** The sibling data dir that claims it — or, when unverified, the one whose DB could not be read. */
+  claimedBy: string;
+  /** False when no sibling claims it but a sibling DB was unreadable (the fail-closed case). */
+  claimVerified: boolean;
+}
+
+export type WorktreeRegistryEntry =
+  | GuardedWorktreeRegistryEntry
+  | OwnedOrOrphanWorktreeRegistryEntry
+  | OtherInstanceWorktreeRegistryEntry;
 
 /** Case/separator-insensitive-on-Windows key so equal paths compare equal. */
 export function worktreePathKey(p: string, platform: NodeJS.Platform = process.platform): string {
@@ -94,6 +118,12 @@ export function reconcileWorktreeRegistry(
     if (bucket) bucket.push(s);
     else sessionsByPath.set(k, [s]);
   }
+  const siblingByPath = new Map<string, string>();
+  for (const [p, dataDir] of input.siblingClaims?.claimedPaths ?? []) {
+    const k = key(p);
+    if (!siblingByPath.has(k)) siblingByPath.set(k, dataDir);
+  }
+  const unreadableSibling = input.siblingClaims?.unreadableDataDirs[0];
   const runByPath = new Map<string, RegistryRunRow>();
   for (const r of input.runs) {
     const k = key(r.worktreePath);
@@ -127,7 +157,16 @@ export function reconcileWorktreeRegistry(
       entries.push({ ...base, tag: 'is_main_repo', prunable: false });
     } else if (sessions.length > 0) entries.push({ ...base, tag: 'session-owned', prunable: true });
     else if (run) entries.push({ ...base, tag: 'run-owned', prunable: true });
-    else entries.push({ ...base, tag: 'orphan', prunable: true });
+    else {
+      const sibling = siblingByPath.get(k);
+      if (sibling !== undefined) {
+        entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: sibling, claimVerified: true });
+      } else if (unreadableSibling !== undefined) {
+        entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: unreadableSibling, claimVerified: false });
+      } else {
+        entries.push({ ...base, tag: 'orphan', prunable: true });
+      }
+    }
   }
   return entries;
 }
@@ -149,11 +188,17 @@ export async function loadWorktreeRegistry(deps: {
   worktreeManager: WorktreeRegistryGit;
   projectId: number;
   projectPath: string;
+  /** Sibling instances' claims; omitted ⇒ none. */
+  readSiblingClaims?: () => Promise<SiblingWorktreeClaims>;
 }): Promise<WorktreeRegistryEntry[]> {
-  const gitWorktrees = await deps.worktreeManager.listWorktrees(deps.projectPath);
+  const [gitWorktrees, siblingClaims] = await Promise.all([
+    deps.worktreeManager.listWorktrees(deps.projectPath),
+    deps.readSiblingClaims?.(),
+  ]);
   return reconcileWorktreeRegistry({
     projectPath: deps.projectPath,
     gitWorktrees,
+    siblingClaims,
     sessions: deps.database.getSessionWorktreeRefs(deps.projectId).map((r) => ({
       id: r.id,
       worktreePath: r.worktree_path,

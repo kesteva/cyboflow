@@ -405,3 +405,27 @@ describe('unmarked helpers under a live app main process', () => {
     expect(classify([helper], live, truth)[0]).toMatchObject({ bucket: 'foreign', foreignInstanceId: null });
   });
 });
+
+describe('sibling data dirs (another variant)', () => {
+  const SIBLING = 'inst-sibling-variant';
+
+  it("files a sibling variant's unmarked helper as foreign via its main pid", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => true, new Map([[3000, SIBLING]]));
+    const [c] = classify([proc(800, 'du -sk -- /wt/known', { ppid: 3000 })], set, truth);
+    expect(c).toMatchObject({ bucket: 'foreign', foreignInstanceId: SIBLING });
+  });
+
+  it("never sweeps a sibling's tagged process: its instance id is unknown here, so suspected, not orphan", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => false, new Map([[3000, SIBLING]]));
+    const res = classify([proc(801, 'codex', { marker: { instanceId: SIBLING, worktree: '/wt/known' } })], set, truth);
+    expect(res[0].bucket).toBe('suspected');
+    expect(selectSweepSet(res)).toEqual([]);
+    expect(set.liveInstanceIds.has(SIBLING)).toBe(false);
+    expect(set.deadInstanceIds.has(SIBLING)).toBe(false);
+  });
+
+  it("a sibling pid never displaces this instance's own main pid", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => true, new Map([[1000, SIBLING]]));
+    expect(set.liveMainPids.get(1000)).toBe(SELF);
+  });
+});

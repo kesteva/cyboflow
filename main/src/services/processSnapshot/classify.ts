@@ -53,7 +53,9 @@ export interface LiveInstanceSet {
    * Main-process pid → instance id for every LIVE instance (self included). An
    * unmarked helper the app runs itself (`du`, `git`, … via execFile) has no spawn
    * marker, but its parent chain still reaches a live app's main process: that is
-   * a live child, not a stray.
+   * a live child, not a stray. Also carries SIBLING data dirs' live main pids
+   * (another variant's instance records) — those feed this ancestry check only and
+   * are deliberately absent from the live/dead id sets above.
    */
   readonly liveMainPids: ReadonlyMap<number, string>;
 }
@@ -67,6 +69,8 @@ export function buildLiveInstanceSet(
   selfPid: number,
   records: readonly Pick<InstanceRecord, 'instanceId' | 'pid'>[],
   isPidAlive: (pid: number) => boolean,
+  /** Sibling data dirs' live main pids → instance id (already liveness-checked). */
+  siblingMainPids: ReadonlyMap<number, string> = new Map(),
 ): LiveInstanceSet {
   const live = new Set<string>([selfInstanceId]);
   const dead = new Set<string>();
@@ -80,6 +84,7 @@ export function buildLiveInstanceSet(
       dead.add(r.instanceId);
     }
   }
+  for (const [pid, id] of siblingMainPids) if (!mainPids.has(pid)) mainPids.set(pid, id);
   return { selfInstanceId, liveInstanceIds: live, deadInstanceIds: dead, liveMainPids: mainPids };
 }
 

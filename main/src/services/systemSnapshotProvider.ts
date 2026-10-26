@@ -51,6 +51,8 @@ export interface SystemSnapshotProviderDeps {
   getSelfInstanceId?: () => string;
   /** This app's main-process pid. Defaults to `process.pid`. */
   selfPid?: number;
+  /** Sibling data dirs' live main pids (services/siblingInstances.ts). Absent ⇒ none. */
+  readSiblingMainPids?: () => Promise<Map<number, string>>;
   /**
    * Reads the spawn marker off scanned rows' environments. Defaults to the real
    * reader ({@link createSpawnMarkerReader}): linux reads `/proc/<pid>/environ`
@@ -61,7 +63,7 @@ export interface SystemSnapshotProviderDeps {
   readMarkers?: (rows: readonly SnapshottedProcess[]) => Promise<Map<number, SpawnMarkerObservation>>;
 }
 
-function defaultIsPidAlive(pid: number): boolean {
+export function defaultIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -179,12 +181,13 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
     platform: deps.platform,
     async loadProcesses(knownWorktreePaths) {
       const rows = await deps.processSnapshot.snapshot();
-      const [records, markers] = await Promise.all([
+      const [records, markers, siblingMainPids] = await Promise.all([
         readRecords(),
         readMarkers(rows),
+        deps.readSiblingMainPids?.() ?? Promise.resolve(new Map<number, string>()),
       ]);
       const marked: MarkedProcess[] = rows.map((r) => ({ ...r, marker: markers.get(r.pid) ?? null }));
-      const liveInstances = buildLiveInstanceSet(selfId(), selfPid, records, isPidAlive);
+      const liveInstances = buildLiveInstanceSet(selfId(), selfPid, records, isPidAlive, siblingMainPids);
       // The registry's path set IS the worktree truth (sessions/runs ∪ git).
       const truth: WorktreeTruth = { knownWorktreePaths };
       // Classify the WHOLE table (ancestry walks need every row), then drop unrelated host

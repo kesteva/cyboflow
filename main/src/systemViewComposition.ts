@@ -23,7 +23,13 @@ import { setWorktreeMonitorProvider } from './orchestrator/trpc/routers/worktree
 import { buildSystemSnapshot, setSystemProvider } from './orchestrator/trpc/routers/system';
 import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap';
 import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvider';
-import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
+import {
+  createSystemSnapshotProvider,
+  defaultIsPidAlive,
+  readInstanceRecordsFromDisk,
+} from './services/systemSnapshotProvider';
+import { createSiblingInstances } from './services/siblingInstances';
+import { getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { MonitorReapService } from './services/monitor/monitorReapService';
 import { countDescendantPids } from './services/monitor/reapManifest';
@@ -94,8 +100,20 @@ export function resolveWatchedPorts(
 
 export function composeSystemView(deps: SystemViewCompositionDeps): void {
   const { databaseService, worktreeManager, gitStatusManager, codexBrokerReaper } = deps;
+  // Other data dirs' instances (stable / Dev DMG / pnpm dev / running smoke dirs): their
+  // live worktrees must never read as orphans here, nor their helpers as strays.
+  const siblings = createSiblingInstances({
+    selfDataDir: getCyboflowDirectory(),
+    readInstanceRecords: (dir) => readInstanceRecordsFromDisk(dir),
+    isPidAlive: defaultIsPidAlive,
+  });
   const buildWorktreeProvider = () =>
-    createWorktreeMonitorProvider({ database: databaseService, worktreeManager, diskUsage: diskUsageService });
+    createWorktreeMonitorProvider({
+      database: databaseService,
+      worktreeManager,
+      diskUsage: diskUsageService,
+      readSiblingClaims: () => siblings.worktreeClaims(),
+    });
 
   setWorktreeMonitorProvider(buildWorktreeProvider());
   console.log('[Main] worktreeMonitor deps wired');
@@ -112,6 +130,7 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
       isBrokerProcess,
     }),
     worktrees: buildWorktreeProvider(),
+    readSiblingMainPids: () => siblings.liveMainPids(),
     orchSocket: deps.orchSocketServer,
     watchedPorts: () => resolveWatchedPorts(deps.configManager.getSystemWatchedPorts(), deps.isDevelopment),
   });

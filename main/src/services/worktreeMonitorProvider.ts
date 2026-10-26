@@ -11,11 +11,14 @@ import {
   type WorktreeRegistryGit,
 } from './worktreeRegistry';
 import type { DiskUsageService } from './diskUsageService';
+import type { SiblingWorktreeClaims } from './siblingInstances';
 
 export interface WorktreeMonitorProviderDeps {
   database: WorktreeRegistryDatabase & { getProject(id: number): { path: string } | undefined };
   worktreeManager: WorktreeRegistryGit;
   diskUsage: Pick<DiskUsageService, 'getUsage' | 'requestFresh'>;
+  /** Sibling instances' worktree claims (keeps their live worktrees out of `orphan`). */
+  readSiblingClaims?: () => Promise<SiblingWorktreeClaims>;
 }
 
 export function createWorktreeMonitorProvider(deps: WorktreeMonitorProviderDeps): WorktreeMonitorProvider {
@@ -28,6 +31,7 @@ export function createWorktreeMonitorProvider(deps: WorktreeMonitorProviderDeps)
         worktreeManager: deps.worktreeManager,
         projectId,
         projectPath: project.path,
+        readSiblingClaims: deps.readSiblingClaims,
       });
     },
     getDiskUsage: (path) => deps.diskUsage.getUsage(path),
