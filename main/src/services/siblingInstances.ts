@@ -23,7 +23,16 @@
  *
  * Fail-closed where it guards a destructive action: a sibling `sessions.db` that
  * exists but cannot be read is reported, and the registry then refuses to call
- * any worktree an orphan (see worktreeRegistry.ts).
+ * any worktree an orphan (see worktreeRegistry.ts). A non-canonical dir whose
+ * liveness records cannot be read is treated as possibly running, not dead.
+ *
+ * Paths are matched by identity, not spelling: each claimed path is also entered
+ * under its real path (symlinks, `/var` → `/private/var`, on-disk case), and the
+ * registry resolves git's paths the same way.
+ *
+ * Reads are cached briefly for the System view's polling; a destructive action
+ * calls {@link SiblingInstances.invalidate} first so its re-check never reuses an
+ * ownership read taken before the user confirmed.
  */
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -32,6 +41,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import Database from 'better-sqlite3';
 import type { InstanceRecord } from '../utils/spawnMarker';
+import type { InstanceRecordScan } from './systemSnapshotProvider';
 import { parseEtime } from './processTable';
 
 const execFileAsync = promisify(execFile);
@@ -46,7 +56,7 @@ const START_SKEW_MS = 5_000;
 
 /** What the sibling DBs say about worktree ownership. */
 export interface SiblingWorktreeClaims {
-  /** Worktree path (as the sibling stored it) → the sibling data dir whose DB references it. */
+  /** Worktree path → the sibling data dir whose DB references it; keyed by both the stored and the real path. */
   claimedPaths: ReadonlyMap<string, string>;
   /** Sibling data dirs whose `sessions.db` exists but could not be read. Non-empty ⇒ fail closed. */
   unreadableDataDirs: readonly string[];
@@ -59,12 +69,14 @@ export interface SiblingInstanceDeps {
   selfDataDir: string;
   /** Defaults to `os.homedir()`. */
   homeDir?: string;
-  readInstanceRecords: (instancesDir: string) => Promise<InstanceRecord[]>;
+  readInstanceRecords: (instancesDir: string) => Promise<InstanceRecordScan>;
   isPidAlive: (pid: number) => boolean;
   /** Elapsed seconds per pid (missing pid = unknown). Defaults to one `ps -o pid=,etime= -p …` (none on win32). */
   readProcessAges?: (pids: readonly number[]) => Promise<Map<number, number>>;
   /** Worktree paths a sibling DB references; throws when the DB cannot be read. Defaults to a readonly better-sqlite3 open. */
   readWorktreeRefs?: (dbPath: string) => string[];
+  /** Real path of an existing path, null when it cannot be resolved. Defaults to `fs.realpath`. */
+  realPath?: (p: string) => Promise<string | null>;
   now?: () => number;
 }
 
@@ -73,6 +85,8 @@ export interface SiblingInstances {
   liveMainPids(): Promise<Map<number, string>>;
   /** Worktree ownership claims from the sibling DBs (cached for {@link CACHE_TTL_MS}). */
   worktreeClaims(): Promise<SiblingWorktreeClaims>;
+  /** Drop every cached read: the next call re-scans and re-reads (never an in-flight older read). */
+  invalidate(): void;
 }
 
 interface SiblingDir {
@@ -80,6 +94,8 @@ interface SiblingDir {
   canonical: boolean;
   /** Liveness records whose pid is alive and not recycled. */
   live: InstanceRecord[];
+  /** Some liveness record could not be read: whether an instance runs here is unknown. */
+  livenessUnknown: boolean;
 }
 
 async function isDirectory(p: string): Promise<boolean> {
@@ -124,6 +140,14 @@ export function readWorktreeRefsFromDb(dbPath: string): string[] {
   }
 }
 
+export async function defaultRealPath(p: string): Promise<string | null> {
+  try {
+    return await fsp.realpath(p);
+  } catch {
+    return null;
+  }
+}
+
 /** One `ps` call for every candidate pid; empty on win32 or failure (callers fall back to pid liveness). */
 export async function readProcessAgesFromPs(pids: readonly number[]): Promise<Map<number, number>> {
   const ages = new Map<number, number>();
@@ -147,8 +171,10 @@ export function createSiblingInstances(deps: SiblingInstanceDeps): SiblingInstan
   const selfDir = path.resolve(deps.selfDataDir);
   const readRefs = deps.readWorktreeRefs ?? readWorktreeRefsFromDb;
   const now = deps.now ?? Date.now;
-
   const readAges = deps.readProcessAges ?? readProcessAgesFromPs;
+  const realPath = deps.realPath ?? defaultRealPath;
+  /** Bumped by invalidate(); a cache entry is served only to callers of the generation that started its read. */
+  let generation = 0;
 
   /** Every `~/.cyboflow*` dir but this one, with its records that are verifiably live. */
   const scanUncached = async (): Promise<SiblingDir[]> => {
@@ -158,16 +184,17 @@ export function createSiblingInstances(deps: SiblingInstanceDeps): SiblingInstan
     } catch {
       return [];
     }
-    const dirs: Array<{ dir: string; canonical: boolean; alive: InstanceRecord[] }> = [];
+    const dirs: Array<{ dir: string; canonical: boolean; alive: InstanceRecord[]; livenessUnknown: boolean }> = [];
     for (const name of names) {
       if (!name.startsWith(DATA_DIR_PREFIX)) continue;
       const dir = path.join(home, name);
       if (path.resolve(dir) === selfDir || !(await isDirectory(dir))) continue;
-      const records = await deps.readInstanceRecords(path.join(dir, 'instances'));
+      const { records, incomplete } = await deps.readInstanceRecords(path.join(dir, 'instances'));
       dirs.push({
         dir,
         canonical: (CANONICAL_DATA_DIR_NAMES as readonly string[]).includes(name),
         alive: records.filter((r) => deps.isPidAlive(r.pid)),
+        livenessUnknown: incomplete,
       });
     }
     const ages = await readAges([...new Set(dirs.flatMap((d) => d.alive.map((r) => r.pid)))]);
@@ -178,18 +205,27 @@ export function createSiblingInstances(deps: SiblingInstanceDeps): SiblingInstan
       if (age === undefined || Number.isNaN(startedAt)) return true;
       return at - age * 1000 <= startedAt + START_SKEW_MS;
     };
-    return dirs.map(({ dir, canonical, alive }) => ({ dir, canonical, live: alive.filter(notRecycled) }));
+    return dirs.map(({ dir, canonical, alive, livenessUnknown }) => ({
+      dir,
+      canonical,
+      live: alive.filter(notRecycled),
+      livenessUnknown,
+    }));
   };
 
-  let scanCache: { at: number; dirs: SiblingDir[] } | null = null;
+  const fresh = (entry: { at: number; gen: number } | null): boolean =>
+    entry !== null && entry.gen === generation && now() - entry.at < CACHE_TTL_MS;
+
+  let scanCache: { at: number; gen: number; dirs: SiblingDir[] } | null = null;
   const scan = async (): Promise<SiblingDir[]> => {
-    if (scanCache && now() - scanCache.at < CACHE_TTL_MS) return scanCache.dirs;
+    if (scanCache && fresh(scanCache)) return scanCache.dirs;
+    const gen = generation;
     const dirs = await scanUncached();
-    scanCache = { at: now(), dirs };
+    if (gen === generation) scanCache = { at: now(), gen, dirs };
     return dirs;
   };
 
-  let cached: { at: number; claims: SiblingWorktreeClaims } | null = null;
+  let cached: { at: number; gen: number; claims: SiblingWorktreeClaims } | null = null;
 
   return {
     async liveMainPids() {
@@ -201,13 +237,15 @@ export function createSiblingInstances(deps: SiblingInstanceDeps): SiblingInstan
     },
 
     async worktreeClaims() {
-      if (cached && now() - cached.at < CACHE_TTL_MS) return cached.claims;
+      if (cached && fresh(cached)) return cached.claims;
+      const gen = generation;
       const claimedPaths = new Map<string, string>();
       const unreadableDataDirs: string[] = [];
-      for (const { dir, canonical, live } of await scan()) {
+      for (const { dir, canonical, live, livenessUnknown } of await scan()) {
         // A dead smoke dir's rows are abandoned: only canonical variants (running or
-        // not — the user reopens them) and currently-running dirs can still own a worktree.
-        if (!canonical && live.length === 0) continue;
+        // not — the user reopens them), currently-running dirs, and dirs whose liveness
+        // cannot be read (maybe running) can still own a worktree.
+        if (!canonical && live.length === 0 && !livenessUnknown) continue;
         const dbPath = path.join(dir, DB_FILE);
         if (!(await fileExists(dbPath))) continue;
         try {
@@ -216,9 +254,22 @@ export function createSiblingInstances(deps: SiblingInstanceDeps): SiblingInstan
           unreadableDataDirs.push(dir);
         }
       }
+      // Also key every claim by its real path, so an alias of git's spelling still matches.
+      const stored = [...claimedPaths];
+      const reals = await Promise.all(stored.map(([p]) => realPath(p)));
+      stored.forEach(([, dir], i) => {
+        const real = reals[i];
+        if (real !== null && !claimedPaths.has(real)) claimedPaths.set(real, dir);
+      });
       const claims: SiblingWorktreeClaims = { claimedPaths, unreadableDataDirs };
-      cached = { at: now(), claims };
+      if (gen === generation) cached = { at: now(), gen, claims };
       return claims;
+    },
+
+    invalidate() {
+      generation += 1;
+      scanCache = null;
+      cached = null;
     },
   };
 }

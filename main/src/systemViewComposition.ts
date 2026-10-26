@@ -26,7 +26,7 @@ import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvide
 import {
   createSystemSnapshotProvider,
   defaultIsPidAlive,
-  readInstanceRecordsFromDisk,
+  scanInstanceRecords,
 } from './services/systemSnapshotProvider';
 import { createSiblingInstances } from './services/siblingInstances';
 import { getCyboflowDirectory } from './utils/cyboflowDirectory';
@@ -104,7 +104,7 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
   // live worktrees must never read as orphans here, nor their helpers as strays.
   const siblings = createSiblingInstances({
     selfDataDir: getCyboflowDirectory(),
-    readInstanceRecords: (dir) => readInstanceRecordsFromDisk(dir),
+    readInstanceRecords: scanInstanceRecords,
     isPidAlive: defaultIsPidAlive,
   });
   const buildWorktreeProvider = () =>
@@ -139,7 +139,12 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
 
   setMonitorReapProvider(
     new MonitorReapService({
-      loadSnapshot: (projectId) => buildSystemSnapshot(systemSnapshotProvider, projectId),
+      // Resolve and execute both re-read sibling ownership: a destructive action never
+      // rides on a cached read from before the user confirmed.
+      loadSnapshot: (projectId) => {
+        siblings.invalidate();
+        return buildSystemSnapshot(systemSnapshotProvider, projectId);
+      },
       manifestDeps: {
         measureFresh: (p) => diskUsageService.measureFresh(p),
         peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),

@@ -7,7 +7,7 @@
  *
  * Every git-reported path gets exactly ONE tag. Precedence when several rows
  * reference the same path (highest first):
- *   is_main_repo > in_place > session-owned > run-owned > orphan
+ *   is_main_repo > in_place > other-instance > session-owned > run-owned > orphan
  * so a path owned by both a session and a run resolves to `session-owned`, and
  * the entry carries both owner ids for display.
  *
@@ -16,11 +16,18 @@
  * services/siblingInstances.ts). Age, idleness and terminal run/session status
  * are never folded into the tag.
  *
- * A path only a sibling's DB references is `other-instance` (`prunable: false`):
- * it is live over there, and reaping it here would pull a worktree out from under
- * that app. When a sibling DB exists but cannot be read, ownership is unknowable,
- * so every would-be orphan is `other-instance` with `claimVerified: false` — the
- * guard fails closed rather than offer a destructive prune on a guess.
+ * A path a sibling's DB references is `other-instance` (`prunable: false`) EVEN
+ * when a row here references it too: a local row proves nothing about exclusive
+ * ownership (a data dir copied for a smoke run carries the original's rows), and
+ * reaping it here would pull a worktree out from under that app. The entry keeps
+ * the local owner ids for display. When a sibling DB exists but cannot be read,
+ * ownership is unknowable, so every otherwise-prunable path is `other-instance`
+ * with `claimVerified: false` — the guard fails closed rather than offer a
+ * destructive prune on a guess.
+ *
+ * Paths match by identity, not spelling: the loader resolves each git path and
+ * local row to its real path (symlinks, `/var` → `/private/var`, on-disk case),
+ * and sibling claims carry their real paths too.
  *
  * `in_place` / `is_main_repo` entries carry `prunable: false` in the returned
  * shape itself (a literal type), so no caller has to remember the guard.
@@ -55,6 +62,8 @@ export interface WorktreeRegistryInput {
   gitWorktrees: readonly GitWorktreeEntry[];
   /** Sibling instances' worktree claims. Omitted ⇒ none (no sibling data dirs). */
   siblingClaims?: SiblingWorktreeClaims;
+  /** Path → its real path, for paths whose spelling differs from their identity. */
+  realPaths?: ReadonlyMap<string, string>;
 }
 
 interface WorktreeRegistryEntryBase {
@@ -108,7 +117,7 @@ export function reconcileWorktreeRegistry(
   input: WorktreeRegistryInput,
   platform: NodeJS.Platform = process.platform,
 ): WorktreeRegistryEntry[] {
-  const key = (p: string) => worktreePathKey(p, platform);
+  const key = (p: string) => worktreePathKey(input.realPaths?.get(p) ?? p, platform);
   const projectKey = key(input.projectPath);
 
   const sessionsByPath = new Map<string, RegistrySessionRow[]>();
@@ -149,24 +158,20 @@ export function reconcileWorktreeRegistry(
       ...(run ? { runId: run.id } : {}),
     };
 
+    const sibling = siblingByPath.get(k);
     if (mainRepoSession) entries.push({ ...base, tag: 'is_main_repo', prunable: false });
     else if (inPlaceSession) entries.push({ ...base, tag: 'in_place', prunable: false });
     else if (k === projectKey) {
       // The project's own checkout as git reports it. With no owning row it is
       // still the user's real checkout — never an orphan, never prunable.
       entries.push({ ...base, tag: 'is_main_repo', prunable: false });
+    } else if (sibling !== undefined) {
+      entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: sibling, claimVerified: true });
+    } else if (unreadableSibling !== undefined) {
+      entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: unreadableSibling, claimVerified: false });
     } else if (sessions.length > 0) entries.push({ ...base, tag: 'session-owned', prunable: true });
     else if (run) entries.push({ ...base, tag: 'run-owned', prunable: true });
-    else {
-      const sibling = siblingByPath.get(k);
-      if (sibling !== undefined) {
-        entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: sibling, claimVerified: true });
-      } else if (unreadableSibling !== undefined) {
-        entries.push({ ...base, tag: 'other-instance', prunable: false, claimedBy: unreadableSibling, claimVerified: false });
-      } else {
-        entries.push({ ...base, tag: 'orphan', prunable: true });
-      }
-    }
+    else entries.push({ ...base, tag: 'orphan', prunable: true });
   }
   return entries;
 }
@@ -190,21 +195,40 @@ export async function loadWorktreeRegistry(deps: {
   projectPath: string;
   /** Sibling instances' claims; omitted ⇒ none. */
   readSiblingClaims?: () => Promise<SiblingWorktreeClaims>;
+  /** Real path of an existing path, null when it cannot be resolved. Omitted ⇒ paths match by spelling only. */
+  realPath?: (p: string) => Promise<string | null>;
 }): Promise<WorktreeRegistryEntry[]> {
   const [gitWorktrees, siblingClaims] = await Promise.all([
     deps.worktreeManager.listWorktrees(deps.projectPath),
     deps.readSiblingClaims?.(),
   ]);
+  const sessions = deps.database.getSessionWorktreeRefs(deps.projectId).map((r) => ({
+    id: r.id,
+    worktreePath: r.worktree_path,
+    inPlace: !!r.in_place,
+    isMainRepo: !!r.is_main_repo,
+  }));
+  const runs = deps.database.getRunWorktreeRefs(deps.projectId).map((r) => ({ id: r.id, worktreePath: r.worktree_path }));
+
+  const realPaths = new Map<string, string>();
+  if (deps.realPath) {
+    const resolve = deps.realPath;
+    const paths = [
+      ...new Set([deps.projectPath, ...gitWorktrees.map((w) => w.path), ...sessions.map((s) => s.worktreePath), ...runs.map((r) => r.worktreePath)]),
+    ];
+    const reals = await Promise.all(paths.map((p) => resolve(p)));
+    paths.forEach((p, i) => {
+      const real = reals[i];
+      if (real !== null && real !== p) realPaths.set(p, real);
+    });
+  }
+
   return reconcileWorktreeRegistry({
     projectPath: deps.projectPath,
     gitWorktrees,
     siblingClaims,
-    sessions: deps.database.getSessionWorktreeRefs(deps.projectId).map((r) => ({
-      id: r.id,
-      worktreePath: r.worktree_path,
-      inPlace: !!r.in_place,
-      isMainRepo: !!r.is_main_repo,
-    })),
-    runs: deps.database.getRunWorktreeRefs(deps.projectId).map((r) => ({ id: r.id, worktreePath: r.worktree_path })),
+    realPaths,
+    sessions,
+    runs,
   });
 }
