@@ -42,6 +42,28 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('do not touch other items');
   });
 
+  it('tells a fan-out lane how to find its own task in the sprint task list', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      item: { id: 'tsk_b', over: 'tasks' },
+      taskScope: 'This sprint covers 2 tasks. Execute ALL of them.\n\n## TASK-001: Words\n\nTask id: `tsk_a`\n\n## TASK-002: Lines\n\nTask id: `tsk_b`',
+    });
+    expect(out).toContain('whose `Task id:` line reads `tsk_b`');
+    expect(out).toContain('other lanes own them');
+  });
+
+  it('adds no task-list pointer to a fan-out item when there is no task scope', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      item: { id: 'TASK-42', over: 'tasks' },
+    });
+    expect(out).not.toContain('Task id:');
+  });
+
   it('omits the fan-out and sprint-task blocks when no item / scope is supplied', () => {
     const out = composeStepPrompt({
       step: step({ id: 'a', name: 'Step A', agent: 'executor', desc: 'Do the thing.' }),

@@ -850,7 +850,11 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       : '';
   const desc = step.desc !== undefined && step.desc.length > 0 ? `\n\n${step.desc}` : '';
   const itemNote = args.item
-    ? `\n\nThis step is part of a PARALLEL fan-out over **${args.item.over}**. You are working on item **${args.item.id}** ONLY — do not touch other items.`
+    ? `\n\nThis step is part of a PARALLEL fan-out over **${args.item.over}**. You are working on item **${args.item.id}** ONLY — do not touch other items.${
+        args.taskScope !== undefined && args.taskScope.trim().length > 0
+          ? ` In the \`# Sprint tasks\` list below, your item is the task whose heading is \`${args.item.id}\` or whose \`Task id:\` line reads \`${args.item.id}\`. The other tasks are listed for context only: other lanes own them, so "Execute ALL of them" describes the sprint, not this step.`
+          : ''
+      }`
     : '';
   const taskScope =
     args.taskScope !== undefined && args.taskScope.trim().length > 0

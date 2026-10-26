@@ -55,6 +55,21 @@ describe('buildSeedTasksBlock', () => {
     expect(out).toContain('Depends on the scaffold.');
   });
 
+  it('names each ref-headed task by its opaque id so a fan-out lane can find its own item', () => {
+    const out = buildSeedTasksBlock(
+      'b',
+      lanes(['tsk_a', 'tsk_b']),
+      reader({ tsk_a: task({ title: 'Words', ref: 'TASK-001' }), tsk_b: task({ title: 'Lines', ref: 'TASK-002' }) }),
+    );
+    expect(out).toContain('## TASK-001: Words\n\nTask id: `tsk_a`');
+    expect(out).toContain('## TASK-002: Lines\n\nTask id: `tsk_b`');
+  });
+
+  it('adds no id line when the heading already is the id', () => {
+    const out = buildSeedTasksBlock('b', lanes(['tsk_abc']), reader({ tsk_abc: task({ title: 'No ref' }) }));
+    expect(out).not.toContain('Task id:');
+  });
+
   it('uses the singular "task" for a one-task sprint', () => {
     const out = buildSeedTasksBlock('b', lanes(['t1']), reader({ t1: task({ title: 'Only', ref: 'TASK-9' }) }));
     expect(out).toContain('This sprint covers 1 task. Execute ALL of them.');
