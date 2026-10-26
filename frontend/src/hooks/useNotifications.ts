@@ -75,6 +75,11 @@ export function useNotifications(): void {
       gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
       gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
       
+      // An unclosed AudioContext keeps its own audio render thread alive forever;
+      // one leaked per notification pinned the renderer above 100% CPU.
+      oscillator.onended = () => {
+        void audioContext.close();
+      };
       oscillator.start(audioContext.currentTime);
       oscillator.stop(audioContext.currentTime + 0.3);
     } catch (error) {
