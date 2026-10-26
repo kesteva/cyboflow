@@ -497,6 +497,27 @@ export class RemoteRuntime {
   }
 
   /**
+   * A remote session was archived: run the F2 cleanup for each of its finished runs on `hostId`. Most terminal
+   * status writes (End workflow, cancel on archive, recovery) do not go through transitions.onRunTerminal, so
+   * without this their tokens and pidfiles stay until the F3 collection. Active runs are skipped. Never rejects.
+   */
+  async onSessionEnded(sessionId: string, hostIdIn: string): Promise<void> {
+    const hostId = normalizeHostId(hostIdIn);
+    if (hostId === null) return;
+    let runIds: string[];
+    try {
+      const rows = this.deps.db
+        .prepare('SELECT id FROM workflow_runs WHERE session_id = ? AND host_id = ?')
+        .all(sessionId, hostId) as Array<{ id: string }>;
+      runIds = rows.map((r) => r.id).filter((id) => !this.isRunActive(id));
+    } catch (err) {
+      this.deps.logger.warn('[hosts] session-end cleanup could not list runs', { hostId, sessionId, error: errorName(err) });
+      return;
+    }
+    for (const runId of runIds) await this.onRunTerminal(runId, hostId);
+  }
+
+  /**
    * Spec F3 — collect `<remoteRoot>/run` on `hostId` (after a full preflight on a reachable machine): files older than
    * 24 h, a pidfile only when its process is dead, a token only when its run is not active (no workflow_runs row, or
    * a terminal status). A removed token's write is forgotten first, so a reopened run rewrites it. Never rejects.

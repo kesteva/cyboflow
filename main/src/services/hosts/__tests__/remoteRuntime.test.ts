@@ -513,6 +513,38 @@ function runsDb(rows: Array<{ id: string; host_id: string | null; status: string
   return db;
 }
 
+describe('RemoteRuntime.onSessionEnded', () => {
+  function sessionRunsDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, host_id TEXT, status TEXT, session_id TEXT)');
+    const ins = db.prepare('INSERT INTO workflow_runs (id, host_id, status, session_id) VALUES (?, ?, ?, ?)');
+    ins.run('run-done', 'h1', 'completed', 's1');
+    ins.run('run-cxl', 'h1', 'canceled', 's1');
+    ins.run('run-live', 'h1', 'running', 's1');
+    ins.run('run-other', 'h1', 'completed', 's2');
+    return db;
+  }
+  const tokenRemoved = (h: ReturnType<typeof harness>, runId: string): boolean =>
+    h.calls.some((c) => c.argv[2]?.includes('rm -f') && c.argv.includes(`${ROOT}/run/${runId}.token`));
+
+  it("cleans the token of each of the session's finished runs, never an active run or another session's", async () => {
+    const h = harness({ db: sessionRunsDb() });
+    await h.rt.onSessionEnded('s1', 'h1');
+    expect(tokenRemoved(h, 'run-done')).toBe(true);
+    expect(tokenRemoved(h, 'run-cxl')).toBe(true);
+    expect(tokenRemoved(h, 'run-live')).toBe(false);
+    expect(tokenRemoved(h, 'run-other')).toBe(false);
+  });
+
+  it('a local host id or a broken db touches nothing and never rejects', async () => {
+    const h = harness({ db: sessionRunsDb() });
+    await h.rt.onSessionEnded('s1', 'local');
+    expect(h.calls).toHaveLength(0);
+    const broken = harness({ db: new Database(':memory:') });
+    await expect(broken.rt.onSessionEnded('s1', 'h1')).resolves.toBeUndefined();
+  });
+});
+
 describe('RemoteRuntimeSession.fence (F1)', () => {
   it("runs the fixed fence program for the session's filename-safe key over the host exec, bounded", async () => {
     const h = harness({

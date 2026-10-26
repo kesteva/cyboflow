@@ -245,7 +245,10 @@ export function composeHosts(deps: HostsCompositionDeps): HostsComposition {
   });
   onMergeBackChange = (change) => {
     // Archive: RemoteCheckout removed the remote half; the local half (refs, mirror) goes here. Idempotent.
-    if (change.state === 'cleaned' && change.previous === 'abandoned') void mergeBack.cleanupLocal(change.sessionId).catch(() => false);
+    if (change.state === 'cleaned' && change.previous === 'abandoned') {
+      void mergeBack.cleanupLocal(change.sessionId).catch(() => false);
+      void remoteRuntime.onSessionEnded(change.sessionId, change.hostId);
+    }
   };
 
   // Checkpoints: watch the lane channel of every live run hosted on a remote environment.
