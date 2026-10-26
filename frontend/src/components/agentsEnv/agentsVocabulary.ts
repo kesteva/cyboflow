@@ -20,7 +20,7 @@ export interface VendorMeta {
   defaultName: string;
 }
 
-export const VENDOR_ORDER: readonly PersistentAgentVendor[] = ['anthropic-cma', 'openai-dots', 'meta-muse', 'other'];
+export const VENDOR_ORDER: readonly PersistentAgentVendor[] = ['anthropic-cma', 'anthropic-duet', 'openai-dots', 'meta-muse', 'other'];
 
 export const VENDOR_META: Record<PersistentAgentVendor, VendorMeta> = {
   'anthropic-cma': {
@@ -31,6 +31,16 @@ export const VENDOR_META: Record<PersistentAgentVendor, VendorMeta> = {
     description: 'Long-running Claude agents hosted by Anthropic. cyboflow talks to them through the API.',
     defaultTransport: null,
     defaultName: '',
+  },
+  'anthropic-duet': {
+    label: 'Claude Duet',
+    short: 'Duet',
+    glyph: 'D',
+    appName: 'Claude Duet',
+    description:
+      "Anthropic's proactive agent. It has no API, so a custom connector on your Claude account calls the cyboflow Bridge. Duet checks in every few hours.",
+    defaultTransport: 'relay-mcp',
+    defaultName: 'Duet',
   },
   'openai-dots': {
     label: 'OpenAI dots',
