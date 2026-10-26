@@ -41,7 +41,7 @@ export const DISABLED_PERSISTENT_AGENTS_STATUS: PersistentAgentsStatus = {
 
 // ==== Code-validated enums (no CHECK in SQL) ================================================
 
-export const PERSISTENT_AGENT_VENDORS = ['anthropic-cma', 'openai-dots', 'meta-muse', 'other'] as const;
+export const PERSISTENT_AGENT_VENDORS = ['anthropic-cma', 'anthropic-duet', 'openai-dots', 'meta-muse', 'other'] as const;
 export type PersistentAgentVendor = (typeof PERSISTENT_AGENT_VENDORS)[number];
 
 export const CONNECTOR_KINDS = ['native', 'bridge'] as const;
@@ -590,6 +590,7 @@ export function vendorAppName(v: PersistentAgentVendor): string {
     case 'openai-dots': return 'ChatGPT';
     case 'meta-muse': return 'Muse';
     case 'anthropic-cma': return 'the Claude Console';
+    case 'anthropic-duet': return 'Claude Duet';
     default: return "the agent's app";
   }
 }
