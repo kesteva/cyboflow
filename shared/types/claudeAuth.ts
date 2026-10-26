@@ -48,7 +48,10 @@ export interface ClaudeLoginState {
    * again" affordance. The CLI opens it itself when it can. null until seen.
    */
   authUrl: string | null;
-  /** Human-readable failure reason; only set in 'failed'. */
+  /**
+   * Human-readable failure reason. Set in 'failed', and in 'awaiting-code'
+   * when the CLI rejected the pasted code and is waiting for another.
+   */
   error: string | null;
   /** Post-login account probe (`claude auth status`); only set in 'succeeded'. */
   account: ClaudeAuthAccount | null;

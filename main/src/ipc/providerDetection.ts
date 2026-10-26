@@ -7,6 +7,7 @@ import {
   type ProviderDetectionResult,
 } from '../../../shared/types/onboarding';
 import { probeClaudeDetection } from './claudeDetection';
+import { probeClaudeLoginStatus } from './claudeAuth';
 import { probeCodexDetection } from './codexDetection';
 import { detectOmpAvailability } from '../services/panels/omp/ompAvailability';
 import { detectPiAvailability } from '../services/panels/pi/piAvailability';
@@ -32,7 +33,7 @@ export type ProviderDetectionProbe<P extends AgentProvider> = (
 ) => Promise<ProviderDetectionResult<P>>;
 
 const PROVIDER_DETECTION_PROBES: { [P in AgentProvider]: ProviderDetectionProbe<P> } = {
-  claude: probeClaudeDetection,
+  claude: (services) => probeClaudeDetection(services, probeClaudeLoginStatus),
   codex: probeCodexDetection,
   // PATH discovery + version-floor check (main/src/services/panels/omp/ompAvailability.ts,
   // proposal §3.3/§5.2). No `services` dependency yet: there is no Settings
