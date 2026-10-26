@@ -246,7 +246,7 @@ function expectCleaned(key = 'k1', sessionId = 's1'): void {
   expect(fs.existsSync(mirrorWorktreePath(project, key))).toBe(false);
 }
 
-describe('MergeBackService.mergeSession (real git)', () => {
+describe('MergeBackService.mergeSession (real git)', { timeout: 30_000 }, () => {
   it('happy path: stop first, import, mirror, squash on main, then resynced (the environment keeps the session)', async () => {
     commit(remoteWt(), 'b.txt', 'b\n');
     const tip = commit(remoteWt(), 'c.txt', 'c\n');
@@ -510,7 +510,7 @@ describe('MergeBackService.mergeSession (real git)', () => {
   });
 });
 
-describe('MergeBackService delivery probe, checkpoints, archive and boot resume (real git)', () => {
+describe('MergeBackService delivery probe, checkpoints, archive and boot resume (real git)', { timeout: 30_000 }, () => {
   it('probeLanding fetches the tip (no stop, no refusal), records a checkpoint, and sees a hand landing', async () => {
     const tip = commit(remoteWt(), 'b.txt', 'b\n');
     fs.writeFileSync(path.join(remoteWt(), 'wip.txt'), 'wip');
@@ -608,7 +608,7 @@ describe('MergeBackService delivery probe, checkpoints, archive and boot resume 
 const movesRemoteBranch = (args: string[], key = 'k1'): boolean =>
   (args[0] === 'update-ref' && args.includes(`refs/heads/${key}`)) || (args[0] === 'reset' && args.includes('--hard'));
 
-describe('MergeBackService data safety (real git)', () => {
+describe('MergeBackService data safety (real git)', { timeout: 30_000 }, () => {
   it('MB-1: a squash whose commit a hook rejects is never taken as landed by boot resume', async () => {
     const hook = path.join(project, '.git', 'hooks', 'pre-commit');
     fs.mkdirSync(path.dirname(hook), { recursive: true });

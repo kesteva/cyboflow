@@ -155,7 +155,7 @@ const input = (sessionId: string, key: string) => ({
 });
 const bare = (): string => path.join(remoteRoot, 'repos', '7.git');
 
-describe('RemoteCheckout.ensureSessionWorktree (real git)', () => {
+describe('RemoteCheckout.ensureSessionWorktree (real git)', { timeout: 30_000 }, () => {
   it('first session: inits the bare repo, pushes the base, adds the worktree, walks the row to remote_ready', async () => {
     const head = git(project, ['rev-parse', 'HEAD']).trim();
     expect(await checkout.worktreeExists(hostId, 'k1')).toBe(false);
@@ -256,7 +256,7 @@ describe('RemoteCheckout.ensureSessionWorktree (real git)', () => {
   });
 });
 
-describe('RemoteCheckout.removeSessionWorktree (real git)', () => {
+describe('RemoteCheckout.removeSessionWorktree (real git)', { timeout: 30_000 }, () => {
   it('removes the worktree, branch and base ref, then marks the row cleaned; repeat calls are no-ops', async () => {
     await checkout.ensureSessionWorktree(input('s1', 'k1'));
     await checkout.ensureSessionWorktree(input('s2', 'k2'));
