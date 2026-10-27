@@ -73,6 +73,7 @@ import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdenti
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 import { firstChangedFingerprintField, foldOptionsFingerprint, type OptionsFingerprint } from './claudeOptionsFingerprint';
 import { installRemoteWorkflowBundle, loadRemoteSpawnPermissionRules, prepareRemoteClaudeSpawn, releaseUnadoptedLease, remoteBundleTarget, remoteClaudeMcpServers, remoteClaudeRunEnv, remoteClaudeSdkOptions, removeRemoteWorkflowBundle, resolveClaudeSpawnHostId, type RemoteBundleTarget, type RemoteLease, type RemoteRuntimeSession } from '../../hosts/remoteClaudeSpawn';
+import { PendingRemotePreps, type PendingRemotePrep } from '../remotePrepCancel';
 
 /**
  * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
@@ -999,16 +1000,6 @@ interface ClaudeSdkRun {
   remote: RemoteRuntimeSession | null;
 }
 
-/**
- * A remote spawn's preparation window (SSH round trips) before any sdkRuns record exists: a stop marks this per-spawn
- * token, and the spawn checks it before starting the CLI. A fresh token per spawn, so a stale cancel never poisons
- * the next one.
- */
-interface PendingRemotePrep {
-  readonly panelId: string;
-  cancelled: boolean;
-}
-
 /** Stub CliProcess shape that satisfies AbstractCliManager's processes map. */
 interface StubCliProcess {
   process: never;
@@ -1075,8 +1066,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   private readonly sdkRuns = new Map<string, ClaudeSdkRun>();
 
-  /** Remote spawns still preparing their environment, by spawnKey (see PendingRemotePrep). */
-  private readonly pendingRemotePreps = new Map<string, PendingRemotePrep>();
+  /** Remote spawns still preparing their environment (B3: a stop there finds no sdkRuns record). */
+  private readonly remotePreps = new PendingRemotePreps();
 
   /**
    * Why a warm session for a spawnKey last closed WITHOUT the caller respawning it
@@ -1399,7 +1390,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // session runs OUTSIDE the lock, so the next turn's lock acquisition is not
     // blocked by the still-alive query(). M2: an unadopted remote lease (warm push / early throw) is released after.
     const remoteLease: RemoteLease = { session: null, adopted: false };
-    const prep: PendingRemotePrep = { panelId: displayPanelId, cancelled: false }; // registered only for a remote host
+    let prep: PendingRemotePrep | null = null; // registered only for a remote host
     return await withLock(`claude-spawn-${spawnKey}`, async () => {
       const { panelId, sessionId, isResume } = effectiveOptions;
 
@@ -1491,12 +1482,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // and the interactive MCP approval path keeps reading fresh per call.
       // M2: null host = This Mac (unchanged); a remote host prepares (gates, orch link, token file) or fails readably.
       const hostId = resolveClaudeSpawnHostId(this.db, { hostId: options.hostId, sessionHostId: sessionRow?.host_id, runId, sessionId }, makeLoggerLike(this.logger));
-      if (hostId !== null) this.pendingRemotePreps.set(spawnKey, prep); // B3: a stop during the SSH prep marks it
+      if (hostId !== null) prep = this.remotePreps.begin(spawnKey, displayPanelId);
       const remote = (remoteLease.session = hostId === null ? null : await prepareRemoteClaudeSpawn(hostId, { runId, spawnKey }, makeLoggerLike(this.logger)));
       const permissionRules = remote === null ? this.loadSpawnPermissionRules(options.worktreePath) : await loadRemoteSpawnPermissionRules(remote, options.worktreePath, makeLoggerLike(this.logger));
       const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules, remote);
       const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId, permissionRules, hostId, remote?.generation ?? null);
-      if (prep.cancelled) return this.abandonCancelledPrep(displayPanelId, sessionId);
+      if (prep?.cancelled) return this.abandonCancelledPrep(displayPanelId, sessionId);
 
       // Warm-session tri-state (non-lane only). A live warm-idle session for this
       // spawnKey that is a resume-continuation of the SAME conversation and whose
@@ -1591,7 +1582,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.bundleWorktrees.set(sessionId, options.worktreePath);
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
       }
-      if (prep.cancelled) {
+      if (prep?.cancelled) {
         if (!dbSession?.in_place) this.removeBundleForSession(sessionId); // the remote install's refcount claim
         return this.abandonCancelledPrep(displayPanelId, sessionId);
       }
@@ -1759,27 +1750,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
       return { resultText: firstTurn.resultText };
     }).finally(() => {
       releaseUnadoptedLease(remoteLease);
-      if (this.pendingRemotePreps.get(spawnKey) === prep) this.pendingRemotePreps.delete(spawnKey);
+      if (prep !== null) this.remotePreps.end(spawnKey, prep);
     });
   }
 
-  /**
-   * B3: a stop landed while the environment was being prepared. Start nothing (the unadopted lease is released by
-   * spawnCliProcess's finally) and settle like an aborted turn — an exitCode-0 'exit', resultText null — so nothing
-   * awaiting the turn hangs.
-   */
+  /** B3: stopped while preparing. Start nothing (the finally releases the lease); settle like an aborted turn. */
   private abandonCancelledPrep(displayPanelId: string, sessionId: string): CliSpawnOutcome {
     this.logger?.info(`[ClaudeCodeManager] remote spawn for panel ${displayPanelId} stopped while preparing the environment`);
     this.emit('exit', { panelId: displayPanelId, sessionId, exitCode: 0, signal: null });
     return { resultText: null };
   }
 
-  /** Mark every preparing remote spawn of `identity` (spawnKey or panelId/runId; null = all) cancelled. */
-  private cancelPendingRemotePreps(identity: string | null): void {
-    for (const [spawnKey, prep] of this.pendingRemotePreps) {
-      if (identity === null || spawnKey === identity || prep.panelId === identity) prep.cancelled = true;
-    }
-  }
 
   /**
    * Emit the per-turn 'spawned' + session_info descriptor. Both fire once per
@@ -4061,7 +4042,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * fall through to the EXISTING single-abort path, byte-identical.
    */
   override async killProcess(panelId: string): Promise<void> {
-    this.cancelPendingRemotePreps(panelId);
+    this.remotePreps.cancel(panelId);
     if (this.spawnKeysByRunId.has(panelId)) {
       await this.killRun(panelId);
       return;
@@ -4086,7 +4067,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * teardown (forgetSpawnKey) mutates it.
    */
   async killRun(runId: string): Promise<void> {
-    this.cancelPendingRemotePreps(runId);
+    this.remotePreps.cancel(runId);
     const keySet = this.spawnKeysByRunId.get(runId);
     if (keySet === undefined || keySet.size === 0) return;
     const spawnKeys = Array.from(keySet);
@@ -4312,7 +4293,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /** The base sweep only sees `processes`; a spawn still preparing its environment has no entry there yet. */
   override async killAllProcesses(): Promise<void> {
-    this.cancelPendingRemotePreps(null);
+    this.remotePreps.cancel(null);
     await super.killAllProcesses();
   }
 
@@ -4377,7 +4358,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * No-op when idle. Keyed by panelId (quick-session spawnKey === panelId).
    */
   async abortInFlightTurn(panelId: string): Promise<void> {
-    this.cancelPendingRemotePreps(panelId);
+    this.remotePreps.cancel(panelId);
     if (!this.isPanelTurnInFlight(panelId)) return;
     await this.abortCurrentRun(panelId);
     this.processes.delete(panelId);

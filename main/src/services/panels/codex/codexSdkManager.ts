@@ -90,6 +90,7 @@ import {
 import { resolveHostIdFromDb, type RemoteRuntimeSession } from '../../hosts/remoteRuntime';
 import { getRemoteRuntime, requireRemoteRuntime } from '../../hosts/remoteRuntimeBridge';
 import { prepareRemoteCodexLaunch, type RemoteCodexLaunch } from '../../hosts/remoteCodexSpawn';
+import { PendingRemotePreps, type PendingRemotePrep } from '../remotePrepCancel';
 import {
   CodexProcessUsageTracker,
   CodexUsageRowWriter,
@@ -130,17 +131,6 @@ interface ActiveCodexRun {
   panelId: string;
   sessionId: string;
   worktreePath: string;
-}
-
-/**
- * A remote spawn's preparation window (SSH round trips) before any activeRuns entry exists: a stop marks this
- * per-spawn token, and the spawn checks it before starting anything. A fresh token per spawn, so a stale cancel
- * never poisons the next one.
- */
-interface PendingRemotePrep {
-  readonly panelId: string;
-  readonly runId: string;
-  cancelled: boolean;
 }
 
 /**
@@ -505,8 +495,8 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly remoteRoleFiles = new Set<string>();
   /** Run artifacts dirs already created on SSH environments this app session (`<hostId>\0<generation>\0<dir>`). */
   private readonly remoteArtifactDirs = new Set<string>();
-  /** Remote spawns still preparing their environment, by spawnKey (see PendingRemotePrep). */
-  private readonly pendingRemotePreps = new Map<string, PendingRemotePrep>();
+  /** Remote spawns still preparing their environment (B3: a stop there finds no activeRuns entry). */
+  private readonly remotePreps = new PendingRemotePreps();
 
   constructor(
     sessionManager: SessionManager,
@@ -872,12 +862,11 @@ export class CodexSdkManager extends AbstractCliManager {
       throw new Error('Image attachments are not supported for runs on a remote environment yet.');
     }
     // B3: a stop during the SSH round trips below finds no activeRuns entry — it marks this token instead.
-    const prep: PendingRemotePrep = { panelId: options.panelId, runId, cancelled: false };
-    this.pendingRemotePreps.set(spawnKey, prep);
+    const prep = this.remotePreps.begin(spawnKey, options.panelId, runId);
     try {
       return await this.spawnRemotePrepared(options, spawnKey, runId, warmEligible, hostId, prep);
     } finally {
-      if (this.pendingRemotePreps.get(spawnKey) === prep) this.pendingRemotePreps.delete(spawnKey);
+      this.remotePreps.end(spawnKey, prep);
     }
   }
 
@@ -949,15 +938,6 @@ export class CodexSdkManager extends AbstractCliManager {
     session.release();
     this.logger?.info(`[CodexSdkManager] remote spawn for panel ${options.panelId} stopped while preparing the environment`);
     this.emit('exit', { panelId: options.panelId, sessionId: options.sessionId, exitCode: 0, signal: null });
-  }
-
-  /** Mark every preparing remote spawn of `identity` (spawnKey, panelId or runId; null = all) cancelled. */
-  private cancelPendingRemotePreps(identity: string | null): void {
-    for (const [spawnKey, prep] of this.pendingRemotePreps) {
-      if (identity === null || spawnKey === identity || prep.panelId === identity || prep.runId === identity) {
-        prep.cancelled = true;
-      }
-    }
   }
 
   /**
@@ -1813,7 +1793,7 @@ export class CodexSdkManager extends AbstractCliManager {
    * `activeRuns` entry is cancelled.
    */
   async abortInFlightTurn(identity: string): Promise<void> {
-    this.cancelPendingRemotePreps(identity);
+    this.remotePreps.cancel(identity);
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
       ...(this.spawnKeysByRunId.get(identity) ?? []),
@@ -1828,7 +1808,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   override async killProcess(identity: string): Promise<void> {
-    this.cancelPendingRemotePreps(identity);
+    this.remotePreps.cancel(identity);
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
       ...(this.spawnKeysByRunId.get(identity) ?? []),
@@ -1861,7 +1841,7 @@ export class CodexSdkManager extends AbstractCliManager {
     // alongside the run-scoped processes — they are not in `this.processes`, so
     // the base sweep would otherwise orphan any probe that is mid-flight when the
     // app quits.
-    this.cancelPendingRemotePreps(null);
+    this.remotePreps.cancel(null);
     const probes = [...this.probeClients];
     this.probeClients.clear();
     // Warm parked app-servers are not in `this.processes` (deleted per logical
