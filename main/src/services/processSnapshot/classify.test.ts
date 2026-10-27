@@ -400,6 +400,13 @@ describe('unmarked helpers under a live app main process', () => {
     expect(classify([du(705, 4242)], live, truth)[0].bucket).toBe('suspected');
   });
 
+  it("never suspects or offers a kill on an app's own main process (a dev Electron inside a worktree)", () => {
+    const electron = (pid: number) => proc(pid, '/wt/known/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .', { ppid: 900 });
+    const [self, other] = classify([electron(1000), electron(2000)], live, truth);
+    expect(self).toMatchObject({ bucket: 'foreign', foreignInstanceId: null });
+    expect(other).toMatchObject({ bucket: 'foreign', foreignInstanceId: OTHER_LIVE });
+  });
+
   it('does not pull non-cyboflow-shaped children of the app (Electron helpers) into the view', () => {
     const helper = proc(706, '/Applications/Cyboflow.app/Contents/Frameworks/Cyboflow Helper (GPU).app/x', { ppid: 1000 });
     expect(classify([helper], live, truth)[0]).toMatchObject({ bucket: 'foreign', foreignInstanceId: null });

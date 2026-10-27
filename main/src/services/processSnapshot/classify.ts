@@ -351,6 +351,10 @@ export function classify(
       };
     }
     if (selfLooksCyboflow(p, worktreeTruth) || ancestorIsCyboflow(p)) {
+      // An app's own main process (a dev build's Electron lives inside a worktree):
+      // never offered a kill. Our own reads like a packaged build's — unrelated.
+      const mainOf = liveInstances.liveMainPids.get(p.pid);
+      if (mainOf !== undefined) return foreign(p, mainOf === liveInstances.selfInstanceId ? null : mainOf);
       const app = liveAppAncestor(p);
       if (app === liveInstances.selfInstanceId) {
         const attributed = p.worktreePath === null ? { ...p, worktreePath: mentionedWorktree(p) } : p;
