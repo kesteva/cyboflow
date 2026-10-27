@@ -20,6 +20,7 @@ const live: LiveInstanceSet = {
   selfInstanceId: SELF,
   liveInstanceIds: new Set([SELF, OTHER_LIVE]),
   deadInstanceIds: new Set([DEAD]),
+  liveMainPids: new Map([[1000, SELF], [2000, OTHER_LIVE]]),
 };
 const truth = buildWorktreeTruthFixture(['/wt/known']);
 
@@ -277,6 +278,7 @@ describe('buildLiveInstanceSet', () => {
   it('keeps self plus every record whose pid is alive', () => {
     const set = buildLiveInstanceSet(
       SELF,
+      1000,
       [
         { instanceId: OTHER_LIVE, pid: 11 },
         { instanceId: DEAD, pid: 12 },
@@ -286,10 +288,14 @@ describe('buildLiveInstanceSet', () => {
     expect(set.selfInstanceId).toBe(SELF);
     expect([...set.liveInstanceIds].sort()).toEqual([OTHER_LIVE, SELF].sort());
     expect([...set.deadInstanceIds]).toEqual([DEAD]);
+    expect([...set.liveMainPids]).toEqual([
+      [1000, SELF],
+      [11, OTHER_LIVE],
+    ]);
   });
 
   it('feeds classify: a record whose pid died (confirmed dead) turns its children into orphans', () => {
-    const set = buildLiveInstanceSet(SELF, [{ instanceId: OTHER_LIVE, pid: 11 }], () => false);
+    const set = buildLiveInstanceSet(SELF, 1000, [{ instanceId: OTHER_LIVE, pid: 11 }], () => false);
     const [c] = classify(
       [proc(9, 'codex', { marker: { instanceId: OTHER_LIVE, worktree: null } })],
       set,
@@ -299,7 +305,7 @@ describe('buildLiveInstanceSet', () => {
   });
 
   it('an instance id with no record at all is unknown, never swept', () => {
-    const set = buildLiveInstanceSet(SELF, [], () => false);
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => false);
     const res = classify(
       [proc(9, 'codex', { marker: { instanceId: 'inst-never-recorded', worktree: null } })],
       set,
@@ -364,5 +370,69 @@ describe('classify — marker worktree attribution', () => {
     );
     expect(handled).toMatchObject({ bucket: 'owned', worktreePath: '/wt/known' });
     expect(bare).toMatchObject({ bucket: 'orphan', worktreePath: null });
+  });
+});
+
+describe('unmarked helpers under a live app main process', () => {
+  const du = (pid: number, ppid: number): MarkedProcess => proc(pid, 'du -sk -- /wt/known', { ppid });
+
+  it("files this app's own execFile child as owned, attributed to the worktree it names", () => {
+    const [c] = classify([du(700, 1000)], live, truth);
+    expect(c.bucket).toBe('owned');
+    expect(c.worktreePath).toBe('/wt/known');
+    expect(selectSweepSet([c])).toEqual([]);
+  });
+
+  it("reaches the main pid through intermediate unmarked ancestors", () => {
+    const sh = proc(701, '/bin/sh -c git -C /wt/known status', { ppid: 1000 });
+    const res = classify([sh, proc(702, 'git status', { ppid: 701 })], live, truth);
+    expect(res.map((c) => c.bucket)).toEqual(['owned', 'owned']);
+  });
+
+  it("files another live instance's child as foreign, read-only, naming that instance", () => {
+    const [c] = classify([du(703, 2000)], live, truth);
+    expect(c.bucket).toBe('foreign');
+    expect(c.bucket === 'foreign' && c.foreignInstanceId).toBe(OTHER_LIVE);
+  });
+
+  it('still suspects the same command when no live app main process is above it', () => {
+    expect(classify([du(704, 1)], live, truth)[0].bucket).toBe('suspected');
+    expect(classify([du(705, 4242)], live, truth)[0].bucket).toBe('suspected');
+  });
+
+  it("never suspects or offers a kill on an app's own main process (a dev Electron inside a worktree)", () => {
+    const electron = (pid: number) => proc(pid, '/wt/known/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .', { ppid: 900 });
+    const [self, other] = classify([electron(1000), electron(2000)], live, truth);
+    expect(self).toMatchObject({ bucket: 'foreign', foreignInstanceId: null });
+    expect(other).toMatchObject({ bucket: 'foreign', foreignInstanceId: OTHER_LIVE });
+  });
+
+  it('does not pull non-cyboflow-shaped children of the app (Electron helpers) into the view', () => {
+    const helper = proc(706, '/Applications/Cyboflow.app/Contents/Frameworks/Cyboflow Helper (GPU).app/x', { ppid: 1000 });
+    expect(classify([helper], live, truth)[0]).toMatchObject({ bucket: 'foreign', foreignInstanceId: null });
+  });
+});
+
+describe('sibling data dirs (another variant)', () => {
+  const SIBLING = 'inst-sibling-variant';
+
+  it("files a sibling variant's unmarked helper as foreign via its main pid", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => true, new Map([[3000, SIBLING]]));
+    const [c] = classify([proc(800, 'du -sk -- /wt/known', { ppid: 3000 })], set, truth);
+    expect(c).toMatchObject({ bucket: 'foreign', foreignInstanceId: SIBLING });
+  });
+
+  it("never sweeps a sibling's tagged process: its instance id is unknown here, so suspected, not orphan", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => false, new Map([[3000, SIBLING]]));
+    const res = classify([proc(801, 'codex', { marker: { instanceId: SIBLING, worktree: '/wt/known' } })], set, truth);
+    expect(res[0].bucket).toBe('suspected');
+    expect(selectSweepSet(res)).toEqual([]);
+    expect(set.liveInstanceIds.has(SIBLING)).toBe(false);
+    expect(set.deadInstanceIds.has(SIBLING)).toBe(false);
+  });
+
+  it("a sibling pid never displaces this instance's own main pid", () => {
+    const set = buildLiveInstanceSet(SELF, 1000, [], () => true, new Map([[1000, SIBLING]]));
+    expect(set.liveMainPids.get(1000)).toBe(SELF);
   });
 });

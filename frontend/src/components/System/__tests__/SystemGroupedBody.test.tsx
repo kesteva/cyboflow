@@ -28,6 +28,8 @@ vi.mock('../../../stores/navigationStore', () => ({
 
 import {
   SystemGroupedBody,
+  PRUNE_BLOCKED_REASON,
+  pruneBlockedReason,
   sortWorktrees,
   sortProcesses,
   sortTypeGroups,
@@ -253,6 +255,39 @@ describe('trust tiers', () => {
       />,
     );
     expect(screen.getByTestId('wt-prune')).toBeDisabled();
+  });
+
+  it("disables Prune on a worktree live in another instance and says where", () => {
+    const theirs = wt('/wt/theirs', {
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/Users/me/.cyboflow_dev_dmg',
+      claimVerified: true,
+    } as Partial<SystemWorktree>);
+    render(<SystemGroupedBody snapshot={snap([theirs], [])} projectId={7} groupBy="worktree" sortBy="cpu" {...handlers} />);
+    expect(screen.getByTestId('wt-prune')).toBeDisabled();
+    expect(screen.getByTestId('wt-prune-reason')).toHaveTextContent(
+      'Live in another cyboflow instance (/Users/me/.cyboflow_dev_dmg) — prune it there',
+    );
+  });
+});
+
+describe('pruneBlockedReason', () => {
+  it('is undefined for a prunable worktree and the checkout reason for in_place / is_main_repo', () => {
+    expect(pruneBlockedReason(wt('/wt/a'))).toBeUndefined();
+    expect(pruneBlockedReason(wt('/wt/m', { tag: 'in_place', prunable: false }))).toBe(PRUNE_BLOCKED_REASON);
+  });
+
+  it('names the unreadable sibling when the guard failed closed', () => {
+    const unverified = wt('/wt/x', {
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/Users/me/.cyboflow',
+      claimVerified: false,
+    } as Partial<SystemWorktree>);
+    expect(pruneBlockedReason(unverified)).toBe(
+      "Couldn't read /Users/me/.cyboflow's database — not pruned in case it's live there",
+    );
   });
 });
 

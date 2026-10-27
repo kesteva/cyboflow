@@ -71,10 +71,20 @@ const OWNER_LABEL: Record<SystemWorktree['tag'], string> = {
   in_place: 'In place',
   is_main_repo: 'Main repo',
   orphan: 'Orphan',
+  'other-instance': 'Other instance',
 };
 
 /** Shown wherever Prune is disabled for an `in_place` / `is_main_repo` worktree. */
 export const PRUNE_BLOCKED_REASON = 'Your real checkout — it can never be pruned';
+
+/** Why Prune is disabled for this worktree, or undefined when it is prunable. */
+export function pruneBlockedReason(worktree: SystemWorktree): string | undefined {
+  if (worktree.prunable) return undefined;
+  if (worktree.tag !== 'other-instance') return PRUNE_BLOCKED_REASON;
+  return worktree.claimVerified
+    ? `Live in another cyboflow instance (${worktree.claimedBy}) — prune it there`
+    : `Couldn't read ${worktree.claimedBy}'s database — not pruned in case it's live there`;
+}
 
 export interface SystemActionHandlers {
   /** Kill one process's tree. Never invoked for a foreign row. */
@@ -602,7 +612,7 @@ function WorktreeCard({ worktree, processes, sortBy, projectId, handlers }: Work
                 {
                   id: 'prune',
                   label: <span data-testid="wt-menu-prune">Prune worktree</span>,
-                  description: worktree.prunable ? undefined : PRUNE_BLOCKED_REASON,
+                  description: pruneBlockedReason(worktree),
                   variant: 'danger',
                   disabled: !worktree.prunable,
                   onClick: () => handlers.onPruneWorktree?.(worktree),
@@ -619,7 +629,7 @@ function WorktreeCard({ worktree, processes, sortBy, projectId, handlers }: Work
         <div className="flex items-center justify-end gap-2 border-t border-border-primary px-3.5 py-2">
           {handlers.onPruneWorktree !== undefined && !worktree.prunable && (
             <span data-testid="wt-prune-reason" className="mr-auto text-[11px] text-text-tertiary">
-              {PRUNE_BLOCKED_REASON}
+              {pruneBlockedReason(worktree)}
             </span>
           )}
           {handlers.onKillAll !== undefined && (
@@ -639,7 +649,7 @@ function WorktreeCard({ worktree, processes, sortBy, projectId, handlers }: Work
               data-testid="wt-prune"
               className={BUTTON_DANGER}
               disabled={!worktree.prunable}
-              title={worktree.prunable ? undefined : PRUNE_BLOCKED_REASON}
+              title={pruneBlockedReason(worktree)}
               onClick={() => handlers.onPruneWorktree?.(worktree)}
             >
               Prune worktree

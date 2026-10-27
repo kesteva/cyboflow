@@ -186,3 +186,104 @@ describe('loadWorktreeRegistry', () => {
     expect(out.map((e) => e.tag)).toEqual(['is_main_repo', 'session-owned', 'run-owned', 'orphan']);
   });
 });
+
+describe('reconcileWorktreeRegistry — sibling instance claims', () => {
+  const base = { projectPath: PROJECT, gitWorktrees: git, sessions: [sess('s1', '/wt/session-only')], runs: [] };
+
+  it("tags a worktree only a sibling's DB references as other-instance, never prunable", () => {
+    const entries = reconcileWorktreeRegistry({
+      ...base,
+      siblingClaims: { claimedPaths: new Map([['/wt/nobody/', '/home/.cyboflow_dev_dmg']]), unreadableDataDirs: [] },
+    });
+    expect(tagOf(entries, '/wt/nobody')).toMatchObject({
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/home/.cyboflow_dev_dmg',
+      claimVerified: true,
+    });
+    // Unclaimed paths with no row anywhere are still orphans.
+    expect(tagOf(entries, '/wt/both').tag).toBe('orphan');
+  });
+
+  it('a sibling claim outranks a local owner row (a copied data dir carries the original rows), keeping the owner ids', () => {
+    const entries = reconcileWorktreeRegistry({
+      ...base,
+      siblingClaims: { claimedPaths: new Map([['/wt/session-only', '/home/.cyboflow']]), unreadableDataDirs: [] },
+    });
+    expect(tagOf(entries, '/wt/session-only')).toMatchObject({
+      tag: 'other-instance',
+      prunable: false,
+      claimVerified: true,
+      sessionId: 's1',
+    });
+  });
+
+  it('never outranks the real checkout guards', () => {
+    const entries = reconcileWorktreeRegistry({
+      ...base,
+      sessions: [sess('s1', '/wt/session-only', { inPlace: true })],
+      siblingClaims: { claimedPaths: new Map([['/wt/session-only', '/home/.cyboflow'], [PROJECT, '/home/.cyboflow']]), unreadableDataDirs: [] },
+    });
+    expect(tagOf(entries, '/wt/session-only').tag).toBe('in_place');
+    expect(tagOf(entries, PROJECT).tag).toBe('is_main_repo');
+  });
+
+  it('matches by real path: an aliased git path still meets the claim and the local row', () => {
+    const entries = reconcileWorktreeRegistry({
+      projectPath: PROJECT,
+      gitWorktrees: [wt(PROJECT, 'main'), wt('/var/x/theirs'), wt('/var/x/mine')],
+      sessions: [sess('s1', '/private/var/x/mine')],
+      runs: [],
+      siblingClaims: { claimedPaths: new Map([['/private/var/x/theirs', '/home/.cyboflow']]), unreadableDataDirs: [] },
+      realPaths: new Map([
+        ['/var/x/theirs', '/private/var/x/theirs'],
+        ['/var/x/mine', '/private/var/x/mine'],
+      ]),
+    });
+    expect(tagOf(entries, '/var/x/theirs').tag).toBe('other-instance');
+    expect(tagOf(entries, '/var/x/mine')).toMatchObject({ tag: 'session-owned', sessionId: 's1' });
+  });
+
+  it('fails closed: an unreadable sibling DB turns every would-be orphan into an unverified other-instance', () => {
+    const entries = reconcileWorktreeRegistry({
+      ...base,
+      siblingClaims: { claimedPaths: new Map(), unreadableDataDirs: ['/home/.cyboflow'] },
+    });
+    const orphans = entries.filter((e) => e.tag === 'orphan');
+    expect(orphans).toEqual([]);
+    expect(tagOf(entries, '/wt/nobody')).toMatchObject({
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/home/.cyboflow',
+      claimVerified: false,
+    });
+    expect(tagOf(entries, '/wt/session-only')).toMatchObject({ tag: 'other-instance', claimVerified: false, sessionId: 's1' });
+    expect(entries.filter((e) => e.prunable)).toEqual([]);
+  });
+
+  it('loadWorktreeRegistry resolves git paths and local rows to real paths', async () => {
+    const real: Record<string, string> = { '/link/wt': '/real/wt' };
+    const entries = await loadWorktreeRegistry({
+      database: {
+        getSessionWorktreeRefs: () => [{ id: 's1', worktree_path: '/real/wt', in_place: 0, is_main_repo: 0 }],
+        getRunWorktreeRefs: () => [],
+      },
+      worktreeManager: { listWorktrees: async () => [wt(PROJECT, 'main'), wt('/link/wt')] },
+      projectId: 1,
+      projectPath: PROJECT,
+      realPath: async (p) => real[p] ?? null,
+    });
+    expect(tagOf(entries, '/link/wt')).toMatchObject({ tag: 'session-owned', sessionId: 's1' });
+  });
+
+  it('loadWorktreeRegistry threads the sibling claims through', async () => {
+    const entries = await loadWorktreeRegistry({
+      database: { getSessionWorktreeRefs: () => [], getRunWorktreeRefs: () => [] },
+      worktreeManager: { listWorktrees: async () => [wt(PROJECT, 'main'), wt('/wt/theirs')] },
+      projectId: 1,
+      projectPath: PROJECT,
+      readSiblingClaims: async () => ({ claimedPaths: new Map([['/wt/theirs', '/home/.cyboflow']]), unreadableDataDirs: [] }),
+    });
+    expect(tagOf(entries, '/wt/theirs').tag).toBe('other-instance');
+  });
+});
