@@ -26,7 +26,7 @@ function harness(opts: { buildScript?: string | null; takenRemote?: string[] } =
   });
   const createSession = vi.fn().mockImplementation(async (_n: string, worktreePath: string) => ({ id: 's-1', worktreePath }));
   const sessionManager = {
-    db: { checkSessionNameExists: () => false },
+    db: { checkSessionNameExists: (_name: string): boolean => false },
     getProjectById: () => ({ id: 7, path: '/nonexistent-proj-for-test', worktree_folder: null, build_script: opts.buildScript ?? null }),
     createSession,
     emitSessionCreated: vi.fn(),
@@ -162,6 +162,73 @@ describe('TaskQueue session-creation processor — remote host (M2-C2)', () => {
     expect(h.sessionManager.emitSessionCreated).toHaveBeenCalledTimes(1);
     expect(h.checkout.worktreeExists).not.toHaveBeenCalled();
     expect(h.checkout.ensureSessionWorktree).not.toHaveBeenCalled();
+  });
+
+  describe('concurrent same-name creates (B1)', () => {
+    /** A DB that sees a name only once createSession wrote its row, like the real checkSessionNameExists. */
+    function rowBackedNames(h: ReturnType<typeof harness>): void {
+      const rows = new Set<string>();
+      let n = 0;
+      h.sessionManager.db.checkSessionNameExists = (name: string) => rows.has(name);
+      h.createSession.mockImplementation(async (sessionName: string, worktreePath: string, _p: string, worktreeName: string) => {
+        rows.add(sessionName);
+        rows.add(worktreeName);
+        n++;
+        return { id: `s-${n}`, worktreePath };
+      });
+    }
+
+    /** Holds every caller until `count` have arrived — both creates have picked names before either writes a row. */
+    function barrier(count: number): () => Promise<void> {
+      let arrived = 0;
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      return async () => {
+        arrived++;
+        if (arrived >= count) open();
+        await gate;
+      };
+    }
+
+    it('two remote creates with the same name get distinct names and worktrees', async () => {
+      const h = harness();
+      rowBackedNames(h);
+      const wait = barrier(2);
+      h.checkout.resolveBase.mockImplementation(async () => {
+        await wait();
+        return { baseCommit: 'b'.repeat(40), baseBranch: 'HEAD', baseRef: 'HEAD' };
+      });
+      setRemoteCheckout(h.checkout);
+      const [a, b] = await Promise.all([settle(h.queue, { ...BASE, hostId: 'h-ssh' }), settle(h.queue, { ...BASE, hostId: 'h-ssh' })]);
+      expect([a, b]).toEqual([null, null]);
+      const names = h.createSession.mock.calls.map((c) => c[3]).sort();
+      expect(names).toEqual(['q', 'q-1']);
+      const keys = h.checkout.ensureSessionWorktree.mock.calls.map((c) => c[0].sessionKey).sort();
+      expect(keys).toEqual(['q', 'q-1']);
+    });
+
+    it('two local creates with the same name get distinct worktrees', async () => {
+      const h = harness();
+      rowBackedNames(h);
+      const wait = barrier(2);
+      h.createWorktree.mockImplementation(async (_p: string, name: string) => {
+        await wait();
+        return { worktreePath: `/proj/worktrees/${name}`, baseCommit: 'abc', baseBranch: 'main' };
+      });
+      const [a, b] = await Promise.all([settle(h.queue, BASE), settle(h.queue, BASE)]);
+      expect([a, b]).toEqual([null, null]);
+      expect(h.createWorktree.mock.calls.map((c) => c[1]).sort()).toEqual(['q', 'q-1']);
+    });
+
+    it('a create that fails before its row frees the name for the next one', async () => {
+      const h = harness();
+      rowBackedNames(h);
+      h.checkout.resolveBase.mockRejectedValueOnce(new Error('nope'));
+      setRemoteCheckout(h.checkout);
+      expect(await settle(h.queue, { ...BASE, hostId: 'h-ssh' })).toBeInstanceOf(Error);
+      expect(await settle(h.queue, { ...BASE, hostId: 'h-ssh' })).toBeNull();
+      expect(h.createSession.mock.calls.map((c) => c[3])).toEqual(['q']);
+    });
   });
 
   it("an explicit local hostId ('local' / null) provisions locally", async () => {

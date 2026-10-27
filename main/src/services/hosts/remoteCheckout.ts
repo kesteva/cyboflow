@@ -214,6 +214,12 @@ function assertBranch(branch: string): string {
 export class RemoteCheckout implements RemoteCheckoutLike {
   private readonly localGit: LocalGitRunner;
   private readonly gitRemote: GitRemoteResolver;
+  /**
+   * (host, worktree key) and (host, branch) → the session provisioning them right now. The session lock keys on the
+   * session id, so without this two sessions given the same name would walk one remote path at once and the later
+   * would adopt the earlier's worktree (then removing either deletes both). Same-session re-entry still adopts.
+   */
+  private readonly provisioning = new Map<string, string>();
 
   constructor(private readonly deps: RemoteCheckoutDeps) {
     this.localGit = deps.localGit ?? ((cwd, args, opts) => runGitCapture(cwd, args, opts));
@@ -268,7 +274,19 @@ export class RemoteCheckout implements RemoteCheckoutLike {
   async ensureSessionWorktree(input: EnsureSessionWorktreeInput): Promise<EnsureSessionWorktreeResult> {
     const key = assertKey(input.sessionKey);
     const branch = assertBranch(input.branch);
-    return withLock(`remote-checkout-session-${input.sessionId}`, () => this.ensureLocked(input, key, branch), SESSION_LOCK_WAIT_MS);
+    // Synchronous check + claim (no await in between); refused before any merge-back row exists, so the caller's
+    // compensating removeSessionWorktree has nothing of the other session's to remove.
+    const claims = [`wt\0${input.hostId}\0${key}`, `br\0${input.hostId}\0${branch}`];
+    if (claims.some((c) => (this.provisioning.get(c) ?? input.sessionId) !== input.sessionId)) {
+      throw new RemoteCheckoutError('conflict', 'Another session is setting up a worktree with this name on the environment; try again.');
+    }
+    const mine = claims.filter((c) => !this.provisioning.has(c));
+    for (const c of mine) this.provisioning.set(c, input.sessionId);
+    try {
+      return await withLock(`remote-checkout-session-${input.sessionId}`, () => this.ensureLocked(input, key, branch), SESSION_LOCK_WAIT_MS);
+    } finally {
+      for (const c of mine) this.provisioning.delete(c);
+    }
   }
 
   private async ensureLocked(input: EnsureSessionWorktreeInput, key: string, branch: string): Promise<EnsureSessionWorktreeResult> {

@@ -93,6 +93,12 @@ interface CreateSessionJob {
 
 export class TaskQueue {
   private sessionQueue: SimpleQueue<CreateSessionJob>;
+  /**
+   * Session/worktree names picked by ensureUniqueNames but not yet written as a session row. Global, like
+   * checkSessionNameExists: without it two concurrent same-name creates both see the name free across the awaits
+   * before createSession and provision (then share, then delete) one worktree.
+   */
+  private readonly reservedNames = new Set<string>();
 
   constructor(private options: TaskQueueOptions) {
     console.log('[TaskQueue] Initializing task queue...');
@@ -146,6 +152,7 @@ export class TaskQueue {
 
       // Processing session creation job - verbose debug logging removed
 
+      let releaseNames = (): void => undefined;
       try {
         // Remote environment (M2-C2): the worktree lives on the environment (services/hosts/remoteCheckout.ts).
         // A remote job never cuts a LOCAL worktree, runs no build script here and never falls back to This Mac:
@@ -194,7 +201,7 @@ export class TaskQueue {
         }
 
         // Ensure uniqueness for both names
-        const { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName } =
+        const { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName, release } =
           await this.ensureUniqueNames(
             sessionName,
             worktreeName,
@@ -204,6 +211,7 @@ export class TaskQueue {
           );
         sessionName = uniqueSessionName;
         worktreeName = uniqueWorktreeName;
+        releaseNames = release;
 
 
         // In-place sessions (migration 047) work DIRECTLY in the project checkout —
@@ -261,6 +269,8 @@ export class TaskQueue {
           job.data.agentModel,
           hostId !== undefined ? { hostId } : undefined
         );
+        // The row now holds both names (checkSessionNameExists sees them, archived or not).
+        releaseNames();
 
         if (remote !== null) {
           try {
@@ -415,6 +425,8 @@ export class TaskQueue {
       } catch (error) {
         console.error(`[TaskQueue] Failed to create session:`, error);
         throw error;
+      } finally {
+        releaseNames();
       }
     });
   }
@@ -497,7 +509,7 @@ export class TaskQueue {
     project: Project,
     index?: number,
     remoteWorktreeExists?: (name: string) => Promise<boolean>,
-  ): Promise<{ sessionName: string; worktreeName: string }> {
+  ): Promise<{ sessionName: string; worktreeName: string; release: () => void }> {
     const { sessionManager } = this.options;
     const db = sessionManager.db;
 
@@ -516,12 +528,6 @@ export class TaskQueue {
     let uniqueWorktreeName = candidateWorktreeName;
 
     while (true) {
-      // Check session name and worktree name separately using public methods
-      // This is important because different session names could map to the same worktree name
-      // e.g., "Fix Auth Bug" and "Fix-Auth-Bug" both become "fix-auth-bug"
-      const sessionNameExists = db.checkSessionNameExists(uniqueSessionName);
-      const worktreeNameExists = db.checkSessionNameExists(uniqueWorktreeName);
-
       // Check if worktree directory exists on filesystem
       // This handles cases where a worktree was created outside of Cyboflow
       let worktreePathExists = false;
@@ -541,7 +547,13 @@ export class TaskQueue {
         }
       }
 
-      // All must be unique (session name, worktree name in DB, and no filesystem conflict)
+      // From here to the reservation there is NO await: the check and the reserve cannot interleave with another
+      // create's. Check session name and worktree name separately — different session names can map to the same
+      // worktree name, e.g. "Fix Auth Bug" and "Fix-Auth-Bug" both become "fix-auth-bug".
+      const sessionNameExists = db.checkSessionNameExists(uniqueSessionName) || this.reservedNames.has(uniqueSessionName);
+      const worktreeNameExists = db.checkSessionNameExists(uniqueWorktreeName) || this.reservedNames.has(uniqueWorktreeName);
+
+      // All must be unique (session name, worktree name in DB or in flight, and no filesystem conflict)
       if (!sessionNameExists && !worktreeNameExists && !worktreePathExists) {
         break;
       }
@@ -557,7 +569,15 @@ export class TaskQueue {
       counter++;
     }
 
-    return { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName };
+    const reserved = [uniqueSessionName, uniqueWorktreeName];
+    for (const name of reserved) this.reservedNames.add(name);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      for (const name of reserved) this.reservedNames.delete(name);
+    };
+    return { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName, release };
   }
 
   async close() {

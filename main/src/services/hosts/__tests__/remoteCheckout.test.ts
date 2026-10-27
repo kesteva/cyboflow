@@ -254,6 +254,20 @@ describe('RemoteCheckout.ensureSessionWorktree (real git)', { timeout: 30_000 },
     await expect(checkout.ensureSessionWorktree(input('s2', 'k2'))).rejects.toThrow(/turned off/);
     expect(mergeBacks.get('s2')).toBeNull();
   });
+
+  it('refuses a second session provisioning the same name concurrently, and its cleanup leaves the first intact', async () => {
+    const first = checkout.ensureSessionWorktree(input('s1', 'k1'));
+    // Claimed synchronously: the rival is refused before it writes any row of its own.
+    await expect(checkout.ensureSessionWorktree(input('s2', 'k1'))).rejects.toMatchObject({ code: 'conflict' });
+    await expect(checkout.ensureSessionWorktree({ ...input('s3', 'k3'), branch: 'k1' })).rejects.toMatchObject({ code: 'conflict' });
+    expect(mergeBacks.get('s2')).toBeNull();
+    expect(mergeBacks.get('s3')).toBeNull();
+    await first;
+    expect(await checkout.removeSessionWorktree('s2')).toBe(true);
+    expect(git(path.join(remoteRoot, 'wt', 'k1'), ['symbolic-ref', 'HEAD']).trim()).toBe('refs/heads/k1');
+    // The claim is released once provisioning settles: the same session re-enters as before.
+    await expect(checkout.ensureSessionWorktree(input('s1', 'k1'))).resolves.toMatchObject({ remoteWorktreePath: path.join(remoteRoot, 'wt', 'k1') });
+  });
 });
 
 describe('RemoteCheckout.removeSessionWorktree (real git)', { timeout: 30_000 }, () => {
