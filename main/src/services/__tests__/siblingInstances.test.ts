@@ -101,7 +101,8 @@ describe('createSiblingInstances — worktreeClaims', () => {
   it('also keys each claim by its real path, so an alias of the stored spelling matches', async () => {
     const self = dataDir('.cyboflow');
     dataDir('.cyboflow_dev');
-    const real = fs.realpathSync(fs.mkdtempSync(path.join(home, 'real-wt-')));
+    // .native, like the production fsp.realpath: the JS realpath keeps Windows 8.3 names (RUNNER~1).
+    const real = fs.realpathSync.native(fs.mkdtempSync(path.join(home, 'real-wt-')));
     const link = path.join(home, 'link-wt');
     fs.symlinkSync(real, link);
     const claims = await siblings({ selfDataDir: self, refs: { '.cyboflow_dev': [link] } }).worktreeClaims();
