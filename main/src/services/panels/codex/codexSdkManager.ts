@@ -59,9 +59,11 @@ import {
 } from './appServer/account';
 import {
   AppServerProtocolError,
+  AppServerTransportError,
   CodexAppServerClient,
   type CodexAppServerClientOptions,
 } from './appServer/client';
+import { peekHostsFacade } from '../../../orchestrator/hostsBridge';
 import { projectTurnSessionEvent } from './appServer/eventProjector';
 import {
   buildCodexAppServerEnvironment,
@@ -376,6 +378,25 @@ function appServerEnvironment(
  * local builder): for a remote run laneBuildSlots computes its values against the
  * REMOTE worktree. One builder for the cold spawn and the warm fingerprint.
  */
+/**
+ * A remote app-server's pipe ending mid-turn is the SSH link to its environment dropping, so the turn's failure
+ * names the environment instead of the pipe detail. `host-unreachable:` lets the systemic classifier treat it as
+ * an outage (a workflow run pauses rather than fails). Anything else keeps its own message.
+ */
+export function describeCodexTurnFailure(error: unknown, remote: RemoteRuntimeSession | null): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (remote === null || !(error instanceof AppServerTransportError) || error instanceof AppServerProtocolError) {
+    return message;
+  }
+  let label = 'the environment';
+  try {
+    label = peekHostsFacade()?.get(remote.hostId).label ?? label;
+  } catch {
+    // Unknown / archived host: keep the generic name.
+  }
+  return `host-unreachable: Lost the connection to ${label} during this turn. Send your message again to reconnect.`;
+}
+
 function remoteAppServerEnvironment(
   runId: string,
   options: ClaudeSpawnerOptions,
@@ -1433,8 +1454,10 @@ export class CodexSdkManager extends AbstractCliManager {
         this.logger?.info(`[CodexSdkManager] Codex app-server run aborted for panel ${displayPanelId}`);
       } else {
         exitCode = 1;
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger?.error(`[CodexSdkManager] Codex app-server run error for panel ${displayPanelId}: ${message}`);
+        this.logger?.error(
+          `[CodexSdkManager] Codex app-server run error for panel ${displayPanelId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        const message = describeCodexTurnFailure(error, entry.remote);
         // EventEmitter THROWS on an unlistened 'error', and in production nothing
         // subscribes to this manager's 'error' (ClaudePanelManager only forwards
         // the Claude SDK + interactive managers' events). An unguarded emit here
