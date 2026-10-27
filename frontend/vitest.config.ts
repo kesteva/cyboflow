@@ -12,6 +12,8 @@ export default defineConfig({
     // BOTH suites, so capping only main leaves half the oversubscription in
     // place. See shared/types/testConcurrency.ts.
     ...forkPoolOptions(),
+    // Windows runners: leave room for the raised asyncUtilTimeout in src/test/setup.ts.
+    ...(process.platform === 'win32' ? { testTimeout: 30_000 } : {}),
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     // Flake quarantine — *.quarantine.test.ts is pulled out of the blocking
     // suite and run report-only by e2e.yml's flake-watch job, which sets
