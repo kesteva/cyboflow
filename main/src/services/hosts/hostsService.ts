@@ -62,7 +62,7 @@ import type { LoggerLike } from '../../orchestrator/types';
 import { isHostPreflightScheduleKilled, isRemoteHostsKilled } from './flags';
 import { HostLink, HostLinkPool, type HostLinkEvent, type HostLinkLease, type HostLinkTimers } from './hostLink';
 import { remoteFactsFromPreflight, type HostRegistry } from './hostRegistry';
-import type { ExpectedToolchain } from './preflight/checks';
+import { TOOLCHAIN_DAMAGED_DETAIL, type ExpectedToolchain } from './preflight/checks';
 import {
   gcRemoteRunDir,
   QUIT_DRAIN_BUDGET_MS,
@@ -818,8 +818,10 @@ export class HostsService implements HostsFacade {
       const arch = toolchainArchFromUname(unameM);
       if (arch === null) throw new ToolchainPushError('check', id, `this build of cyboflow has no tools for ${unameM}`);
 
+      // A damaged install keeps its matching manifest, so the pusher's manifest shortcut must be bypassed.
+      const damaged = row.preflight?.results.some((r) => r.id === 'sdk-binary-hash' && r.detail === TOOLCHAIN_DAMAGED_DETAIL) === true;
       const controller = new AbortController();
-      const promise = this.executeInstall(tc, id, row.sshTarget, facts.remoteRoot, arch, controller.signal).finally(() => {
+      const promise = this.executeInstall(tc, id, row.sshTarget, facts.remoteRoot, arch, controller.signal, damaged).finally(() => {
         if (this.installs.get(id)?.controller === controller) this.installs.delete(id);
         emitHostsChanged({ kind: 'hosts', hostId: id });
       });
@@ -838,6 +840,7 @@ export class HostsService implements HostsFacade {
     remoteRoot: string,
     arch: ToolchainArch,
     signal: AbortSignal,
+    force = false,
   ): Promise<void> {
     const progress = (ev: Omit<ToolchainProgressEvent, 'hostId' | 'message'>, message: string | null = null): void => {
       try {
@@ -860,6 +863,7 @@ export class HostsService implements HostsFacade {
         manifest: built.manifest,
         sources: built.sources,
         signal,
+        force,
         logger: this.deps.logger,
         onProgress: (p) => progress({ phase: p.phase, bytesSent: p.bytesSent, bytesTotal: p.bytesTotal }),
       });

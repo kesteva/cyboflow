@@ -114,6 +114,18 @@ describe.runIf(posix)('pushToolchain against a local shell', () => {
     expect(progress.map((p) => p.phase)).toEqual(['done']);
   });
 
+  it('force re-pushes a damaged payload whose manifest still matches', async () => {
+    const f = await fixture();
+    await pushToolchain(input(f, new LocalShellTransport()));
+    const dir = path.join(f.remoteRoot, 'toolchain', f.manifest.hash);
+    fs.writeFileSync(path.join(dir, 'claude'), 'corrupt');
+    const skipped = await pushToolchain(input(f, new LocalShellTransport()));
+    expect(skipped.alreadyInstalled).toBe(true);
+    const r = await pushToolchain(input(f, new LocalShellTransport(), { force: true }));
+    expect(r.alreadyInstalled).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'claude')).equals(fs.readFileSync(f.resolved.claudePath))).toBe(true);
+  });
+
   it('reinstalls over a hash dir whose manifest does not match', async () => {
     const f = await fixture();
     await pushToolchain(input(f, new LocalShellTransport()));

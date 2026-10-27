@@ -283,6 +283,8 @@ export interface PushToolchainInput {
   sources: readonly ToolchainSourceFile[];
   onProgress?: (p: ToolchainProgress) => void;
   signal?: AbortSignal;
+  /** Re-push even when the remote manifest matches (a damaged install: the manifest survives, the payload does not). */
+  force?: boolean;
   /** Test seams. */
   fsDeps?: ToolchainHashFs;
   uploadTimeoutMs?: number;
@@ -340,7 +342,7 @@ async function pushLocked(input: PushToolchainInput): Promise<PushToolchainResul
   assertNotAborted();
   const check = await transport.exec(target, sh(CHECK_PROGRAM, root, manifest.hash), { timeoutMs: TOOLCHAIN_CHECK_TIMEOUT_MS, signal });
   assertNotAborted();
-  if (check.code === 0 && check.stdout === manifestText) {
+  if (check.code === 0 && check.stdout === manifestText && input.force !== true) {
     emit('done', bytesTotal);
     return { hash: manifest.hash, dir: paths.dir, alreadyInstalled: true, removed: [] };
   }

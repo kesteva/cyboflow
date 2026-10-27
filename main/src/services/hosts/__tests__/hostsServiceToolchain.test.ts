@@ -26,7 +26,7 @@ import {
   type ToolchainProgressEvent,
 } from '../../../../../shared/types/hosts';
 import type { ExecutionHost } from '../../../orchestrator/trpc/contracts/executionHost';
-import { CHECK_TIER_IMPACT } from '../preflight/checks';
+import { CHECK_TIER_IMPACT, TOOLCHAIN_DAMAGED_DETAIL } from '../preflight/checks';
 import {
   HostsService,
   expectedFromManifest,
@@ -353,6 +353,19 @@ describe('installToolchain', () => {
     expect(hostFor(id).runs[before].mode).toBe('full');
     expect(service.get(id).installRunning).toBe(false);
     expect(captureError).not.toHaveBeenCalled();
+  });
+
+  it('forces the push (bypassing the manifest shortcut) only when the last check reported the tools damaged', async () => {
+    const healthy = await addWith((h) => result(h));
+    await service.installToolchain(healthy);
+    expect((toolchain.push.mock.calls[0][0] as PushToolchainInput).force).toBe(false);
+
+    const damaged = await addWith((h) => {
+      const r = result(h);
+      return { ...r, results: r.results.map((c) => (c.id === 'sdk-binary-hash' ? { ...c, status: 'fail' as const, detail: TOOLCHAIN_DAMAGED_DETAIL } : c)) };
+    });
+    await service.installToolchain(damaged);
+    expect((toolchain.push.mock.calls[1][0] as PushToolchainInput).force).toBe(true);
   });
 
   it('one install per host: a second call while running returns the running promise', async () => {
