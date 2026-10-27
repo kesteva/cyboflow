@@ -208,6 +208,9 @@ let gate: FakeClaimGate;
 let service: TrackerSyncService;
 let projectPaths: Map<number, string>;
 
+// A fresh migrated DB per test: ~1-2 s on a Windows runner, past 10 s under full-suite load.
+const HOOK_TIMEOUT_MS = 30_000;
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-trackersync-claim-'));
   svc = new DatabaseService(join(tmpDir, 'test.db'));
@@ -234,13 +237,13 @@ beforeEach(() => {
     resolveProjectPath: (id) => projectPaths.get(id) ?? null,
     adapterFactory: () => adapter,
   });
-});
+}, HOOK_TIMEOUT_MS);
 
 afterEach(() => {
   service.stop();
   raw.close();
   rmSync(tmpDir, { recursive: true, force: true });
-});
+}, HOOK_TIMEOUT_MS);
 
 function keylessPayload(projectId: number = PROJECT_ID): TrackerConnectPayload {
   return {
