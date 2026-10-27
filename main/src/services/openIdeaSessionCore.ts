@@ -116,7 +116,7 @@ export type OpenIdeaSessionCoreOptions = OpenIdeaSessionRequest;
 export const OPEN_IDEA_SESSION_SCHEMA = z.object({
   projectId: z.number().finite(),
   ideaId: z.string().min(1),
-}) satisfies z.ZodType<OpenIdeaSessionRequest>;
+}) satisfies z.ZodType<OpenIdeaSessionRequest, OpenIdeaSessionRequest>;
 
 /** Per-failure wording for THIS door (the design doors keep their own). */
 const PREFLIGHT_MESSAGES: Readonly<Record<ClaudeSdkPreflightFailure, string>> = {
