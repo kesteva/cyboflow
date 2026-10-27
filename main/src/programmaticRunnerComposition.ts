@@ -93,6 +93,14 @@ import type { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import type { RunbookBootstrapStampStore } from './orchestrator/verify/bootstrapStampStore';
 import type { LoggerLike, DatabaseLike } from './orchestrator/types';
 
+// Runtimes that can run against a remote environment (mirrors runLauncher's HostLaunchRuntime).
+const REMOTE_CAPABLE_RUNTIMES: ReadonlySet<string> = new Set(['claude-sdk', 'codex-sdk']);
+
+/** True when a per-agent runtime pin must be dropped because the run is remote and the runtime is local-only. */
+export function shouldDropPinForRemoteRun(runtime: string | undefined, runIsRemote: boolean): boolean {
+  return runIsRemote && runtime !== undefined && !REMOTE_CAPABLE_RUNTIMES.has(runtime);
+}
+
 // Monitor-actuation seam (the 10 confirm-gated steering actions: add/remove/edit
 // task, skip/unskip/steer step, the whole-run rewind, the PER-LANE rewind,
 // resolve review item, file note) — the shape of index.ts's late-bound
@@ -275,11 +283,21 @@ export function composeProgrammaticRunner(
       // which createRun already resolved onto an ENABLED provider — same
       // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
       // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
-      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
+      let pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
       if (a.runtime && pinnedRuntime === undefined) {
         cyboflowLogger.warn(
           `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
         );
+      }
+      // Remote-launch gate for PER-AGENT pins: the launch gate vets only the
+      // run's stamped runtime, and a pi/omp/CLI pin would dispatch to a
+      // local-only manager with the remote worktree path as cwd. Drop it so the
+      // step falls back to the run's own (SDK) runtime.
+      if (shouldDropPinForRemoteRun(pinnedRuntime, readRunRemoteHostId(runId) !== null)) {
+        cyboflowLogger.warn(
+          `[resolveStepAgent] dropping ${pinnedRuntime} pin for agent '${agentKey}' — run targets a remote environment (SDK runtimes only)`,
+        );
+        pinnedRuntime = undefined;
       }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
