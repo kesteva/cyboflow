@@ -88,7 +88,7 @@ export const sourceParamSchema: z.ZodType<SourceParam> = z.union([
 ]);
 
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema)])
+  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)])
 );
 
 const sqlTextSchema = z.string().min(1, 'sql must not be empty').refine((sql) => utf8ByteLength(sql) <= WIDGET_LIMITS.maxSqlBytes, {
@@ -105,12 +105,12 @@ export const widgetSourceSchema: z.ZodType<WidgetSource> = z.union([
   z.object({
     type: z.literal('sql'),
     sql: sqlTextSchema,
-    params: z.record(sourceParamSchema).optional(),
+    params: z.record(z.string(), sourceParamSchema).optional(),
   }),
   z.object({
     type: z.literal('query'),
     name: z.enum(QUERY_SOURCE_NAMES),
-    input: z.record(sourceParamSchema),
+    input: z.record(z.string(), sourceParamSchema),
   }),
 ]);
 
@@ -274,11 +274,11 @@ export const widgetSettingFieldSchema: z.ZodType<WidgetSettingField> = z.object(
 
 const widgetSpecShapeSchema = z.object({
   version: z.literal(1),
-  sources: z.record(widgetSourceSchema).refine((sources) => {
+  sources: z.record(z.string(), widgetSourceSchema).refine((sources) => {
     const count = Object.keys(sources).length;
     return count >= 1 && count <= WIDGET_LIMITS.maxSources;
   }, { message: `sources must have between 1 and ${WIDGET_LIMITS.maxSources} entries` }),
-  transforms: z.record(z.array(transformStepSchema)).optional(),
+  transforms: z.record(z.string(), z.array(transformStepSchema)).optional(),
   render: widgetRenderSchema,
   actions: z.array(widgetActionSchema).max(WIDGET_LIMITS.maxActions, `actions must have at most ${WIDGET_LIMITS.maxActions} entries`).optional(),
   settings: z.array(widgetSettingFieldSchema).optional(),
@@ -397,7 +397,7 @@ const widgetRefSchema = z.union([
 export const layoutItemSchema: z.ZodType<LayoutItem> = z.object({
   instanceId: z.string().min(1),
   widget: widgetRefSchema,
-  settings: z.record(scalarSchema),
+  settings: z.record(z.string(), scalarSchema),
   title: z.string().optional(),
   refreshSec: z.number().int().min(WIDGET_LIMITS.minRefreshSec).max(WIDGET_LIMITS.maxRefreshSec).optional(),
   hidden: z.boolean().optional(),

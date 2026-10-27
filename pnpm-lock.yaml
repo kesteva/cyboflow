@@ -33,6 +33,7 @@ overrides:
   uuid@11: ^11.1.1
   '@opentelemetry/core@2': ^2.8.0
   dompurify@3: ^3.4.17
+  '@steipete/peekaboo-mcp>zod': ^4.6.6
   shell-quote@1: ^1.9.0
   lodash@4: ^4.18.0
   undici@6: ^6.29.1
@@ -70,10 +71,10 @@ importers:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.284
-        version: 0.3.284(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.32.2(zod@3.25.76))(zod@3.25.76)
+        version: 0.3.284(@anthropic-ai/sdk@0.110.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)
       '@anthropic-ai/sdk':
         specifier: ^0.110.0
-        version: 0.110.0(zod@3.25.76)
+        version: 0.110.0(zod@4.6.7)
       '@aptabase/electron':
         specifier: ^0.3.1
         version: 0.3.1(electron@44.9.3)
@@ -82,7 +83,7 @@ importers:
         version: 0.14.1
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
-        version: 1.32.2(zod@3.25.76)
+        version: 1.32.2(zod@4.6.7)
       '@openai/codex':
         specifier: 0.159.2
         version: 0.159.2
@@ -123,8 +124,8 @@ importers:
         specifier: ^13.0.2
         version: 13.0.2
       zod:
-        specifier: ^3.23.8
-        version: 3.25.76
+        specifier: ^4.6.6
+        version: 4.6.7
     devDependencies:
       '@aws-sdk/client-s3':
         specifier: ^3.726.0
@@ -310,10 +311,10 @@ importers:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.284
-        version: 0.3.284(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.32.2(zod@3.25.76))(zod@3.25.76)
+        version: 0.3.284(@anthropic-ai/sdk@0.110.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)
       '@anthropic-ai/sdk':
         specifier: ^0.110.0
-        version: 0.110.0(zod@3.25.76)
+        version: 0.110.0(zod@4.6.7)
       '@aptabase/electron':
         specifier: ^0.3.1
         version: 0.3.1(electron@44.9.3)
@@ -322,7 +323,7 @@ importers:
         version: 0.14.1
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
-        version: 1.32.2(zod@3.25.76)
+        version: 1.32.2(zod@4.6.7)
       '@openai/codex':
         specifier: 0.159.2
         version: 0.159.2
@@ -351,8 +352,8 @@ importers:
         specifier: 0.1.2
         version: 0.1.2(patch_hash=7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.9.3)
       zod:
-        specifier: ^3.23.8
-        version: 3.25.76
+        specifier: ^4.6.6
+        version: 4.6.7
     devDependencies:
       '@electron/rebuild':
         specifier: ^4.2.0
@@ -5560,8 +5561,8 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zustand@5.0.6:
     resolution: {integrity: sha512-ihAqNeUVhe0MAD+X8M5UzqyZ9k3FFZLBTtqo6JLPwV53cbRB/mJwBI0PxcIgqhBBHlEs8G45OTDTMq3gNcLq3A==}
@@ -5621,11 +5622,11 @@ snapshots:
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.284':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.284(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.32.2(zod@3.25.76))(zod@3.25.76)':
+  '@anthropic-ai/claude-agent-sdk@0.3.284(@anthropic-ai/sdk@0.110.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)':
     dependencies:
-      '@anthropic-ai/sdk': 0.110.0(zod@3.25.76)
-      '@modelcontextprotocol/sdk': 1.32.2(zod@3.25.76)
-      zod: 3.25.76
+      '@anthropic-ai/sdk': 0.110.0(zod@4.6.7)
+      '@modelcontextprotocol/sdk': 1.32.2(zod@4.6.7)
+      zod: 4.6.7
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.284
       '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.284
@@ -5636,12 +5637,12 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.284
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.284
 
-  '@anthropic-ai/sdk@0.110.0(zod@3.25.76)':
+  '@anthropic-ai/sdk@0.110.0(zod@4.6.7)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.6.7
 
   '@aptabase/electron@0.3.1(electron@44.9.3)':
     dependencies:
@@ -6501,7 +6502,7 @@ snapshots:
     dependencies:
       '@chevrotain/types': 11.1.2
 
-  '@modelcontextprotocol/sdk@1.32.2(zod@3.25.76)':
+  '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
       '@hono/node-server': 1.19.17(hono@4.13.14)
       ajv: 8.20.0
@@ -6518,8 +6519,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.0
       raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
+      zod: 4.6.7
+      zod-to-json-schema: 3.25.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
 
@@ -7311,11 +7312,11 @@ snapshots:
 
   '@steipete/peekaboo-mcp@2.0.3':
     dependencies:
-      '@modelcontextprotocol/sdk': 1.32.2(zod@3.25.76)
-      openai: 4.104.0(zod@3.25.76)
+      '@modelcontextprotocol/sdk': 1.32.2(zod@4.6.7)
+      openai: 4.104.0(zod@4.6.7)
       pino: 9.14.0
       pino-pretty: 13.1.3
-      zod: 3.25.76
+      zod: 4.6.7
     transitivePeerDependencies:
       - '@cfworker/json-schema'
       - encoding
@@ -10082,7 +10083,7 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@4.104.0(zod@3.25.76):
+  openai@4.104.0(zod@4.6.7):
     dependencies:
       '@types/node': 18.19.130
       '@types/node-fetch': 2.6.13
@@ -10092,7 +10093,7 @@ snapshots:
       formdata-node: 4.4.1
       node-fetch: 2.7.0
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.6.7
     transitivePeerDependencies:
       - encoding
     optional: true
@@ -11375,11 +11376,11 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-to-json-schema@3.25.2(zod@3.25.76):
+  zod-to-json-schema@3.25.2(zod@4.6.7):
     dependencies:
-      zod: 3.25.76
+      zod: 4.6.7
 
-  zod@3.25.76: {}
+  zod@4.6.7: {}
 
   zustand@5.0.6(@types/react@19.1.8)(immer@10.1.3)(react@19.1.0):
     optionalDependencies:
