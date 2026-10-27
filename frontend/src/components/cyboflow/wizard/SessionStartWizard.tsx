@@ -1920,6 +1920,12 @@ export default function SessionStartWizard(): React.JSX.Element {
     runtimeMixOverride !== null;
 
   const combinedError = launchError ?? quickError ?? designLaunchError;
+  // The error sits under the CTA at the bottom of a long card, so a failed launch scrolls it into view —
+  // otherwise a refusal (e.g. an environment check) reads as the wizard silently doing nothing.
+  const launchErrorRef = useRef<HTMLParagraphElement | null>(null);
+  useEffect(() => {
+    if (combinedError) launchErrorRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [combinedError]);
 
   // Advanced: per-launch base branch (shared by the quick and workflow Advanced
   // bodies). '' = project default — the launch omits `baseBranch` and the
@@ -2696,7 +2702,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Launch CTA — last element inside the card. */}
             <div className="flex flex-col gap-2 pt-1">
               {combinedError !== null && combinedError !== undefined && (
-                <p className="text-xs text-status-error" role="alert">
+                <p ref={launchErrorRef} className="text-xs text-status-error" role="alert" data-testid="wizard-launch-error">
                   {combinedError}
                 </p>
               )}
