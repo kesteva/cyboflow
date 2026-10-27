@@ -103,6 +103,9 @@ jobs:
       # electron-builder's per-arch staging dir: arm64 → mac-arm64/, x64 → mac/.
       STAGING: ${{ matrix.arch == 'x64' && 'mac' || 'mac-arm64' }}
       LIPO_ARCH: ${{ matrix.arch == 'x64' && 'x86_64' || 'arm64' }}
+      # main's `tsc` peaks at ~2.3 GB since zod 4; the 7 GB arm64 runner's default
+      # V8 heap is ~2 GB, so the build OOMs without this.
+      NODE_OPTIONS: --max-old-space-size=4096
       CSC_LINK: ${{ secrets.CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
