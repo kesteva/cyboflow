@@ -152,7 +152,9 @@ function fakeSession(events: string[], codexBin: string | null = CODEX_BIN, gene
     codexAvailable: codexBin !== null,
     artifactsDir: (k) => `${ROOT}/artifacts/runs/${k}`,
     remotePath: () => path,
-    env: (localEnv) => composeRemoteEnv(localEnv, { facts, path, orchSocket: REMOTE_SOCK, orchTokenFile: TOKEN_FILE }),
+    env: (localEnv, opts) => composeRemoteEnv(localEnv, {
+      facts, path, orchSocket: REMOTE_SOCK, orchTokenFile: TOKEN_FILE, artifactsDir: opts?.artifactsDir ?? null,
+    }),
     spawn: spawn as unknown as RemoteRuntimeSession['spawn'],
     fs: {
       exists: vi.fn(async () => true),
@@ -463,6 +465,111 @@ describe('CodexSdkManager on an SSH environment', () => {
       expect(s1.fence).toHaveBeenCalledTimes(1);
       expect(s2.fence).not.toHaveBeenCalled();
       await manager.killAllProcesses();
+      expect(s1.release).toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('B6: a remote app-server gets CYBOFLOW_RUN_ARTIFACTS_DIR on the environment, created there first', async () => {
+    const db = createDb();
+    const events: string[] = [];
+    const s1 = fakeSession(events);
+    setRemoteRuntime(fakeRuntime([s1], () => 'h1').rt);
+    try {
+      const { manager, clients } = makeManager(db, events);
+      await manager.spawnCliProcess(turn());
+      const dir = `${ROOT}/artifacts/runs/run-1`;
+      expect(clients[0].options.env?.CYBOFLOW_RUN_ARTIFACTS_DIR).toBe(dir);
+      expect(s1.mkdirp).toHaveBeenCalledWith({ hostId: 'h1', path: dir });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('B6: a local app-server gets the local run artifacts dir, keyed like CYBOFLOW_RUN_ID', async () => {
+    const db = createDb();
+    setRemoteRuntime(fakeRuntime([], () => null).rt);
+    try {
+      const { manager, clients } = makeManager(db, []);
+      await manager.spawnCliProcess(turn({ hostId: undefined, worktreePath: '/tmp/wt' }));
+      const env = clients[0].options.env ?? {};
+      expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toMatch(/[/\\]artifacts[/\\]runs[/\\]run-1$/);
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-1');
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('B4: a resume after the environment\'s generation changed never reuses the parked app-server', async () => {
+    const db = createDb();
+    const events: string[] = [];
+    const s1 = fakeSession(events, CODEX_BIN, 0);
+    const s2 = fakeSession(events, CODEX_BIN, 1);
+    setRemoteRuntime(fakeRuntime([s1, s2], () => 'h1').rt);
+    try {
+      const { manager, clients } = makeManager(db, events);
+      await manager.spawnCliProcess(turn());
+      await manager.spawnCliProcess(turn({ prompt: 'again', resumeSessionId: 'codex-thread-1' }));
+      // Same host id, new generation: the fingerprint differs → the old machine's process closes, a cold one starts.
+      expect(clients).toHaveLength(2);
+      expect(s1.release).toHaveBeenCalled();
+      expect(s2.release).not.toHaveBeenCalled();
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('B3: a stop while the environment is still preparing starts nothing, settles the turn, and spares the next spawn', async () => {
+    const db = createDb();
+    const events: string[] = [];
+    const s1 = fakeSession(events);
+    const s2 = fakeSession(events);
+    let resolvePrep: (s: RemoteRuntimeSession) => void = () => undefined;
+    const prepare = vi.fn()
+      .mockImplementationOnce(() => new Promise<RemoteRuntimeSession>((r) => { resolvePrep = r; }))
+      .mockImplementationOnce(async () => s2.session);
+    setRemoteRuntime({ resolveHostId: vi.fn(() => 'h1'), prepare, removeRunToken: vi.fn(async () => undefined) });
+    try {
+      const { manager, clients } = makeManager(db, events);
+      const exits: unknown[] = [];
+      manager.on('exit', (e) => exits.push(e));
+      const pending = manager.spawnCliProcess(turn());
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+      await manager.killProcess('panel-1');
+      resolvePrep(s1.session);
+      await expect(pending).resolves.toBeUndefined();
+      expect(clients).toHaveLength(0);
+      expect(s1.spawn).not.toHaveBeenCalled();
+      expect(s1.release).toHaveBeenCalled();
+      expect(exits).toEqual([{ panelId: 'panel-1', sessionId: 'session-1', exitCode: 0, signal: null }]);
+
+      // The cancelled spawn's token is gone: the next one runs normally.
+      await expect(manager.spawnCliProcess(turn())).resolves.toEqual({ resultText: 'Done 1.' });
+      expect(clients).toHaveLength(1);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('B3: a run-scoped stop cancels a preparing lane spawn (spawnKey ≠ panelId)', async () => {
+    const db = createDb();
+    const s1 = fakeSession([]);
+    let resolvePrep: (s: RemoteRuntimeSession) => void = () => undefined;
+    const prepare = vi.fn(() => new Promise<RemoteRuntimeSession>((r) => { resolvePrep = r; }));
+    setRemoteRuntime({ resolveHostId: vi.fn(() => 'h1'), prepare, removeRunToken: vi.fn(async () => undefined) });
+    try {
+      const { manager, clients } = makeManager(db, []);
+      const pending = manager.spawnCliProcess(turn({ panelId: 'run-1', spawnKey: 'run-1:TASK-1' }));
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+      await manager.killProcess('run-1');
+      resolvePrep(s1.session);
+      await expect(pending).resolves.toBeUndefined();
+      expect(clients).toHaveLength(0);
       expect(s1.release).toHaveBeenCalled();
     } finally {
       db.close();

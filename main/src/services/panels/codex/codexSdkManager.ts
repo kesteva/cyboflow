@@ -133,6 +133,17 @@ interface ActiveCodexRun {
 }
 
 /**
+ * A remote spawn's preparation window (SSH round trips) before any activeRuns entry exists: a stop marks this
+ * per-spawn token, and the spawn checks it before starting anything. A fresh token per spawn, so a stale cancel
+ * never poisons the next one.
+ */
+interface PendingRemotePrep {
+  readonly panelId: string;
+  readonly runId: string;
+  cancelled: boolean;
+}
+
+/**
  * The only member the turn lifecycle calls on its events sink. Both the built-in
  * {@link RawEventsSink} and an injected {@link SpawnEventsSink} (global-agent
  * thread) satisfy it, so the two paths share one field.
@@ -365,7 +376,11 @@ function appServerEnvironment(
   runtimeConfig: CodexMcpRuntimeConfig,
   options: ClaudeSpawnerOptions,
 ): NodeJS.ProcessEnv {
-  const env = buildCodexAppServerEnvironment(runId, options.worktreePath, runtimeConfig);
+  const env = {
+    ...buildCodexAppServerEnvironment(runId, options.worktreePath, runtimeConfig),
+    // The per-run artifacts dir (screenshots, prototypes), keyed like CYBOFLOW_RUN_ID — as the Claude manager does.
+    CYBOFLOW_RUN_ARTIFACTS_DIR: getCyboflowSubdirectory('artifacts', 'runs', runId),
+  };
   return options.laneEnv ? { ...env, ...options.laneEnv } : env;
 }
 
@@ -405,7 +420,7 @@ function remoteAppServerEnvironment(
   const laneEnv = options.laneEnv ?? {};
   return remote.session.env(
     { ...buildCodexRemoteAppServerEnvironment(runId, options.worktreePath), ...laneEnv },
-    { extraKeys: Object.keys(laneEnv) },
+    { extraKeys: Object.keys(laneEnv), artifactsDir: remote.session.artifactsDir(runId) },
   );
 }
 
@@ -488,6 +503,10 @@ export class CodexSdkManager extends AbstractCliManager {
   private modelCatalogRequest: Promise<CodexModelCatalog> | null = null;
   /** Role files already written on SSH environments this app session (`<hostId>\0<generation>\0<path>`). */
   private readonly remoteRoleFiles = new Set<string>();
+  /** Run artifacts dirs already created on SSH environments this app session (`<hostId>\0<generation>\0<dir>`). */
+  private readonly remoteArtifactDirs = new Set<string>();
+  /** Remote spawns still preparing their environment, by spawnKey (see PendingRemotePrep). */
+  private readonly pendingRemotePreps = new Map<string, PendingRemotePrep>();
 
   constructor(
     sessionManager: SessionManager,
@@ -852,9 +871,29 @@ export class CodexSdkManager extends AbstractCliManager {
       // Images are spilled to THIS Mac and sent by path (imageSpill.ts).
       throw new Error('Image attachments are not supported for runs on a remote environment yet.');
     }
+    // B3: a stop during the SSH round trips below finds no activeRuns entry — it marks this token instead.
+    const prep: PendingRemotePrep = { panelId: options.panelId, runId, cancelled: false };
+    this.pendingRemotePreps.set(spawnKey, prep);
+    try {
+      return await this.spawnRemotePrepared(options, spawnKey, runId, warmEligible, hostId, prep);
+    } finally {
+      if (this.pendingRemotePreps.get(spawnKey) === prep) this.pendingRemotePreps.delete(spawnKey);
+    }
+  }
+
+  private async spawnRemotePrepared(
+    options: ClaudeSpawnerOptions,
+    spawnKey: string,
+    runId: string,
+    warmEligible: boolean,
+    hostId: string,
+    prep: PendingRemotePrep,
+  ): Promise<CliSpawnOutcome | void> {
     const remote = await prepareRemoteCodexLaunch(requireRemoteRuntime(), hostId, { runId, spawnKey });
     let entry: WarmCodexEntry;
     try {
+      if (prep.cancelled) return this.abandonCancelledPrep(options, remote.session);
+      await this.ensureRemoteArtifactsDir(remote.session, runId);
       const runtimeConfig = remote.runtimeConfig;
       const executable = { executablePath: remote.command, version: remote.version };
       const { roles: agentRoles, roleModels } = await this.resolveRemoteAgentRoles(runId, options, remote.session);
@@ -867,6 +906,7 @@ export class CodexSdkManager extends AbstractCliManager {
         agentRoles,
         remote,
       );
+      if (prep.cancelled) return this.abandonCancelledPrep(options, remote.session);
       if (warmEligible) {
         const existing = this.warmCodexRuns.get(spawnKey);
         if (existing) {
@@ -880,6 +920,7 @@ export class CodexSdkManager extends AbstractCliManager {
         }
       }
       await remote.session.fence?.(); // M2 F1: kill this spawnKey's orphans on the environment (bounded, never throws)
+      if (prep.cancelled) return this.abandonCancelledPrep(options, remote.session);
       entry = this.buildColdEntry(
         options,
         runId,
@@ -898,6 +939,43 @@ export class CodexSdkManager extends AbstractCliManager {
     }
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     return await this.runOneTurnGuarded(entry, options, spawnKey, true);
+  }
+
+  /**
+   * B3: a stop landed while the environment was being prepared. Start nothing, give the lease back and settle like
+   * an aborted turn (an exitCode-0 'exit', resolve void) so nothing awaiting the turn hangs.
+   */
+  private abandonCancelledPrep(options: ClaudeSpawnerOptions, session: RemoteRuntimeSession): void {
+    session.release();
+    this.logger?.info(`[CodexSdkManager] remote spawn for panel ${options.panelId} stopped while preparing the environment`);
+    this.emit('exit', { panelId: options.panelId, sessionId: options.sessionId, exitCode: 0, signal: null });
+  }
+
+  /** Mark every preparing remote spawn of `identity` (spawnKey, panelId or runId; null = all) cancelled. */
+  private cancelPendingRemotePreps(identity: string | null): void {
+    for (const [spawnKey, prep] of this.pendingRemotePreps) {
+      if (identity === null || spawnKey === identity || prep.panelId === identity || prep.runId === identity) {
+        prep.cancelled = true;
+      }
+    }
+  }
+
+  /**
+   * `mkdir -p` the run's CYBOFLOW_RUN_ARTIFACTS_DIR on the environment, once per host generation (as the Claude
+   * remote spawn does). Non-fatal: only screenshots / prototypes need it, and the next spawn retries.
+   */
+  private async ensureRemoteArtifactsDir(session: RemoteRuntimeSession, runId: string): Promise<void> {
+    const dir = session.artifactsDir(runId);
+    const key = `${session.hostId}\0${session.generation}\0${dir}`;
+    if (this.remoteArtifactDirs.has(key)) return;
+    try {
+      await session.fs.mkdirp({ hostId: session.hostId, path: dir });
+      this.remoteArtifactDirs.add(key);
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] could not create the run artifacts dir on the environment: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -1028,7 +1106,8 @@ export class CodexSdkManager extends AbstractCliManager {
       executablePath: executable.executablePath,
       executableVersion: executable.version,
       clientVersion: this.clientVersion,
-      ...(remote ? { host: remote.session.hostId } : {}),
+      // The generation too: an edited SSH target bumps it, so a parked app-server on the old machine is never reused.
+      ...(remote ? { host: remote.session.hostId, hostGeneration: remote.session.generation } : {}),
     }));
   }
 
@@ -1734,6 +1813,7 @@ export class CodexSdkManager extends AbstractCliManager {
    * `activeRuns` entry is cancelled.
    */
   async abortInFlightTurn(identity: string): Promise<void> {
+    this.cancelPendingRemotePreps(identity);
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
       ...(this.spawnKeysByRunId.get(identity) ?? []),
@@ -1748,6 +1828,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   override async killProcess(identity: string): Promise<void> {
+    this.cancelPendingRemotePreps(identity);
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
       ...(this.spawnKeysByRunId.get(identity) ?? []),
@@ -1780,6 +1861,7 @@ export class CodexSdkManager extends AbstractCliManager {
     // alongside the run-scoped processes — they are not in `this.processes`, so
     // the base sweep would otherwise orphan any probe that is mid-flight when the
     // app quits.
+    this.cancelPendingRemotePreps(null);
     const probes = [...this.probeClients];
     this.probeClients.clear();
     // Warm parked app-servers are not in `this.processes` (deleted per logical

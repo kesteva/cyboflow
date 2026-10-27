@@ -278,6 +278,39 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
     expect(fs.existsSync(REMOTE_WT)).toBe(false);
   });
 
+  it('B3: a stop while the environment is still preparing never reaches query(), settles the turn, and spares the next spawn', async () => {
+    process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
+    fakeSdk.setScenario(scenario().systemInit({ sessionId: SDK_SESSION }).assistantText('ok').resultSuccess());
+    const first = createFakeRemoteSession({ runId: 'panel-stop', spawnKey: 'panel-stop' });
+    const second = createFakeRemoteSession({ runId: 'panel-stop', spawnKey: 'panel-stop' });
+    let resolvePrep: (s: FakeRemoteSession) => void = () => undefined;
+    const prepare = vi.fn<RemoteRuntimeLike['prepare']>()
+      .mockImplementationOnce(() => new Promise((r) => { resolvePrep = r; }))
+      .mockImplementationOnce(async () => second);
+    setRemoteRuntime({ resolveHostId: vi.fn(() => null), prepare, removeRunToken: vi.fn(async () => undefined) });
+    const mgr = new ClaudeCodeManager(makeSessionManager('host-1'), undefined, undefined, db);
+    mgr.setOrchSocketPath('/tmp/remote-itest.sock');
+    const exits: Array<{ panelId?: string; exitCode: number | null }> = [];
+    mgr.on('exit', (e: { panelId?: string; exitCode: number | null }) => exits.push(e));
+
+    const pending = mgr.spawnCliProcess({ panelId: 'panel-stop', sessionId: 'session-stop', worktreePath: REMOTE_WT, prompt: 'hello' });
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+    await mgr.killProcess('panel-stop');
+    resolvePrep(first);
+
+    await expect(pending).resolves.toEqual({ resultText: null });
+    expect(fakeSdk.calls).toHaveLength(0);
+    expect(first.fenceCalls).toBe(0);
+    expect(first.released).toBe(true);
+    expect(exits).toEqual([expect.objectContaining({ panelId: 'panel-stop', exitCode: 0 })]);
+
+    // The cancelled spawn's token is gone: the next spawn under the same key runs normally.
+    await expect(mgr.spawnCliProcess({ panelId: 'panel-stop', sessionId: 'session-stop', worktreePath: REMOTE_WT, prompt: 'again' }))
+      .resolves.toEqual({ resultText: 'ok' });
+    expect(fakeSdk.calls).toHaveLength(1);
+    expect(second.released).toBe(true);
+  });
+
   it('leaves a This Mac session unchanged (no spawner, local MCP entry, token in env)', async () => {
     process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
     fakeSdk.setScenario(scenario().systemInit({ sessionId: SDK_SESSION }).assistantText('ok').resultSuccess());

@@ -83,6 +83,7 @@ interface Privates {
     runId: string,
     rules?: MergedPermissionRules,
     hostId?: string | null,
+    hostGeneration?: number | null,
   ): { combined: string; fields: Record<string, string> };
   getBaseProjectMcpServers(sessionId: string): { mcpServers: Record<string, unknown> };
 }
@@ -269,6 +270,20 @@ describe('ClaudeCodeManager — remote spawn branch (M2 B2)', () => {
       const otherCwd = mgr.p.computeOptionsFingerprint({ ...a, cwd: `${REMOTE_WT}-2` }, REMOTE_WT, 'run-r1', NO_RULES, 'host-1');
       expect(otherCwd.fields.cwd).not.toBe(fpA.fields.cwd);
       expect(otherCwd.fields.host).toBe(fpA.fields.host);
+    });
+
+    it('B4: folds the host generation in for a remote spawn (an edited SSH target never reuses the old process)', async () => {
+      const opts = await mgr.p.buildSdkOptions(spawnOpts(), NO_RULES, session);
+      const gen0 = mgr.p.computeOptionsFingerprint(opts, REMOTE_WT, 'run-r1', NO_RULES, 'host-1', 0);
+      const gen0Again = mgr.p.computeOptionsFingerprint(opts, REMOTE_WT, 'run-r1', NO_RULES, 'host-1', 0);
+      const gen1 = mgr.p.computeOptionsFingerprint(opts, REMOTE_WT, 'run-r1', NO_RULES, 'host-1', 1);
+      expect(gen0.combined).toBe(gen0Again.combined);
+      expect(gen1.fields.host).not.toBe(gen0.fields.host);
+      expect(gen1.combined).not.toBe(gen0.combined);
+      // Local is untouched: a generation is meaningless without a host and never enters the hash.
+      const local = mgr.p.computeOptionsFingerprint(opts, REMOTE_WT, 'run-r1', NO_RULES, null, 7);
+      const localPlain = mgr.p.computeOptionsFingerprint(opts, REMOTE_WT, 'run-r1', NO_RULES);
+      expect(local.combined).toBe(localPlain.combined);
     });
   });
 });
