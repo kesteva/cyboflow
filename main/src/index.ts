@@ -4,6 +4,11 @@
 import { installTimerCensus } from './services/timerCensus';
 installTimerCensus();
 
+// Before any service can issue a fetch: Electron's bundled Node predates the
+// CVE-2026-111497 Brotli fix (see brotliFetchGuard.ts).
+import { installBrotliFetchGuard } from './utils/brotliFetchGuard';
+installBrotliFetchGuard();
+
 import { app, BrowserWindow, ipcMain, screen, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
 import { TaskQueue } from './services/taskQueue';
