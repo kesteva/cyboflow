@@ -10,7 +10,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { AgentEntry } from '../../../../../shared/types/agents';
 
@@ -142,7 +142,7 @@ function renderInspector(opts: {
   selectedFanOutInner?: { stepId: string; innerIndex: number } | null;
   agentEntries?: AgentEntry[];
   agentProvider?: 'claude' | 'codex' | 'omp';
-  dispatch?: ReturnType<typeof vi.fn>;
+  dispatch?: Mock;
 }) {
   const dispatch = opts.dispatch ?? vi.fn();
   render(

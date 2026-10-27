@@ -79,7 +79,8 @@ const termMock = {
 let lastTerminalOptions: Record<string, unknown> | undefined;
 
 vi.mock('@xterm/xterm', () => ({
-  Terminal: vi.fn((opts: Record<string, unknown>) => {
+  // `function`, not an arrow: vitest 4 mocks invoked with `new` require a constructable impl.
+  Terminal: vi.fn(function (opts: Record<string, unknown>) {
     lastTerminalOptions = opts;
     termMock.options = { ...opts };
     return termMock;
@@ -87,10 +88,12 @@ vi.mock('@xterm/xterm', () => ({
 }));
 
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: vi.fn(() => ({
-    fit: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  FitAddon: vi.fn(function () {
+    return {
+      fit: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 // ---------------------------------------------------------------------------

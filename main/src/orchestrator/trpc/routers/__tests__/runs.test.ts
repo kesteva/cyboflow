@@ -45,7 +45,7 @@
  *  (a) Filters by runId server-side: emitting two events yields only the
  *      matching runId event to a subscriber.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import type { MockInstance } from 'vitest';
 import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
 import Database from 'better-sqlite3';
@@ -2469,9 +2469,9 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
 
 describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
   let db: Database.Database;
-  let clearApprovals: ReturnType<typeof vi.fn>;
+  let clearApprovals: Mock;
 
-  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
+  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: Mock } {
     return {
       getProjectMainBranch: vi.fn().mockResolvedValue('main'),
       squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
@@ -3135,7 +3135,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (IDEA-030 / TASK-818)', () => {
   let db: Database.Database;
 
-  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
+  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: Mock } {
     return {
       getProjectMainBranch: vi.fn().mockResolvedValue('main'),
       squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
@@ -4217,7 +4217,7 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
 describe('cyboflow.runs.start — double-pull guards (Fix 1 + Fix 6a)', () => {
   let db: Database.Database;
   let adapter: ReturnType<typeof dbAdapter>;
-  let launchMock: ReturnType<typeof vi.fn>;
+  let launchMock: Mock;
 
   beforeEach(() => {
     db = new Database(':memory:');

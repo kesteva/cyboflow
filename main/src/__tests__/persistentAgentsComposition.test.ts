@@ -2,7 +2,7 @@
  * persistentAgentsComposition: boot gating, boot order (requeue before the first pull), the live config
  * toggle (off → on restarts pump, outbox and connector wiring), quit stop, and the wiring context.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import type { ConfigManager } from '../services/configManager';
@@ -45,8 +45,8 @@ let config: FakeConfig;
 let fake: FakeConnector;
 let wiringCalls: string[];
 let ctxSeen: ConnectorWiringContext | null;
-let decrypt: ReturnType<typeof vi.fn>;
-let encrypt: ReturnType<typeof vi.fn>;
+let decrypt: Mock;
+let encrypt: Mock;
 const comps: PersistentAgentsComposition[] = [];
 
 function compose(over: Partial<PersistentAgentsCompositionDeps> = {}): PersistentAgentsComposition {

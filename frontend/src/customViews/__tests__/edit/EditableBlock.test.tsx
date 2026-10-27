@@ -58,7 +58,13 @@ const ITEMS: LayoutItem[] = [
   { instanceId: 'i3', widget: { type: 'catalog', catalogId: 'queue.working' }, settings: {} },
 ];
 
+// The real action, captured before any test swaps in a spy: vitest 3+ makes
+// vi.fn(existingMock) reuse that mock (and its call history), so each test must start
+// from the genuine function rather than the previous test's spy left in the store.
+const realMoveItem = useCustomViewsStore.getState().moveItem;
+
 beforeEach(() => {
+  useCustomViewsStore.setState({ moveItem: realMoveItem });
   draftWithItems(ITEMS);
   publishDraftMutate.mockClear();
   discardDraftMutate.mockClear();

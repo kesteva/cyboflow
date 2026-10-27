@@ -19,7 +19,7 @@
  * Style mirrors cancelRunHandler.test.ts: real in-memory better-sqlite3 DB +
  * injected vi.fn() fakes, no tRPC wiring.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike } from '../types';
@@ -34,11 +34,11 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 
 interface OrderSpy {
   calls: string[];
-  clearPendingApprovalsForRun: ReturnType<typeof vi.fn>;
-  clearPendingQuestionsForRun: ReturnType<typeof vi.fn>;
-  stopLiveRun: ReturnType<typeof vi.fn>;
-  abortProgrammaticWalk: ReturnType<typeof vi.fn>;
-  emitRunStatusChanged: ReturnType<typeof vi.fn>;
+  clearPendingApprovalsForRun: Mock;
+  clearPendingQuestionsForRun: Mock;
+  stopLiveRun: Mock;
+  abortProgrammaticWalk: Mock;
+  emitRunStatusChanged: Mock;
 }
 
 function makeOrderSpy(): OrderSpy {

@@ -7,7 +7,7 @@
  * not on the agent engine is terminalized skipped, and the agent deadline is honored via the existing
  * per-request abort machinery.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import type { ExploreStaleProofFinding } from '../runbookBootstrapPreflight';
 import {
@@ -613,7 +613,7 @@ const TARGET_ONLY_TASK: VerificationTaskV1 = {
 /** A runner stub that records every call and returns a caller-supplied result. */
 function stubRunner(
   result: VerificationAgentRunResult,
-): { runner: VerificationAgentRunnerLike; run: ReturnType<typeof vi.fn> } {
+): { runner: VerificationAgentRunnerLike; run: Mock } {
   const run = vi.fn(async (_req: VerificationAgentRequest) => result);
   return { runner: { run }, run };
 }
@@ -819,7 +819,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook, kill 
   /** Initialize a scheduler with a stub runner; returns the run spy. */
   function initWith(
     opts: Partial<Parameters<typeof VerificationScheduler.initialize>[0]> = {},
-  ): { scheduler: VerificationScheduler; run: ReturnType<typeof vi.fn> } {
+  ): { scheduler: VerificationScheduler; run: Mock } {
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
@@ -1061,7 +1061,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook, kill 
 describe('VerificationScheduler — §3.6 budget accounting', () => {
   function initWith(result: VerificationAgentRunResult): {
     scheduler: VerificationScheduler;
-    run: ReturnType<typeof vi.fn>;
+    run: Mock;
   } {
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
@@ -1215,9 +1215,9 @@ describe('VerificationScheduler — §3.1 classification + §3.4 capability feed
     result: VerificationAgentRunResult,
     opts: {
       store?: VerifyCapabilityStore;
-      capabilityFinding?: ReturnType<typeof vi.fn>;
+      capabilityFinding?: Mock;
     } = {},
-  ): { scheduler: VerificationScheduler; run: ReturnType<typeof vi.fn> } {
+  ): { scheduler: VerificationScheduler; run: Mock } {
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
@@ -1738,7 +1738,7 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
   function initWith(
     store: VerifyRunbookStore | undefined,
     result: VerificationAgentRunResult = PASS_RESULT,
-  ): { scheduler: VerificationScheduler; run: ReturnType<typeof vi.fn> } {
+  ): { scheduler: VerificationScheduler; run: Mock } {
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),

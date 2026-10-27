@@ -24,7 +24,7 @@
  *     extracted helper (tested directly, without the tRPC wrapper, to avoid
  *     wiring the full tRPC context).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
@@ -66,11 +66,11 @@ function seedWorkflowAndRun(
 
 interface OrderSpy {
   calls: string[];
-  clearPendingForRun: ReturnType<typeof vi.fn>;       // approvalRouter
-  clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
-  managerStop: ReturnType<typeof vi.fn>;
-  worktreeRemove: ReturnType<typeof vi.fn>;
-  deletePendingDraftsForRun: ReturnType<typeof vi.fn>; // F5 sweep
+  clearPendingForRun: Mock;       // approvalRouter
+  clearQuestionsForRun: Mock;     // questionRouter
+  managerStop: Mock;
+  worktreeRemove: Mock;
+  deletePendingDraftsForRun: Mock; // F5 sweep
 }
 
 function makeOrderSpy(): OrderSpy {

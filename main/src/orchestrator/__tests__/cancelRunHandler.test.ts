@@ -16,7 +16,7 @@
  * Style mirrors cancelAndRestart.test.ts: real in-memory better-sqlite3 DB +
  * injected vi.fn() fakes, no tRPC wiring.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { rollupRunUsage } from '../runUsageRollup';
 
 // The fold is covered by runUsageRollup.test.ts; here only WHEN cancel asks for it.
@@ -35,10 +35,10 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 
 interface OrderSpy {
   calls: string[];
-  clearPendingApprovalsForRun: ReturnType<typeof vi.fn>;
-  clearPendingQuestionsForRun: ReturnType<typeof vi.fn>;
-  stopLiveRun: ReturnType<typeof vi.fn>;
-  emitRunStatusChanged: ReturnType<typeof vi.fn>;
+  clearPendingApprovalsForRun: Mock;
+  clearPendingQuestionsForRun: Mock;
+  stopLiveRun: Mock;
+  emitRunStatusChanged: Mock;
 }
 
 function makeOrderSpy(): OrderSpy {
