@@ -9,7 +9,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
 import type { AgentThread, AgentProposal } from '../../../../../shared/types/agentThread';
 import { useOnboardingStore } from '../../../stores/onboardingStore';
@@ -66,6 +66,13 @@ async function loadIdeaProposalsStep(): Promise<ComponentType<{
 }
 
 const PROJECT = { id: 7, name: 'dogwalkr' };
+
+// Pay the cold transform of AgentThreadView's module graph once, under its own
+// budget: under full-suite load it alone can exceed a test's 5s timeout. The
+// transform cache survives vi.resetModules(), so each test's re-import is cheap.
+beforeAll(async () => {
+  await loadIdeaProposalsStep();
+}, 30_000);
 
 beforeEach(() => {
   vi.resetModules();
