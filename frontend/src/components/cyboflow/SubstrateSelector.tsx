@@ -57,6 +57,7 @@ import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapa
 import { useAgentProviderAccess, useSurfacedProviderBaseline } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
+import { isRemoteLaunchRuntime } from '../agentsEnv/hostLaunchability';
 import {
   workflowRuntimeForLaunch,
   type LaunchAgentRuntime,
@@ -124,6 +125,11 @@ interface SubstrateSelectorProps {
   caveatsTestId?: string;
   /** Which launch surface owns the runtime choice. Codex/OMP/Pi CLI are session-only. */
   runtimeScope?: 'workflow' | 'session' | 'mixed';
+  /**
+   * Label of the remote environment the launch targets, or null/undefined for This Mac. A remote environment runs
+   * only the SDK runtimes, so every other lane renders disabled with that reason instead of staying clickable.
+   */
+  remoteEnvironment?: string | null;
 }
 
 type RuntimeMode = 'chat' | 'cli';
@@ -285,6 +291,7 @@ export function SubstrateSelector({
   label = 'Runtime',
   caveatsTestId = 'substrate-caveats',
   runtimeScope = 'workflow',
+  remoteEnvironment = null,
 }: SubstrateSelectorProps): React.JSX.Element {
   // Global forced-substrate pin (see file header), mirroring the backend
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
@@ -301,6 +308,9 @@ export function SubstrateSelector({
   const selectedProvider = providerForRuntime(value);
   const selectedMode = modeForRuntime(value, omp);
   const selectedLanes = lanesForProvider(selectedProvider, omp);
+  const remoteReason = remoteEnvironment !== null ? `not available on ${remoteEnvironment}` : null;
+  const offerable = (runtime: LaunchAgentRuntime): boolean =>
+    isCellOfferable(runtime, runtimeScope, omp) && (remoteReason === null || isRemoteLaunchRuntime(runtime));
 
   // Under the interactive lock, keep the controlled value consistent so the
   // launch payload matches the backend pin. Scoped to 'interactive' only: demo's
@@ -326,7 +336,7 @@ export function SubstrateSelector({
     AGENT_PROVIDERS.flatMap((p) => {
       const lanes = lanesForProvider(p, omp);
       return lanes.cli !== undefined ? [lanes.chat, lanes.cli] : [lanes.chat];
-    }).filter((r) => isCellOfferable(r, runtimeScope, omp)),
+    }).filter(offerable),
   );
   useEffect(() => {
     if (isRuntimeProviderEnabled(providerAccess, value)) return;
@@ -394,10 +404,8 @@ export function SubstrateSelector({
             // A provider none of whose lanes is currently pickable (scope +
             // availability) renders DISABLED with the reason in its tooltip —
             // visible-but-unpickable, exactly like the old fleet option row.
-            const anyOfferable =
-              isCellOfferable(lanes.chat, runtimeScope, omp) ||
-              (lanes.cli !== undefined && isCellOfferable(lanes.cli, runtimeScope, omp));
-            const reason = unavailableReason(lanes.chat, omp);
+            const anyOfferable = offerable(lanes.chat) || (lanes.cli !== undefined && offerable(lanes.cli));
+            const reason = unavailableReason(lanes.chat, omp) ?? remoteReason;
             const selected = provider === selectedProvider;
             return (
               <button
@@ -415,9 +423,9 @@ export function SubstrateSelector({
                   const preferred =
                     selectedMode === 'cli' && lanes.cli !== undefined ? lanes.cli : lanes.chat;
                   const alternate = preferred === lanes.chat ? lanes.cli : lanes.chat;
-                  const next = isCellOfferable(preferred, runtimeScope, omp)
+                  const next = offerable(preferred)
                     ? preferred
-                    : alternate !== undefined && isCellOfferable(alternate, runtimeScope, omp)
+                    : alternate !== undefined && offerable(alternate)
                       ? alternate
                       : null;
                   if (next !== null && isRuntimeProviderEnabled(providerAccess, next)) {
@@ -438,7 +446,7 @@ export function SubstrateSelector({
           lane — and the Aria-mode OMP column has no CLI lane at all — so a
           permanently-greyed CLI segment would just beg the question; hide the
           whole row instead (the scope help below still names the rule). */}
-      {selectedLanes.cli !== undefined && isCellOfferable(selectedLanes.cli, runtimeScope, omp) && (
+      {selectedLanes.cli !== undefined && offerable(selectedLanes.cli) && (
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-text-secondary">Mode</span>
           <div className="flex gap-1.5" role="radiogroup" aria-label="Mode" id={`${id}-mode`}>
@@ -454,10 +462,7 @@ export function SubstrateSelector({
                   aria-checked={selected}
                   data-testid={`${id}-mode-${mode}`}
                   onClick={() => {
-                    if (
-                      isCellOfferable(runtime, runtimeScope, omp) &&
-                      isRuntimeProviderEnabled(providerAccess, runtime)
-                    ) {
+                    if (offerable(runtime) && isRuntimeProviderEnabled(providerAccess, runtime)) {
                       onChange(runtime);
                     }
                   }}
@@ -474,6 +479,12 @@ export function SubstrateSelector({
       {selectedChatReason !== null && (
         <p className="text-xs text-status-warning" data-testid={`${id}-unavailable-note`}>
           {AGENT_RUNTIME_LABELS[selectedLanes.chat]} is not launchable yet — {selectedChatReason}.
+        </p>
+      )}
+
+      {remoteEnvironment !== null && (
+        <p className="text-xs text-text-tertiary" data-testid={`${id}-remote-note`}>
+          {remoteEnvironment} runs Claude and Codex in Chat mode only.
         </p>
       )}
 

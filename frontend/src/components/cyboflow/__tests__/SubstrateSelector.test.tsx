@@ -449,3 +449,26 @@ describe('SubstrateSelector — OMP + Pi caveats copy (v1 limits)', () => {
     expect(screen.queryByTestId('substrate-caveats')).not.toBeInTheDocument();
   });
 });
+
+describe('SubstrateSelector — remote environment', () => {
+  it('offers only the SDK lanes: no CLI mode, non-SDK providers disabled with the reason', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
+    const onChange = vi.fn();
+    render(<SubstrateSelector value="claude-sdk" onChange={onChange} runtimeScope="session" remoteEnvironment="Cybo-mbp" />);
+
+    expect(screen.queryByRole('radiogroup', { name: 'Mode' })).not.toBeInTheDocument();
+    const omp = screen.getByTestId('substrate-select-provider-omp');
+    expect(omp).toBeDisabled();
+    expect(omp).toHaveAttribute('title', 'not available on Cybo-mbp');
+    expect(screen.getByTestId('substrate-select-provider-codex')).not.toBeDisabled();
+    expect(screen.getByTestId('substrate-select-remote-note')).toHaveTextContent('Cybo-mbp runs Claude and Codex in Chat mode only.');
+    fireEvent.click(omp);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps the CLI mode on This Mac', () => {
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" remoteEnvironment={null} />);
+    expect(screen.getByRole('radiogroup', { name: 'Mode' })).toBeInTheDocument();
+    expect(screen.queryByTestId('substrate-select-remote-note')).not.toBeInTheDocument();
+  });
+});

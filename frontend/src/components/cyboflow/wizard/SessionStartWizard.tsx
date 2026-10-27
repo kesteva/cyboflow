@@ -1003,6 +1003,8 @@ export default function SessionStartWizard(): React.JSX.Element {
     selection?.kind === 'quick' || selection?.kind === 'workflow' ? envSelection.requestHostId : undefined;
   // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
   const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
+  const remoteEnvironmentLabel =
+    remoteHostId !== null ? (envSelection.hosts.find((h) => h.id === remoteHostId)?.label ?? 'this environment') : null;
   useEffect(() => {
     if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
   }, [runtimeNeedsRemoteCoercion, reseedAgentRuntime]);
@@ -2184,6 +2186,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 id="wizard-substrate"
                 caveatsTestId="wizard-substrate-caveats"
                 runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
+                remoteEnvironment={remoteEnvironmentLabel}
               />
             )}
 

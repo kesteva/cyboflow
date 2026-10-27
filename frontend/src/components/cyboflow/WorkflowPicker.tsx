@@ -946,6 +946,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         id="workflow-picker-substrate"
         caveatsTestId="workflow-picker-substrate-caveats"
         runtimeScope="mixed"
+        remoteEnvironment={
+          remoteHostId !== null ? (envSelection.hosts.find((h) => h.id === remoteHostId)?.label ?? 'this environment') : null
+        }
       />
 
       {/* Session permission selector — an explicit choice permanently sets the
