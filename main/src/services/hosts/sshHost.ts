@@ -326,6 +326,12 @@ export class SshHost implements ExecutionHost {
 
     const gitRun = (cwd: HostPath, args: string[], opts: ExecOptions = {}): Promise<ExecResult> => {
       const dir = guard(cwd);
+      // The probed tool PATH (Homebrew git etc.) goes first; a caller's env is layered over it, never replacing it
+      // wholesale. Without it a Mac with broken Command Line Tools resolves `git` to the /usr/bin shim.
+      const probedPath = facts()?.path;
+      if (probedPath) {
+        return execOn(['git', ...args], { ...opts, cwd: dir, env: { PATH: probedPath, ...opts.env } });
+      }
       if (opts.env === undefined) {
         return t.exec(target, remoteSh(SSH_HOST_PROGRAMS.git, dir, ...args), {
           timeoutMs: opts.timeoutMs, signal: opts.signal, stdin: opts.stdin,

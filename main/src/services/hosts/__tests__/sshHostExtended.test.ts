@@ -90,6 +90,19 @@ describe('SshHost exec with cwd / env (wrapper prelude, never argv)', () => {
   });
 });
 
+describe('SshHost git with probed facts', () => {
+  const facts: RemoteHostFacts = { remoteRoot: '/Users/k/cf', home: '/Users/k', path: '/opt/homebrew/bin:/usr/bin:/bin' };
+  it('runs git under the probed PATH, with and without caller env', async () => {
+    const { transport, calls } = recording();
+    const h = host(transport, { facts });
+    await h.git.run({ hostId: 'h1', path: '~/r' }, ['status']);
+    expect(calls[0].argv.slice(3)).toEqual(['sh', '~/r', '', '', 'git', 'status']);
+    expect(calls[0].opts?.stdin).toBe('PATH=/opt/homebrew/bin:/usr/bin:/bin\n\n');
+    await h.git.run({ hostId: 'h1', path: '~/r' }, ['commit'], { env: { GIT_AUTHOR_NAME: 'A' } });
+    expect(calls[1].opts?.stdin).toBe('PATH=/opt/homebrew/bin:/usr/bin:/bin\nGIT_AUTHOR_NAME=A\n\n');
+  });
+});
+
 describe('SshHost git.capture (runGitCapture parity)', () => {
   it('returns both streams on exit 0 and throws HostGitCommandError with code + redacted stderr tail otherwise', async () => {
     const ok = recording(() => ({ stdout: 'abc\n', stderr: 'warn\n' }));
