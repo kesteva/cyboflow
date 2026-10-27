@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,11 +54,11 @@ function fakeHost(id: string) {
       runs.push({ d, onCheck, signal });
       return d.promise;
     }),
-  } as unknown as ExecutionHost & { preflight: ReturnType<typeof vi.fn> };
+  } as unknown as ExecutionHost & { preflight: Mock };
   return { host, runs };
 }
 
-function fakeTerminals(): HostTerminalsLike & Record<keyof HostTerminalsLike, ReturnType<typeof vi.fn>> {
+function fakeTerminals(): HostTerminalsLike & Record<keyof HostTerminalsLike, Mock> {
   return {
     open: vi.fn((hostId: string) => `host::${hostId}::t1`),
     write: vi.fn(),
@@ -76,14 +76,14 @@ const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 let raw: Database.Database;
 let store: HostStore;
 let hosts: Map<string, ReturnType<typeof fakeHost>>;
-let registry: { get: ReturnType<typeof vi.fn>; invalidate: ReturnType<typeof vi.fn>; closeAllMasters: ReturnType<typeof vi.fn> };
+let registry: { get: Mock; invalidate: Mock; closeAllMasters: Mock };
 let terminals: ReturnType<typeof fakeTerminals>;
 let env: NodeJS.ProcessEnv;
 let enabled: boolean;
 let available: boolean;
 let changes: HostsChangedEvent[];
 let logger: LoggerLike;
-let captureError: ReturnType<typeof vi.fn>;
+let captureError: Mock;
 let service: HostsService;
 let ids = 0;
 const onChange = (e: HostsChangedEvent): void => { changes.push(e); };

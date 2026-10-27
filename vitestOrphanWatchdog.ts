@@ -108,6 +108,27 @@ export function isForkPoolWorker(title: string, mainThread: boolean): boolean {
   return mainThread && isVitestWorkerTitle(title);
 }
 
+/**
+ * Vitest <= 3 (tinypool) titled each fork worker `node (vitest N)`; vitest 4 replaced
+ * tinypool with its own pool and sets no process title at all. Every layer of the
+ * orphan defence (this watchdog, the `ps` scan in `vitestForkCap.ts`, the main-process
+ * `VitestOrphanReaper`) recognises workers BY that title, so we apply it ourselves.
+ * `VITEST_POOL_ID` is set by vitest's worker bootstrap (before setup files run) and
+ * only in pool workers; the main-thread guard keeps worker-threads pools untouched.
+ */
+export function titleVitestForkWorker(
+  mainThread: boolean = isMainThread,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const poolId = env.VITEST_POOL_ID;
+  if (!mainThread || poolId === undefined || !/^\d+$/.test(poolId)) return;
+  try {
+    process.title = `node (vitest ${poolId})`;
+  } catch {
+    // Cosmetic for everything but the title-keyed reapers; never fail the gate.
+  }
+}
+
 /** Default spawner: a real worker thread, unref'd so it never holds us open. */
 function defaultSpawn(source: string): WatchdogHandle {
   const worker = new Worker(source, { eval: true });
@@ -128,8 +149,9 @@ function defaultSpawn(source: string): WatchdogHandle {
  * two layers still cover it.
  */
 export function startOrphanWatchdog(deps: OrphanWatchdogDeps = {}): (() => void) | undefined {
-  const title = deps.title ?? process.title;
   const mainThread = deps.mainThread ?? isMainThread;
+  if (deps.title === undefined) titleVitestForkWorker(mainThread);
+  const title = deps.title ?? process.title;
   if (!isForkPoolWorker(title, mainThread)) return undefined;
 
   const intervalMs = deps.intervalMs ?? ORPHAN_POLL_INTERVAL_MS;

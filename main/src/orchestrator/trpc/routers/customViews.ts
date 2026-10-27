@@ -88,11 +88,11 @@ function mapServiceError(err: unknown): TRPCError {
 const surfaceSchema = z.enum(CUSTOM_VIEW_SURFACES);
 const idSchema = z.string().min(1);
 const refreshSecSchema = z.number().int().min(WIDGET_LIMITS.minRefreshSec).max(WIDGET_LIMITS.maxRefreshSec);
-const settingsSchema = z.record(scalarSchema);
+const settingsSchema = z.record(z.string(), scalarSchema);
 const contextSchema = z.object({ projectId: z.number().int().positive().nullable() });
 
 /** `WidgetRef | { inline: WidgetSpec } | { draftOf: string }` — §4.6's `runWidget`/`resetBreaker` `widget` input. */
-const runWidgetRefSchema: z.ZodType<RunWidgetRef> = z.union([
+const runWidgetRefSchema: z.ZodType<RunWidgetRef, RunWidgetRef> = z.union([
   z.object({ type: z.literal('catalog'), catalogId: idSchema }),
   z.object({ type: z.literal('custom'), widgetId: idSchema }),
   z.object({ inline: widgetSpecSchema }),

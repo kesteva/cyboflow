@@ -33,7 +33,7 @@ const toolUseBlockSchema = z.object({
   type: z.literal('tool_use'),
   id: z.string(),
   name: z.string(),
-  input: z.record(z.unknown()),
+  input: z.record(z.string(), z.unknown()),
 });
 
 const thinkingBlockSchema = z.object({
@@ -100,11 +100,11 @@ const systemInitSchema = z.object({
   // captures modeled them as name→definition maps. Accept both so a real SDK
   // `system/init` (which always carries `skills` as an array) narrows instead of
   // falling through to `{kind:'__unknown__'}`. Surfaced by the sdkContract keystone.
-  agents: z.union([z.record(z.unknown()), z.array(z.string())]).optional(),
+  agents: z.union([z.record(z.string(), z.unknown()), z.array(z.string())]).optional(),
   betas: z.array(z.string()).optional(),
   slash_commands: z.array(z.string()).optional(),
   output_style: z.string().optional(),
-  skills: z.union([z.record(z.unknown()), z.array(z.string())]).optional(),
+  skills: z.union([z.record(z.string(), z.unknown()), z.array(z.string())]).optional(),
   plugins: z.array(z.object({ name: z.string(), path: z.string() }).passthrough()).optional(),
 });
 
@@ -207,7 +207,7 @@ const systemTaskUpdatedSchema = z.object({
   type: z.literal('system'),
   subtype: z.literal('task_updated'),
   task_id: z.string(),
-  patch: z.record(z.unknown()),
+  patch: z.record(z.string(), z.unknown()),
   uuid: z.string().optional(),
   session_id: z.string().optional(),
 });
@@ -358,11 +358,11 @@ const resultBaseFields = {
     output_tokens: z.number().optional(),
   }).passthrough().optional(),
   /** camelCase on the wire per SamSaffron CLI spec — intentional exception */
-  modelUsage: z.record(z.unknown()).optional(),
+  modelUsage: z.record(z.string(), z.unknown()).optional(),
   permission_denials: z.array(z.object({
     tool_name: z.string(),
     tool_use_id: z.string(),
-    tool_input: z.record(z.unknown()),
+    tool_input: z.record(z.string(), z.unknown()),
   }).passthrough()).optional(),
   session_id: z.string().optional(),
   uuid: z.string().optional(),
@@ -432,7 +432,7 @@ const streamEventSchema = z.object({
       thinking: z.string().optional(),
     }).passthrough().optional(),
     content_block: z.object({ type: z.string() }).passthrough().optional(),
-    message: z.record(z.unknown()).optional(),
+    message: z.record(z.string(), z.unknown()).optional(),
   }).passthrough(),
   parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),

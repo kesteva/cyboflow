@@ -6,7 +6,7 @@
  * telemetry alone left the user with a blank terminal, so a report that does
  * not also reach the session is a half-fixed bug.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 
 const captureSeamError = vi.fn();
 vi.mock('../../services/telemetry', () => ({
@@ -15,7 +15,7 @@ vi.mock('../../services/telemetry', () => ({
 
 import { reportEagerSpawnFailure, eagerSpawnFailureCopy } from '../eagerSpawnFailure';
 
-function makeSurface(): { sessionManager: { addSessionError: ReturnType<typeof vi.fn> }; sessionId: string } {
+function makeSurface(): { sessionManager: { addSessionError: Mock }; sessionId: string } {
   return { sessionManager: { addSessionError: vi.fn() }, sessionId: 'sess-001' };
 }
 

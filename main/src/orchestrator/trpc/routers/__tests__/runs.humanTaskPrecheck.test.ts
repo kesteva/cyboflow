@@ -14,7 +14,7 @@
  * degrades PERMISSIVELY on a schema missing its columns, which would make every
  * assertion here vacuous.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -72,7 +72,7 @@ function seedTask(
 describe('cyboflow.runs.start — human tasks get their own ineligibility reason', () => {
   let db: Database.Database;
   let adapter: ReturnType<typeof dbAdapter>;
-  let launchMock: ReturnType<typeof vi.fn>;
+  let launchMock: Mock;
 
   beforeEach(() => {
     db = buildDb();

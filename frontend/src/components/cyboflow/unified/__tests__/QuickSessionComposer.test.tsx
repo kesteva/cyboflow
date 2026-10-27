@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { useRef, useState } from 'react';
 
 // Mock the panel-model fetch + the interactive send transport + the
@@ -116,14 +116,14 @@ function makeSession(over: Partial<Session> = {}): Session {
 function Harness(props: {
   session: Session;
   interactive: boolean;
-  handleSendInput?: ReturnType<typeof vi.fn>;
-  handleContinueConversation?: ReturnType<typeof vi.fn>;
+  handleSendInput?: Mock;
+  handleContinueConversation?: Mock;
   onPermissionApplied?: (message: string) => void;
   onModelFallback?: (message: string) => void;
   onFastModeDeclined?: (message: string) => void;
   activeQuestion?: Question | null;
   working?: boolean;
-  handleStopSession?: ReturnType<typeof vi.fn>;
+  handleStopSession?: Mock;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -560,7 +560,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
 });
 
 describe('QuickSessionComposer — declined fast-mode toast', () => {
-  async function pushNotice(onFastModeDeclined: ReturnType<typeof vi.fn>, notice: unknown) {
+  async function pushNotice(onFastModeDeclined: Mock, notice: unknown) {
     render(
       <Harness
         session={makeSession({ status: 'stopped' })}

@@ -19,7 +19,7 @@
  *     applies buffered events (on top of empty state); post-seed events apply
  *     directly, with no buffering.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import type {
   FeedbackBatch,
@@ -58,11 +58,11 @@ let lastOnStarted: (() => void) | null;
  * subscribe-before-seed ordering test).
  */
 let autoStart: boolean;
-let unsubscribeSpy: ReturnType<typeof vi.fn>;
-let subscribeSpy: ReturnType<typeof vi.fn>;
-let listQuerySpy: ReturnType<typeof vi.fn>;
-let createCommentSpy: ReturnType<typeof vi.fn>;
-let sendBatchSpy: ReturnType<typeof vi.fn>;
+let unsubscribeSpy: Mock;
+let subscribeSpy: Mock;
+let listQuerySpy: Mock;
+let createCommentSpy: Mock;
+let sendBatchSpy: Mock;
 
 vi.mock('../../trpc/client', () => {
   return {

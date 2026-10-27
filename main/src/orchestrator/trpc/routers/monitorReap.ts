@@ -67,7 +67,7 @@ function requireProvider(): MonitorReapProvider {
   return _provider;
 }
 
-const selectionSchema: z.ZodType<ReapSelection> = z.discriminatedUnion('kind', [
+const selectionSchema: z.ZodType<ReapSelection, ReapSelection> = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('row'),
     worktreePaths: z.array(z.string().min(1)).optional(),

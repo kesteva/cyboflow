@@ -111,7 +111,7 @@ export const workflowStepSchema = z.object({
       label: z.string().min(1, 'outputArtifact.label is required'),
     })
     .optional(),
-}) satisfies z.ZodType<WorkflowStep>;
+}) satisfies z.ZodType<WorkflowStep, WorkflowStep>;
 
 /**
  * A phase: kebab id, non-empty label, hex colour, and at least one step.
@@ -123,7 +123,7 @@ export const workflowPhaseSchema = z.object({
   label: z.string().min(1, 'phase label is required'),
   color: hexColor,
   steps: z.array(workflowStepSchema).min(1, 'a phase must have at least one step'),
-}) satisfies z.ZodType<WorkflowPhase>;
+}) satisfies z.ZodType<WorkflowPhase, WorkflowPhase>;
 
 /**
  * A workflow-scoped custom agent — full replacement copy. Mirrors
@@ -135,7 +135,7 @@ const workflowAgentCustomCopySchema = z.object({
   systemPrompt: z.string().min(1, 'agent systemPrompt is required'),
   tools: z.array(z.enum(CLI_TOOLS)),
   enabledMcps: z.array(z.string()),
-}) satisfies z.ZodType<WorkflowAgentCustomCopy>;
+}) satisfies z.ZodType<WorkflowAgentCustomCopy, WorkflowAgentCustomCopy>;
 
 /**
  * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
@@ -175,7 +175,7 @@ const workflowAgentConfigSchema = z
           'agentConfigs entry must set "model", "custom", "runtime", "providerModel" (or the deprecated "codexModel"), "effort", and/or "promptAddendum" — an empty {} config must be pruned before persisting',
       });
     }
-  }) satisfies z.ZodType<WorkflowAgentConfig>;
+  }) satisfies z.ZodType<WorkflowAgentConfig, WorkflowAgentConfig>;
 
 /**
  * Full definition: non-empty id and at least one phase, plus cross-cutting
@@ -285,7 +285,7 @@ export const workflowDefinitionSchema = z
         });
       }
     }
-  }) satisfies z.ZodType<WorkflowDefinition>;
+  }) satisfies z.ZodType<WorkflowDefinition, WorkflowDefinition>;
 
 // ---------------------------------------------------------------------------
 // Compile-time drift bridge

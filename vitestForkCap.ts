@@ -118,7 +118,21 @@ export function reapOrphans(
 }
 
 /**
- * The `pool`/`poolOptions` slice to spread into a vitest `test` config. Empty
+ * Vitest <= 3 titled its root `node (vitest)`; vitest 4 sets no title. The gate
+ * counter ({@link scanVitestProcesses}) and the orphan reaper tell a root from a
+ * worker by title, so the config (evaluated in the root process) applies it. Call
+ * from every vitest config.
+ */
+export function titleVitestRoot(): void {
+  try {
+    process.title = 'node (vitest)';
+  } catch {
+    // Cosmetic outside the title-keyed scan; never fail config load over it.
+  }
+}
+
+/**
+ * The `pool`/`maxWorkers` slice (vitest 4 flattened `poolOptions.forks.maxForks`) to spread into a vitest `test` config. Empty
  * when no cap applies, so an unmanaged run keeps vitest's own pool defaults
  * untouched rather than being pinned to `forks`.
  *
@@ -135,7 +149,9 @@ export function forkPoolOptions(
   kill?: (pid: number) => void,
 ):
   | Record<string, never>
-  | { pool: 'forks'; poolOptions: { forks: { maxForks: number; minForks: number } } } {
+  | { pool: 'forks'; maxWorkers: number } {
+  // Before the scan, so this root counts itself exactly as it did under vitest 2.
+  titleVitestRoot();
   const scan = scanVitestProcesses(listProcessLines);
 
   let survivingOrphans = scan.orphanPids.length;
@@ -157,5 +173,5 @@ export function forkPoolOptions(
     orphanWorkers: survivingOrphans,
   });
   if (maxForks === undefined) return {};
-  return { pool: 'forks', poolOptions: { forks: { maxForks, minForks: 1 } } };
+  return { pool: 'forks', maxWorkers: maxForks };
 }

@@ -21,8 +21,7 @@
       "msgpackr-extract"
     ],
     "patchedDependencies": {
-      "trpc-electron@0.1.2": "patches/trpc-electron@0.1.2.patch",
-      "app-builder-lib@26.0.20": "patches/app-builder-lib@26.0.20.patch"
+      "trpc-electron@0.1.2": "patches/trpc-electron@0.1.2.patch"
     },
     "overrides": {
       "node-abi": "^4.35.0",
@@ -53,6 +52,7 @@
       "uuid@11": "^11.1.1",
       "@opentelemetry/core@2": "^2.8.0",
       "dompurify@3": "^3.4.17",
+      "@steipete/peekaboo-mcp>zod": "^4.6.6",
       "shell-quote@1": "^1.9.0",
       "lodash@4": "^4.18.0",
       "undici@6": "^6.29.1",
@@ -60,7 +60,7 @@
       "rollup@4": "^4.59.0",
       "picomatch@4": "^4.0.4",
       "flatted@3": "^3.4.2",
-      "minimatch@3": "^3.1.4",
+      "minimatch@3": "^3.1.5",
       "minimatch@5": "^5.1.8",
       "brace-expansion@1": "^1.1.21",
       "@xmldom/xmldom@0.8": "^0.8.15",
@@ -73,7 +73,6 @@
       "fflate@0.8": "^0.8.3",
       "fast-copy@4": "^4.1.0",
       "esbuild@0.28": "^0.28.1",
-      "vite@5": "^5.4.21",
       "@eslint/plugin-kit@0.3": "^0.3.4",
       "@tootallnate/once@2": "^2.0.1",
       "@babel/core@7": "^7.29.6",
@@ -141,7 +140,7 @@
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
     "uuid": "^13.0.2",
-    "zod": "^3.23.8"
+    "zod": "^4.6.6"
   },
   "optionalDependencies": {
     "@steipete/peekaboo-mcp": "2.0.3"
@@ -154,7 +153,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "concurrently": "^9.1.0",
     "electron": "^44.9.3",
-    "electron-builder": "^26.0.20",
+    "electron-builder": "^26.18.0",
     "node-abi": "^4.35.0",
     "tsx": "^4.22.0"
   },

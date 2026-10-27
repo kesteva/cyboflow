@@ -12,11 +12,12 @@
  * phase and no main-thread callback can run. That was verified against a live
  * orphan — see the module header.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
   isForkPoolWorker,
   startOrphanWatchdog,
+  titleVitestForkWorker,
   ORPHAN_POLL_INTERVAL_MS,
   WATCHDOG_THREAD_SOURCE,
   type OrphanWatchdogDeps,
@@ -118,5 +119,28 @@ describe('WATCHDOG_THREAD_SOURCE', () => {
   it('triggers only on ppid 1', () => {
     expect(WATCHDOG_THREAD_SOURCE).toContain('process.ppid === ORPHAN_PPID');
     expect(WATCHDOG_THREAD_SOURCE).toContain('const ORPHAN_PPID = 1;');
+  });
+});
+
+// vitest 4 stopped titling its fork workers; the watchdog and both reapers key on
+// `node (vitest N)`, so the setup path applies it from VITEST_POOL_ID.
+describe('titleVitestForkWorker', () => {
+  const originalTitle = process.title;
+  afterEach(() => {
+    process.title = originalTitle;
+  });
+
+  it('titles a main-thread pool worker from its pool id', () => {
+    titleVitestForkWorker(true, { VITEST_POOL_ID: '7' });
+    expect(isForkPoolWorker(process.title, true)).toBe(true);
+    expect(process.title.trim()).toBe('node (vitest 7)');
+  });
+
+  it('leaves the title alone off the main thread or without a numeric pool id', () => {
+    process.title = 'unchanged';
+    titleVitestForkWorker(false, { VITEST_POOL_ID: '7' });
+    titleVitestForkWorker(true, {});
+    titleVitestForkWorker(true, { VITEST_POOL_ID: 'x' });
+    expect(process.title).toBe('unchanged');
   });
 });

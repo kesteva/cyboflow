@@ -40,10 +40,14 @@ vi.mock('../../orchestrator/dynamicWorkflows', () => ({
 }));
 
 vi.mock('../../services/worktreeChangeNotifier', () => ({
-  WorktreeChangeNotifier: vi.fn().mockImplementation(() => ({
-    watch: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  // vitest 4: a mock used with `new` needs a `function`/class implementation
+  // (an arrow function is not a constructor).
+  WorktreeChangeNotifier: vi.fn().mockImplementation(function () {
+    return {
+      watch: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock('../../orchestrator/taskChangeRouter', () => ({
