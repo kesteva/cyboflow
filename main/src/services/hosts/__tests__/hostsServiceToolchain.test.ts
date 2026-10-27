@@ -459,10 +459,36 @@ describe('prelaunch', () => {
     expect(await p).toMatchObject({ ok: false, code: 'link-down' });
   });
 
-  it('a fresh full check that fails the gate refuses without any live round trip', async () => {
-    const id = await addWith((h) => result(h, { detectedTier: 'cli', runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false } }, { 'sdk-binary-hash': 'warn' }));
+  it('a recent full check that fails the gate refuses without any round trip', async () => {
+    const id = await addWith((h) => result(h, { finishedAt: new Date().toISOString(), detectedTier: 'cli', runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false } }, { 'sdk-binary-hash': 'warn' }));
     const runs = hostFor(id).runs.length;
     expect(await service.prelaunch(id, 'claude-sdk')).toMatchObject({ ok: false, code: 'not-installed' });
+    expect(hostFor(id).runs.length).toBe(runs);
+  });
+
+  it('an older failing full check is re-checked once (recorded); a passing re-check goes on to the live prelaunch', async () => {
+    const id = await addWith((h) => result(h, {}, { 'claude-auth': 'fail' }));
+    const p = service.prelaunch(id, 'claude-sdk');
+    await flush();
+    const recheck = hostFor(id).runs[hostFor(id).runs.length - 1];
+    expect(recheck.mode).toBe('full');
+    recheck.d.resolve(result(id, { finishedAt: '2026-10-09T12:30:00.000Z' }));
+    await flush();
+    const live = hostFor(id).runs[hostFor(id).runs.length - 1];
+    expect(live.mode).toBe('prelaunch');
+    live.d.resolve(result(id, { mode: 'prelaunch' }));
+    expect(await p).toEqual({ ok: true });
+    await store._queue().onIdle();
+    expect(store.get(id)?.preflight?.finishedAt).toBe('2026-10-09T12:30:00.000Z');
+  });
+
+  it('an older failing full check whose re-check still fails refuses with the fresh verdict', async () => {
+    const id = await addWith((h) => result(h, {}, { 'claude-auth': 'fail' }));
+    const p = service.prelaunch(id, 'claude-sdk');
+    await flush();
+    const runs = hostFor(id).runs.length;
+    hostFor(id).runs[runs - 1].d.resolve(result(id, {}, { 'sdk-binary-hash': 'fail' }));
+    expect(await p).toMatchObject({ ok: false, code: 'not-installed' });
     expect(hostFor(id).runs.length).toBe(runs);
   });
 

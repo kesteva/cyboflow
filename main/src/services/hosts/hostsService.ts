@@ -22,7 +22,8 @@
  * mcp-roundtrip. prelaunch() is the launch-time gate: it judges the last complete full preflight, whatever its age
  * (tier, runtimes and sign-in are stable; the scheduler refreshes them daily), and then checks reachability, the
  * toolchain and the link live under a 2 s budget — that live run is NEVER recorded, emitted or shown as the last
- * attempt. A launch never runs a full preflight: that can take a minute and spends a model request. installToolchain() is the explicit
+ * attempt. A launch runs a full preflight only to re-check a failing verdict older than PRELAUNCH_RECHECK_AFTER_MS (it can
+ * take a minute and spends a model request), so a fix made outside the app is seen. installToolchain() is the explicit
  * "Install cyboflow tools" action (progress on the bridge's toolchain channel), followed by a full preflight.
  *
  * Phase F (spec M2 §7): a full preflight that reached an SSH machine ends with one bounded GC pass over
@@ -228,6 +229,9 @@ function linkViewState(link: HostLink | undefined): HostLinkViewState {
   if (link.state === 'reconnecting') return 'down';
   return 'idle';
 }
+
+/** A failing full preflight older than this is re-checked once before prelaunch refuses a launch on it. */
+export const PRELAUNCH_RECHECK_AFTER_MS = 2 * 60_000;
 
 function prelaunchFail(code: PrelaunchFailureCode, reason: string): PrelaunchResult {
   return { ok: false, code, reason };
@@ -735,7 +739,8 @@ export class HostsService implements HostsFacade {
 
   /**
    * Launch-time gate for a remote session/run on `hostId`. This Mac always passes. Judges the last complete full
-   * preflight (any age; none → 'needs-check') for toolchain, sign-in, tier and runtime, then checks reachability,
+   * preflight (any age; none → 'needs-check') for toolchain, sign-in, tier and runtime — a failing verdict older than
+   * PRELAUNCH_RECHECK_AFTER_MS is re-checked with one fresh full preflight before it refuses — then checks reachability,
    * the toolchain and the link live under the 2 s prelaunch budget. The live run is never recorded and emits
    * nothing. Never throws.
    */
@@ -750,7 +755,20 @@ export class HostsService implements HostsFacade {
     const last = this.lastFullPreflight(row);
     if (last === null) return prelaunchFail('needs-check', 'This environment has no completed check yet. Run a check first.');
     const gate = judgeFullPreflight(last, row.userCapTier, runtime);
-    if (!gate.ok) return gate;
+    if (!gate.ok) {
+      // The stored check may predate a fix made outside the app (a token written, tools installed by hand), so an
+      // older failing verdict is re-checked once — recorded like "Check again" — before it refuses the launch.
+      const age = Date.now() - Date.parse(last.finishedAt);
+      if (!(age > PRELAUNCH_RECHECK_AFTER_MS)) return gate;
+      let fresh: PreflightResult;
+      try {
+        fresh = await this.runPreflight(hostId);
+      } catch {
+        return gate;
+      }
+      const recheck = judgeFullPreflight(fresh, this.deps.store.get(hostId)?.userCapTier ?? row.userCapTier, runtime);
+      if (!recheck.ok) return recheck;
+    }
     let live: PreflightResult;
     try {
       live = await this.deps.registry.get(hostId).preflight('prelaunch', undefined, signal);
