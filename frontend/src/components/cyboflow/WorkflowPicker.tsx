@@ -750,7 +750,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     )
       ? quickDefaults.agentRuntime
       : claudeRuntimeFromSubstrate(quickDefaults.substrate);
-    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched
+    // A remote environment only hosts SDK runtimes: an untouched quick default it cannot run follows the
+    // picker's (already coerced) runtime instead, transport included, or main refuses the launch.
+    const followsRemoteCoercion =
+      !isAgentRuntimeTouched && remoteHostId !== null && !isRemoteLaunchRuntime(quickDefaultRuntime);
+    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched || followsRemoteCoercion
       ? agentRuntime
       : quickDefaultRuntime;
     const quickPermissionMode = isPermissionModeTouched
@@ -763,7 +767,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // authoritative.
     const quickProvider = providerForRuntime(sessionRuntime);
     const quickSubstrate =
-      isAgentRuntimeTouched || quickProvider !== 'claude'
+      isAgentRuntimeTouched || followsRemoteCoercion || quickProvider !== 'claude'
         ? substrateForRuntime(sessionRuntime)
         : quickDefaults.substrate;
     // The model follows the same touched/untouched rule, with one extra guard.
@@ -823,6 +827,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     globalAgentRuntime,
     startQuickSession,
     quickDefaultSubstrate,
+    remoteHostId,
   ]);
 
   const selectedWorkflowTitle = workflowTitleForName(

@@ -2803,4 +2803,23 @@ describe('WorkflowPicker — environment picker (M2 C4)', () => {
       expect.objectContaining({ hostId: 'h2', agentRuntime: 'claude-sdk' }),
     );
   });
+
+  it('an untouched Quick Session on a remote pick follows the coerced SDK runtime, not the interactive quick default', async () => {
+    useConfigStore.setState({ config: null });
+    act(() => {
+      useHostsStore.setState({ hosts: [makeLocalHost(), readyHost], featureStatus: makeHostsStatus() });
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-environment-option-h2'));
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('quick-session-button'));
+    });
+    await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ hostId: 'h2', agentRuntime: 'claude-sdk', substrate: 'sdk' }),
+    );
+  });
 });
