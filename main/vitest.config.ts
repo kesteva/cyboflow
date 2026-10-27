@@ -18,8 +18,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     // Windows runners: suites that build a fresh migrated DB per test spend ~2 s in
-    // each hook and spike past vitest's 10 s default under full-suite load.
-    ...(process.platform === 'win32' ? { hookTimeout: 30_000 } : {}),
+    // each hook or test body and stall 5-10x past that under full-suite load.
+    ...(process.platform === 'win32' ? { hookTimeout: 30_000, testTimeout: 30_000 } : {}),
     ...forkPoolOptions(),
     coverage: {
       provider: 'v8',
