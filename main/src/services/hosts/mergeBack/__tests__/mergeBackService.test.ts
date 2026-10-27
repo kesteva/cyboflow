@@ -284,6 +284,18 @@ describe('MergeBackService.mergeSession (real git)', { timeout: 30_000 }, () => 
     expect(fetches).toBe(0);
   });
 
+  it('C2: an agent that could not be stopped aborts the merge before the worktree is read or anything is fetched', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    const input = { ...squashInput(), stopProcesses: async () => { throw new Error('ssh: connection reset'); } };
+    const err = await svc.mergeSession(input).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MergeBackError);
+    expect((err as MergeBackError).code).toBe('stop');
+    expect((err as Error).message).toBe('Could not stop the agent on Studio — try again.');
+    expect(order).toEqual([]); // no status read on the environment
+    expect(fetches).toBe(0);
+    expect(mergeBacks.get('s1')).toMatchObject({ state: 'remote_ready', importSha: null, lastError: (err as Error).message });
+  });
+
   it('a squash conflict keeps local_ready; the retry re-syncs the mirror and lands', async () => {
     commit(remoteWt(), 'a.txt', 'agent\n');
     commit(project, 'a.txt', 'main\n');
@@ -522,6 +534,24 @@ describe('MergeBackService delivery probe, checkpoints, archive and boot resume 
     await expect(svc.probeLanding('s1', project, 'main')).resolves.toMatchObject({ landed: true, proven: true });
   });
 
+  it('C1: a refresh that fails never proves a landing from the stale checkpoint', async () => {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    await expect(svc.probeLanding('s1', project, 'main')).resolves.toMatchObject({ landed: false, proven: true });
+    git(project, ['merge', '--squash', '-q', 'refs/cyboflow/checkpoint/k1']);
+    git(project, ['commit', '-q', '-m', 'landed by hand']);
+    // Newer work on the environment the checkpoint does not hold — and the environment is now unreachable.
+    commit(remoteWt(), 'later.txt', 'later\n');
+    const away = new MergeBackService({
+      ...deps,
+      localGit: (cwd, args, opts) => (args[0] === 'fetch'
+        ? Promise.reject(new Error('ssh: connect to host studio: Operation timed out'))
+        : runGitCapture(cwd, args, opts)),
+    });
+    await expect(away.probeLanding('s1', project, 'main')).resolves.toEqual({ landed: false, ownCommits: 0, proven: false });
+    // Reachable again: the refreshed tip shows the newer commit is not on main.
+    await expect(svc.probeLanding('s1', project, 'main')).resolves.toMatchObject({ landed: false, proven: true });
+  });
+
   it('checkpoint requests coalesce, and never regress a later state', async () => {
     commit(remoteWt(), 'b.txt', 'b\n');
     const tip = commit(remoteWt(), 'c.txt', 'c\n');
@@ -677,6 +707,54 @@ describe('MergeBackService data safety (real git)', { timeout: 30_000 }, () => {
     expect(git(remoteWt(), ['status', '--porcelain']).trim()).toBe('?? x.txt');
     expect(mergeBacks.get('s1')).toMatchObject({ state: 'merged' });
     expect(mergeBacks.get('s1')?.lastError).toMatch(/^Uncommitted changes on Studio after the merge/);
+  });
+
+  /** A merge whose resync loses the connection right after the branch moved (before `read-tree`); main gained x.txt. */
+  async function cutOffResync(): Promise<MergeBackService> {
+    commit(remoteWt(), 'b.txt', 'b\n');
+    const service = new MergeBackService({
+      ...deps,
+      afterStep: (_s, step) => { if (step === 'merged') commit(project, 'x.txt', 'main x\n'); },
+    });
+    beforeRemoteGit = (args) => {
+      if (args[0] !== 'read-tree') return;
+      beforeRemoteGit = null;
+      throw new Error('ssh: connection lost');
+    };
+    await expect(service.mergeSession(squashInput())).resolves.toEqual({ kind: 'merged' });
+    await expect(service.whenResynced('s1')).resolves.toBe(false);
+    // The wedge: the branch is at main, the index + worktree still hold the imported tree (a staged revert of x.txt).
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(mainSha());
+    expect(git(remoteWt(), ['status', '--porcelain']).trim()).toBe('D  x.txt');
+    return service;
+  }
+
+  it('C3: a resync cut off between the branch move and the tree update is finished by the next resync', async () => {
+    const service = await cutOffResync();
+    await expect(service.resync('s1', 'main')).resolves.toBe(true);
+    expect(fs.readFileSync(path.join(remoteWt(), 'x.txt'), 'utf8')).toBe('main x\n');
+    expectResynced();
+  });
+
+  it.each([
+    ['a staged change', (): [string, string] => {
+      fs.writeFileSync(path.join(remoteWt(), 'new.txt'), 'new\n');
+      git(remoteWt(), ['add', 'new.txt']);
+      return ['new.txt', 'new\n'];
+    }],
+    ['an unstaged edit', (): [string, string] => {
+      fs.writeFileSync(path.join(remoteWt(), 'b.txt'), 'edited\n');
+      return ['b.txt', 'edited\n'];
+    }],
+  ] as const)('C3: after a cut-off resync, %s on the environment is still refused and nothing moves', async (_kind, edit) => {
+    const service = await cutOffResync();
+    const [file, body] = edit();
+    await expect(service.resync('s1', 'main')).resolves.toBe(false);
+    expect(mergeBacks.get('s1')).toMatchObject({ state: 'merged' });
+    expect(mergeBacks.get('s1')?.lastError).toMatch(/^Uncommitted changes on Studio after the merge/);
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(mainSha());
+    expect(fs.existsSync(path.join(remoteWt(), 'x.txt'))).toBe(false);
+    expect(fs.readFileSync(path.join(remoteWt(), file), 'utf8')).toBe(body);
   });
 
   it('LC-5: a merged row whose close-out completed is only resynced at boot, never closed out again', async () => {

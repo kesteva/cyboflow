@@ -516,13 +516,15 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   // M2 merge-back (remote sessions). The agent on the environment must be stopped BEFORE the branch tip is read
-  // (a later commit would be lost), so a remote merge AWAITS the same fail-soft close instead of firing it after.
+  // (a later commit would be lost), so a remote merge AWAITS the close instead of firing it after — and a close that
+  // fails is NOT fail-soft here: it rejects, and the merge-back service aborts the import with a readable error.
   const stopLiveSessionProcesses = async (session: Session, sessionId: string): Promise<void> => {
     if (!session.chatRunId) return;
     try {
       await endLiveSession(session.chatRunId);
     } catch (err) {
       console.warn(`[IPC:git] Failed to end live session process for session ${sessionId}:`, err);
+      throw err;
     }
   };
 

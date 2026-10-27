@@ -163,6 +163,16 @@ describe('gitOps remote merge-back', () => {
     if (!res.success) expect(res.error).toMatch(/Uncommitted changes on Studio/);
   });
 
+  it('squash: an agent stop that fails aborts the merge — nothing imported, merged or closed out', async () => {
+    const { ops, worktreeManager, endLiveSession } = makeOps();
+    endLiveSession.mockRejectedValueOnce(new Error('environment unreachable'));
+    const res = await ops.squashAndRebaseToMain({ sessionId: 'r1', commitMessage: 'msg' });
+    expect(res.success).toBe(false);
+    expect(order).not.toContain('import');
+    expect(worktreeManager.squashAndMergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(closeOut.calls).toEqual([]);
+  });
+
   it('rebase-merge runs the unchanged mergeWorktreeToMain on the mirror', async () => {
     const { ops, worktreeManager } = makeOps();
     const res = await ops.rebaseToMain({ sessionId: 'r1' });
@@ -198,6 +208,15 @@ describe('gitOps remote merge-back', () => {
     expect(vi.mocked(runGitAsync)).toHaveBeenCalledWith('/tmp/project', ['rev-parse', 'main']);
     expect(closeOut.calls).toContain('stampLanded');
     expect(fake.recordLanded).toHaveBeenCalledWith('r1', 'main');
+  });
+
+  it('markComplete on an unproven remote probe (refresh failed) does no landed close-out', async () => {
+    landing = { landed: false, ownCommits: 0, proven: false };
+    const { ops } = makeOps();
+    const res = await ops.markComplete({ sessionId: 'r1' });
+    expect(res.success).toBe(true);
+    expect(closeOut.calls).not.toContain('stampLanded');
+    expect(fake.recordLanded).not.toHaveBeenCalled();
   });
 
   it('a local session never touches the merge-back service', async () => {

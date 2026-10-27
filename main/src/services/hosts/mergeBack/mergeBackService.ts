@@ -99,7 +99,7 @@ export function mirrorWorktreePath(projectPath: string, key: string): string {
 }
 
 export type MergeBackErrorCode =
-  | 'not-remote' | 'needs-check' | 'no-row' | 'state' | 'dirty' | 'import' | 'mirror' | 'refresh' | 'resync' | 'cleanup';
+  | 'not-remote' | 'needs-check' | 'no-row' | 'state' | 'stop' | 'dirty' | 'import' | 'mirror' | 'refresh' | 'resync' | 'cleanup';
 
 /** `message` is user-presentable: redacted, no ssh target. */
 export class MergeBackError extends Error {
@@ -129,7 +129,10 @@ export interface MirrorHandle {
 export interface MirrorInput {
   sessionId: string;
   projectPath: string;
-  /** Ends the session's live (remote) processes; awaited BEFORE the branch tip is read. A throw is logged, not fatal. */
+  /**
+   * Ends the session's live (remote) processes; awaited BEFORE the branch tip is read. A throw aborts the operation
+   * (`stop`): an agent that may still be running could commit after the tip is read, and that commit would be lost.
+   */
   stopProcesses?: () => Promise<void>;
 }
 
@@ -357,6 +360,7 @@ export class MergeBackService implements MergeBackServiceLike {
         await input.stopProcesses();
       } catch (err) {
         this.deps.logger.warn('[merge-back] could not stop the session processes', { sessionId, error: errorName(err) });
+        throw new MergeBackError('stop', `Could not stop the agent on ${label} — try again.`, { cause: err });
       }
     }
     const wt = row.remoteWorktreePath ?? remoteSessionWorktreePath(r.remoteRoot, row.mergeKey);
@@ -662,7 +666,10 @@ export class MergeBackService implements MergeBackServiceLike {
     try {
       await this.locked(sessionId, () => this.checkpointLocked(sessionId, projectPath), PROBE_LOCK_WAIT_MS);
     } catch (err) {
+      // A checkpoint / import ref left from earlier is STALE: the branch may have commits since, so it never proves
+      // a landing (markComplete would close the session out as merged and an archive would delete those commits).
       this.deps.logger.warn('[merge-back] delivery probe could not refresh the branch tip', { sessionId, error: errorName(err) });
+      return { landed: false, ownCommits: 0, proven: false };
     }
     for (const ref of [checkpointRef(row.mergeKey), importRef(row.mergeKey)]) {
       const probe = await this.refLanding(projectPath, ref, mainBranch, row.baseSha);
@@ -817,6 +824,8 @@ export class MergeBackService implements MergeBackServiceLike {
    *   3. `read-tree -m -u <imported> <main>` carries the index + worktree across like `git checkout` does, refusing
    *      (and touching nothing) when a local change would be overwritten; then the branch is swapped back (CAS again)
    *      and the dirty error keeps `merged` for a later retry.
+   * A connection lost between 2 and 3 leaves the branch at main over the imported tree; the next run recognises
+   * exactly that (index == imported tree, worktree == index) and finishes step 3.
    */
   private async resetRemoteLocked(row: MergeBackRow, r: ResolvedHost, mainSha: string): Promise<'reset' | 'current' | 'moved'> {
     const label = r.row.label;
@@ -826,20 +835,38 @@ export class MergeBackService implements MergeBackServiceLike {
     const dirty = (): MergeBackError => new MergeBackError(
       'dirty', `Uncommitted changes on ${label} after the merge — ask the agent to commit them, then merge again.`,
     );
-    const status = await r.host.git.run(wt, ['status', '--porcelain'], opts);
-    if (status.code !== 0) {
-      throw new MergeBackError('resync', `Could not read the session worktree on "${label}": ${readable(status.stderr)}`);
-    }
-    if (status.stdout.trim() !== '') throw dirty();
     const tipOf = async (): Promise<string> => {
       const tip = await r.host.git.run(wt, ['rev-parse', '--verify', '-q', `${branchRef}^{commit}`], opts);
       return tip.code === 0 ? tip.stdout.trim() : '';
     };
+    const onBranch = async (): Promise<boolean> => {
+      const head = await r.host.git.run(wt, ['symbolic-ref', '-q', 'HEAD'], opts);
+      return head.code === 0 && head.stdout.trim() === branchRef;
+    };
+    const importSha = row.importSha;
+    const status = await r.host.git.run(wt, ['status', '--porcelain'], opts);
+    if (status.code !== 0) {
+      throw new MergeBackError('resync', `Could not read the session worktree on "${label}": ${readable(status.stderr)}`);
+    }
+    if (status.stdout.trim() !== '') {
+      // An earlier resync moved the branch (step 2) but lost the connection before step 3: the branch is at main
+      // while the index + worktree still hold EXACTLY the imported tree. That reads as "dirty" (a staged revert of
+      // main) forever — finish the move instead. Any other difference is a real local change: refused as before.
+      if (importSha === null || (await tipOf()) !== mainSha || !(await onBranch())) throw dirty();
+      await r.host.git.run(wt, ['update-index', '-q', '--refresh'], opts);
+      const indexIsImport = await r.host.git.run(wt, ['diff-index', '--cached', '--quiet', importSha, '--'], opts);
+      const worktreeIsIndex = await r.host.git.run(wt, ['diff-files', '--quiet'], opts);
+      if (indexIsImport.code !== 0 || worktreeIsIndex.code !== 0) throw dirty();
+      // Refuses (touching nothing) when an untracked file would be overwritten; the branch then goes back to the
+      // imported tip, the consistent state a retry handles like any dirty tree.
+      const finish = await r.host.git.run(wt, ['read-tree', '-m', '-u', importSha, mainSha], { timeoutMs: WORKTREE_TIMEOUT_MS });
+      if (finish.code === 0) return 'reset';
+      await r.host.git.run(wt, ['update-ref', '-m', 'cyboflow: resync undone', branchRef, importSha, mainSha], opts);
+      throw dirty();
+    }
     const sha = await tipOf();
     if (sha === mainSha) return 'current';
-    const head = await r.host.git.run(wt, ['symbolic-ref', '-q', 'HEAD'], opts);
-    const importSha = row.importSha;
-    if (sha === '' || importSha === null || sha !== importSha || head.code !== 0 || head.stdout.trim() !== branchRef) return 'moved';
+    if (sha === '' || importSha === null || sha !== importSha || !(await onBranch())) return 'moved';
     const cas = await r.host.git.run(wt, ['update-ref', '-m', 'cyboflow: resync after merge', branchRef, mainSha, importSha], opts);
     if (cas.code !== 0) {
       if ((await tipOf()) !== importSha) return 'moved';
