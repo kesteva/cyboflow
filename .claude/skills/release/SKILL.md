@@ -230,11 +230,12 @@ verifies, publishes to R2 and cuts the GitHub release from the tag.
 V=<version>
 REL=$(git -C "$WT" rev-parse HEAD)            # the bump commit; its parent is $SHA
 git tag -a "v$V" -m "v$V" "$REL"
+# ${REL} in the refspecs below: zsh reads "$REL:r…" as the :r (strip-extension) modifier.
 # Land the bump on origin/main WITHOUT pushing unrelated local main work.
 # origin/main normally still sits at $SHA → fast-forward; if it moved on,
 # merge the bump onto it (the tag stays on $REL, so the gate still sees $SHA).
 if [ "$(git rev-parse origin/main)" = "$SHA" ]; then
-  git push origin "$REL:refs/heads/main"
+  git push origin "${REL}:refs/heads/main"
 else
   git -C "$WT" checkout -q --detach origin/main
   git -C "$WT" merge --no-ff --no-edit "$REL"

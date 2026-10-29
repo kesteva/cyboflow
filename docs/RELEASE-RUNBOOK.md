@@ -107,7 +107,7 @@ git commit -m "chore: release $NEW"
 REL=$(git rev-parse HEAD)
 git tag -a "v$NEW" -m "v$NEW" "$REL"
 # Land ONLY the bump on origin/main (unpushed local work stays local):
-if [ "$(git rev-parse origin/main)" = "$SHA" ]; then git push origin "$REL:refs/heads/main"
+if [ "$(git rev-parse origin/main)" = "$SHA" ]; then git push origin "${REL}:refs/heads/main"
 else git checkout -q --detach origin/main && git merge --no-ff --no-edit "$REL" \
        && git push origin HEAD:refs/heads/main; fi
 git push origin "v$NEW"              # AFTER main; NOT --follow-tags: it skips lightweight tags silently
