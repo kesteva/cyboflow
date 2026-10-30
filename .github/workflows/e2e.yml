@@ -44,6 +44,11 @@ jobs:
       # host-Node rebuild here (this job runs no vitest). `build:main` +
       # `build:frontend` produce main/dist and frontend/dist.
       - name: Build main + frontend
+        # main's `tsc` peaks at ~2.3 GB since zod 4; the macos-latest runner's
+        # default V8 heap is ~2 GB, so the build OOMs without this. Step-scoped
+        # so the flag never reaches the launched Electron app.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           pnpm run build:main
           pnpm run build:frontend
