@@ -50,7 +50,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  *     `[1m]`-suffixed id — that path is preserved in {@link sdkModelAndBetas} /
  *     {@link modelSupportsContext1M} for a caller that explicitly pins
  *     `claude-sonnet-4-6[1m]`, but the default `sonnet` alias no longer uses it.
- *   - Fable 5.1 (`claude-fable-5-1`) is Anthropic's frontier model and, like Sonnet 5.5,
+ *   - Fable 5.2 (`claude-fable-5-2`) is Anthropic's frontier model and, like Sonnet 5.5,
  *     is 1M by DEFAULT — the bare id already reports a 1M window, so NO `[1m]`
  *     suffix and NO beta. Fable can be pulled from availability (it has been
  *     before); the availability guard ({@link applyModelAvailabilityFallback})
@@ -59,7 +59,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * Keep these in sync with the latest GA snapshots when models roll forward.
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
-  fable: 'claude-fable-5-1',
+  fable: 'claude-fable-5-2',
   opus: 'claude-opus-5-5[1m]',
   'opus-250k': 'claude-opus-4-8',
   sonnet: 'claude-sonnet-5-5',
@@ -85,7 +85,7 @@ export function resolveModelAlias(model?: string | null): string | undefined {
 
 /**
  * Swap a RESOLVED model id for its fallback when the availability guard reports it
- * unavailable. Only guarded models (currently Fable 5.1 — see
+ * unavailable. Only guarded models (currently Fable 5.2 — see
  * `shared/types/modelAvailability`) are affected; every other id, plus
  * `undefined`/`'auto'`/an unrecognized concrete id, passes through unchanged.
  *
@@ -113,7 +113,7 @@ export function applyModelAvailabilityFallback(
  *
  * With NO explicit `--model` pin (a run whose model is NULL/'auto') the bundled
  * CLI selects its own default model, which the native auto-mode classifier ALSO
- * uses. cyboflow's frontier default is a guarded model (Fable 5.1); when it is
+ * uses. cyboflow's frontier default is a guarded model (Fable 5.2); when it is
  * pulled, the classifier can't run and denies EVERY tool. This returns the
  * resolved fallback id of the first guarded model the availability guard reports
  * unavailable (so the spawn seam can pin a working classifier-capable model
@@ -177,7 +177,7 @@ function stripContext1MSuffix(id: string): string {
  * directly-pinned Sonnet 4.x id, whose 1M is the bare id + {@link CONTEXT_1M_BETA}
  * (the SDK doesn't take a `[1m]` Sonnet id, so the marker is stripped and turned
  * into the beta). No marker → bare id, no beta — this is the path for the 1M-native
- * families (Opus 5, Sonnet 5.5, Fable 5.1) and the default/250k window. `auto`/undefined
+ * families (Opus 5, Sonnet 5.5, Fable 5.2) and the default/250k window. `auto`/undefined
  * pass straight through.
  */
 export function sdkModelAndBetas(
@@ -194,7 +194,7 @@ export function sdkModelAndBetas(
  * The `--model` arg for the interactive CLI. The CLI has no 1M-beta path, so a
  * `[1m]` Sonnet id would be an unknown model — strip the marker (Sonnet stays at
  * the default window interactively, as it always has). The 1M-native families
- * (Opus 5, Sonnet 5.5, Fable 5.1) carry no marker and pass through as-is.
+ * (Opus 5, Sonnet 5.5, Fable 5.2) carry no marker and pass through as-is.
  * `auto`/undefined pass through.
  */
 export function interactiveModelArg(resolvedId?: string | null): string | undefined {
@@ -218,7 +218,7 @@ export function interactiveModelArg(resolvedId?: string | null): string | undefi
  *
  * When an optional `isUsable` predicate is supplied (the overlay writer wires it to
  * the ModelAvailabilityService), a guarded-but-unavailable pinned model — e.g. an
- * agent pinned to Fable 5.1 that has been pulled — is swapped for its fallback before
+ * agent pinned to Fable 5.2 that has been pulled — is swapped for its fallback before
  * the bare id is emitted, so a subagent `.md` never writes a dead model.
  */
 export function bareModelId(

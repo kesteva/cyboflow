@@ -658,7 +658,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Claude aliases to current snapshots (mirroring the SDK seam).
     // interactiveModelArg keeps Opus's `[1m]` id but strips a `[1m]` Sonnet
     // marker (the CLI has no 1M-beta path). Apply the availability guard
-    // (Fable 5.1 → Opus when pulled) before the interactive-arg translation.
+    // (Fable 5.2 → Opus when pulled) before the interactive-arg translation.
     const resolvedModel = interactiveModelArg(
       applyModelAvailabilityFallback(resolveAgentModelAlias('claude', options.model), isModelUsable),
     );

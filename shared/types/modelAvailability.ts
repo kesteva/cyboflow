@@ -2,7 +2,7 @@
  * modelAvailability — the small set of Claude models cyboflow guards for
  * availability, plus the wire shapes shared frontend↔main over IPC.
  *
- * Fable 5.1 is Anthropic's frontier model and has been pulled from availability
+ * Fable 5.2 is Anthropic's frontier model, and the Fable line has been pulled from availability
  * before, so a run or agent pinned to it must degrade gracefully rather than
  * hard-fail. The backend {@link !ModelAvailabilityService} tracks each guarded
  * model's status; the spawn seam swaps an unavailable guarded model to its
@@ -21,14 +21,14 @@ export interface GuardedModelSpec {
    * `[1m]` window marker — the form the runtime spawns and the Models API knows.
    */
   readonly concreteId: string;
-  /** Human label for logs / tooltips (e.g. 'Fable 5.1'). */
+  /** Human label for logs / tooltips (e.g. 'Fable 5.2'). */
   readonly label: string;
   /** Picker alias to fall back to when unavailable (resolved at the spawn seam). */
   readonly fallbackAlias: string;
 }
 
 /**
- * The guarded models. Currently only Fable 5.1, which falls back to Opus.
+ * The guarded models. Currently only Fable 5.2, which falls back to Opus.
  *
  * Keep `concreteId` in sync with the {@link resolveModelAlias} mapping for the
  * same `alias` (bare, no `[1m]`). Adding a model here is all that's needed to
@@ -36,7 +36,7 @@ export interface GuardedModelSpec {
  * it out.
  */
 export const GUARDED_MODELS: readonly GuardedModelSpec[] = [
-  { alias: 'fable', concreteId: 'claude-fable-5-1', label: 'Fable 5.1', fallbackAlias: 'opus' },
+  { alias: 'fable', concreteId: 'claude-fable-5-2', label: 'Fable 5.2', fallbackAlias: 'opus' },
 ];
 
 export type ModelAvailabilityStatus = 'available' | 'unavailable' | 'unknown';
@@ -68,7 +68,7 @@ export interface ModelFallbackNotice {
   readonly sessionId: string;
   /** The guarded picker alias that was unavailable (e.g. 'fable'). */
   readonly unavailableAlias: string;
-  /** Human label of the unavailable model (e.g. 'Fable 5.1'). */
+  /** Human label of the unavailable model (e.g. 'Fable 5.2'). */
   readonly unavailableLabel: string;
   /** The picker alias the turn ran on instead (e.g. 'opus'). */
   readonly fallbackAlias: string;

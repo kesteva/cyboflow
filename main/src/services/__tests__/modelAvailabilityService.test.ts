@@ -11,7 +11,7 @@ import {
   type ModelAvailabilityMap,
 } from '../../../../shared/types/modelAvailability';
 
-const FABLE = 'claude-fable-5-1';
+const FABLE = 'claude-fable-5-2';
 
 describe('ModelAvailabilityService', () => {
   beforeEach(() => {
@@ -43,7 +43,7 @@ describe('ModelAvailabilityService', () => {
     it('accepts a [1m]-suffixed guarded id (marker stripped for matching)', () => {
       const svc = ModelAvailabilityService.initialize();
       svc.markUnavailable(FABLE, '404');
-      expect(svc.isUsable('claude-fable-5-1[1m]')).toBe(false);
+      expect(svc.isUsable('claude-fable-5-2[1m]')).toBe(false);
     });
   });
 
@@ -120,7 +120,7 @@ describe('ModelAvailabilityService', () => {
       await svc.refresh();
       expect(svc.isUsable(FABLE)).toBe(false);
       expect(fetchImpl).toHaveBeenCalledWith(
-        'https://api.anthropic.com/v1/models/claude-fable-5-1',
+        'https://api.anthropic.com/v1/models/claude-fable-5-2',
         expect.objectContaining({ method: 'GET' }),
       );
 
@@ -163,7 +163,7 @@ describe('ModelAvailabilityService', () => {
       const svc = ModelAvailabilityService.initialize({ fetchImpl: fetchImpl as unknown as typeof fetch });
       await svc.refresh();
       expect(fetchImpl).toHaveBeenCalledWith(
-        'https://proxy.example.com/v1/models/claude-fable-5-1',
+        'https://proxy.example.com/v1/models/claude-fable-5-2',
         expect.objectContaining({
           headers: expect.objectContaining({ 'x-api-key': 'sk-abc', 'anthropic-version': '2023-06-01' }),
         }),
@@ -174,13 +174,13 @@ describe('ModelAvailabilityService', () => {
 
 describe('isModelUnavailableError', () => {
   it('matches model-not-found / no-access phrasings', () => {
-    expect(isModelUnavailableError('model claude-fable-5-1 not found')).toBe(true);
+    expect(isModelUnavailableError('model claude-fable-5-2 not found')).toBe(true);
     expect(isModelUnavailableError('The requested model does not exist')).toBe(true);
     expect(isModelUnavailableError('404 not_found_error: model unavailable')).toBe(true);
     expect(isModelUnavailableError('invalid model id')).toBe(true);
-    expect(isModelUnavailableError('You do not have access to model claude-fable-5-1')).toBe(true);
+    expect(isModelUnavailableError('You do not have access to model claude-fable-5-2')).toBe(true);
     expect(isModelUnavailableError('this model has been retired')).toBe(true);
-    // A CLI too old for the pinned model — the shape that hard-failed a Fable 5.1
+    // A CLI too old for the pinned model — the shape that hard-failed a Fable 5.2
     // session before this arm existed (bundled SDK 0.3.224 vs. a model needing 2.1.251).
     expect(
       isModelUnavailableError(
@@ -206,8 +206,8 @@ describe('shared guarded-model helpers (frontend picker grey-out logic)', () => 
   });
 
   it('guardedModelByConcreteId strips a [1m] marker before matching', () => {
-    expect(guardedModelByConcreteId('claude-fable-5-1')?.alias).toBe('fable');
-    expect(guardedModelByConcreteId('claude-fable-5-1[1m]')?.alias).toBe('fable');
+    expect(guardedModelByConcreteId('claude-fable-5-2')?.alias).toBe('fable');
+    expect(guardedModelByConcreteId('claude-fable-5-2[1m]')?.alias).toBe('fable');
     expect(guardedModelByConcreteId('claude-opus-4-8[1m]')).toBeUndefined();
   });
 

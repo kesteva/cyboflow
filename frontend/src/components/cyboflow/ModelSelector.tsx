@@ -24,7 +24,7 @@ import { providerForRuntime } from '../../../../shared/types/agentRuntime';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /**
- * The Ultracode-launch default model — Fable 5.1, per product direction (ultracode
+ * The Ultracode-launch default model — Fable 5.2, per product direction (ultracode
  * is the "most capable, fan work out" mode, so it defaults to the frontier
  * model). Only seeded when the availability snapshot says Fable is usable; the
  * wizard falls back to {@link DEFAULT_QUICK_MODEL} otherwise. A mid-run

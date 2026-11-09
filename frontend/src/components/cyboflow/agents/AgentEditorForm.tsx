@@ -75,7 +75,7 @@ export function AgentEditorForm({
   // Name is editable ONLY for a brand-new custom (create mode). Built-ins and
   // existing customs render the name read-only.
   const nameEditable = mode === 'create' && isCustom;
-  // Guarded-model availability (Fable 5.1): grey out a pinnable model that's pulled.
+  // Guarded-model availability (Fable 5.2): grey out a pinnable model that's pulled.
   const { isAliasUsable } = useModelAvailability();
   // The provider a PINNED runtime deploys on, or null while the runtime is
   // inherited. Derived through the runtime registry rather than a

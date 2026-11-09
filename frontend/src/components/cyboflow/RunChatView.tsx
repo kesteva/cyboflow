@@ -228,7 +228,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // SAME slot also surfaces a mid-call model fallback (below).
   const [permissionToast, setPermissionToast] = useState<string | null>(null);
 
-  // Mid-call model fallback (Fable 5.1 pulled → Opus): the run's turn discovered its
+  // Mid-call model fallback (Fable 5.2 pulled → Opus): the run's turn discovered its
   // pinned model was unavailable and retried on the fallback. The read-only model
   // pill already swaps reactively (availability store); this raises a one-off toast
   // so the swap isn't silent — mirroring the quick-session composer. Filtered to

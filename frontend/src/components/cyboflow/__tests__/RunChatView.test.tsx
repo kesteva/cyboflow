@@ -572,13 +572,13 @@ describe('RunChatView — model fallback toast', () => {
         panelId: 'run-fb',
         sessionId: 'run-fb',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });
 
     expect(await screen.findByTestId('session-action-toast')).toHaveTextContent(
-      'Fable 5.1 is unavailable — switched to Opus 5.5 for this run.',
+      'Fable 5.2 is unavailable — switched to Opus 5.5 for this run.',
     );
   });
 
@@ -592,7 +592,7 @@ describe('RunChatView — model fallback toast', () => {
         panelId: 'other-run',
         sessionId: 'other-run',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });

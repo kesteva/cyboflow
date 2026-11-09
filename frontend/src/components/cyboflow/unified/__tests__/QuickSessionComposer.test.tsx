@@ -239,7 +239,7 @@ describe('QuickSessionComposer — SDK', () => {
 
     fireEvent.click(await screen.findByText('GPT-5.4'));
     expect(await screen.findByText('GPT-5.6 Sol')).toBeInTheDocument();
-    expect(screen.queryByText(/Fable 5.1/)).toBeNull();
+    expect(screen.queryByText(/Fable 5.2/)).toBeNull();
   });
 });
 
@@ -522,7 +522,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
         panelId: 'panel-1',
         sessionId: 's1',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });
@@ -531,7 +531,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('panel-1', 'opus'));
     // …and raised a human toast naming the swap.
     expect(onModelFallback).toHaveBeenCalledTimes(1);
-    expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5.1 is unavailable');
+    expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5.2 is unavailable');
     expect(onModelFallback.mock.calls[0][0]).toContain('Opus 5.5');
   });
 
@@ -549,7 +549,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
         panelId: 'someone-else',
         sessionId: 's9',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });

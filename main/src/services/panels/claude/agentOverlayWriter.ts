@@ -417,7 +417,7 @@ export function installAgentOverlay(
       // overrides + custom agents have no rawContent and are rendered. A pinned
       // model alias is resolved to its bare concrete snapshot id for the
       // subagent `model:` frontmatter (null/inherit emits no model line); a
-      // guarded model that's been pulled (Fable 5.1) falls back to Opus so the `.md`
+      // guarded model that's been pulled (Fable 5.2) falls back to Opus so the `.md`
       // never writes a dead model.
       const content =
         agent.rawContent ??

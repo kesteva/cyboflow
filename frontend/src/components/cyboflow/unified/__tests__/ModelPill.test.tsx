@@ -84,7 +84,7 @@ describe('ModelPill', () => {
 
     fireEvent.click(await screen.findByText('GPT-5.6 Sol'));
     expect(await screen.findByText('GPT-5.6 Terra')).toBeInTheDocument();
-    expect(screen.queryByText(/Fable 5.1/)).toBeNull();
+    expect(screen.queryByText(/Fable 5.2/)).toBeNull();
     expect(screen.queryByText(/Opus 5/)).toBeNull();
 
     fireEvent.click(screen.getByText('GPT-5.6 Terra'));
@@ -106,7 +106,7 @@ describe('ModelPill', () => {
     expect(await screen.findByText('anthropic')).toBeInTheDocument();
     expect(screen.getByText('openai')).toBeInTheDocument();
     expect(screen.getByText('GPT-5.4')).toBeInTheDocument();
-    expect(screen.queryByText(/Fable 5.1/)).toBeNull();
+    expect(screen.queryByText(/Fable 5.2/)).toBeNull();
 
     fireEvent.click(screen.getByText('GPT-5.4'));
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'openai/gpt-5.4'));
@@ -137,8 +137,8 @@ describe('ModelPill', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('leads with frontier Fable 5.1, single-row Opus and Sonnet 5.5', () => {
-    // Fable 5.1 leads (1M-native frontier); Sonnet 5.5 and Opus are both single 1M rows
+  it('leads with frontier Fable 5.2, single-row Opus and Sonnet 5.5', () => {
+    // Fable 5.2 leads (1M-native frontier); Sonnet 5.5 and Opus are both single 1M rows
     // (opus-250k removed from the picker, IDEA-017; alias still resolves for back-compat).
     expect(MODEL_OPTIONS.map((o) => o.id)).toEqual([
       'fable',
