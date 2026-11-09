@@ -13,8 +13,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- The session cost meter prices Fable 5.2 at $8/$40 per million tokens. Sessions that ran on
-  Fable 5.1 or Fable 5 keep their $10/$50 rate.
+- The session cost meter prices each model at its own rate. It had priced every model in a family
+  the same, so Fable 5.2, Opus 5.5 and Sonnet 5.5 sessions showed costs that were too high, and it
+  now uses each model's own cache-read rate.
 
 ## [0.5.2] — 2026-10-29
 
