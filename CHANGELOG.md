@@ -6,6 +6,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Fable 5.2.** The Fable option in the model pickers now runs Fable 5.2, via an Agent
+  SDK bump to 0.3.321. Fable 5.1 moves to "Other models".
+
+### Fixed
+
+- The session cost meter prices Fable 5.2 at $8/$40 per million tokens. Sessions that ran on
+  Fable 5.1 or Fable 5 keep their $10/$50 rate.
+
 ## [0.5.2] — 2026-10-29
 
 ### Added
