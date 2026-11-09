@@ -12,6 +12,14 @@ describe('ratesForModel', () => {
     expect(ratesForModel('claude-haiku-4-5')?.output).toBeCloseTo(5 / 1_000_000);
   });
 
+  it('prices Fable 5.2 (and the fable alias) at $8/$40, earlier Fable snapshots at $10/$50', () => {
+    expect(ratesForModel('fable')?.input).toBeCloseTo(8 / 1_000_000);
+    expect(ratesForModel('claude-fable-5-2')?.output).toBeCloseTo(40 / 1_000_000);
+    expect(ratesForModel('claude-fable-5-1')?.input).toBeCloseTo(10 / 1_000_000);
+    expect(ratesForModel('claude-fable-5-1[1m]')?.output).toBeCloseTo(50 / 1_000_000);
+    expect(ratesForModel('claude-fable-5')?.output).toBeCloseTo(50 / 1_000_000);
+  });
+
   it('applies the 1.25x cache-write and 0.1x cache-read multipliers to the input rate', () => {
     const r = ratesForModel('opus');
     expect(r?.cacheWrite).toBeCloseTo((5 * 1.25) / 1_000_000);

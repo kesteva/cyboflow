@@ -18,11 +18,20 @@ import { claudeModelFamily, type AgentModelAlias } from '../../../shared/types/a
 
 /** Per-MTok list prices (USD per million tokens) by Claude model family. */
 const PER_MTOK: Record<AgentModelAlias, { input: number; output: number }> = {
-  fable: { input: 10, output: 50 },
+  fable: { input: 8, output: 40 },
   opus: { input: 5, output: 25 },
   sonnet: { input: 3, output: 15 },
   haiku: { input: 1, output: 5 },
 };
+
+/**
+ * Fable 5 and Fable 5.1 list at $10/$50, above Fable 5.2's $8/$40 family rate. A
+ * session that ran on one of those earlier snapshots (a concrete id pinned before
+ * the `fable` alias moved to 5.2, or picked from "Other models") prices at its own
+ * rate. Matches the bare or `[1m]`-suffixed id, never `claude-fable-5-2`.
+ */
+const LEGACY_FABLE_ID = /claude-fable-5(?:-1)?(?![-\d])/;
+const LEGACY_FABLE_PER_MTOK = { input: 10, output: 50 };
 
 /** Cache-write (5m) costs 1.25× input; cache-read costs 0.1× input. */
 const CACHE_WRITE_MULTIPLIER = 1.25;
@@ -42,7 +51,10 @@ export function ratesForModel(model: string | null): ModelRates | null {
   // a concrete id like 'claude-opus-4-8[1m]' prices and colors the same.
   const family = claudeModelFamily(model);
   if (family === null) return null;
-  const base = PER_MTOK[family];
+  const base =
+    family === 'fable' && model !== null && LEGACY_FABLE_ID.test(model)
+      ? LEGACY_FABLE_PER_MTOK
+      : PER_MTOK[family];
   return {
     input: base.input / 1_000_000,
     output: base.output / 1_000_000,
