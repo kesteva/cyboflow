@@ -6,6 +6,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-11-09
+
 ### Added
 
 - **Claude Fable 5.2.** The Fable option in the model pickers now runs Fable 5.2, via an Agent
