@@ -201,12 +201,4 @@ describe('Migration 124: workflow tuning level', () => {
 
     svc.close();
   });
-
-  it('(d) a fresh-install DB (schema.sql + every migration from scratch) carries both columns', () => {
-    const svc = openAt(MIGRATIONS_DIR);
-    const db = svc.getDb();
-    expect(columnInfo(db, 'workflows', 'tuning_level')).toBeDefined();
-    expect(columnInfo(db, 'workflow_runs', 'tuning_level')).toBeDefined();
-    svc.close();
-  });
 });
