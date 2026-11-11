@@ -22,26 +22,13 @@ describe('SESSION_ALLOWED_TRANSITIONS shape', () => {
     // turn, re-initialized to `pending` by continue-conversation, and restorable
     // from `running` by the two spawn-failure revert paths. If this ever
     // narrows it must be because a caller was removed, not because the graph
-    // looked too permissive.
+    // looked too permissive. Caller families: the wake edge (x -> running) every
+    // `{ status: 'running' }` writer performs; the re-init edge (`'initializing'`
+    // -> `pending`) from any resting status; the revert edge (running -> x).
     for (const from of ALL) {
       for (const to of ALL) {
         expect(isSessionTransitionAllowed(from, to), `${from} -> ${to}`).toBe(true);
       }
-    }
-  });
-
-  it('names the three caller families that make it total', () => {
-    // The wake edge every `{ status: 'running' }` writer performs.
-    for (const from of ['pending', 'stopped', 'completed', 'failed'] as const) {
-      expect(isSessionTransitionAllowed(from, 'running')).toBe(true);
-    }
-    // The re-init edge (`'initializing'` -> `pending`) from any resting status.
-    for (const from of ['running', 'stopped', 'completed', 'failed'] as const) {
-      expect(isSessionTransitionAllowed(from, 'pending')).toBe(true);
-    }
-    // The revert edge: whatever a session was, `running` restores to it.
-    for (const to of ALL) {
-      expect(isSessionTransitionAllowed('running', to)).toBe(true);
     }
   });
 });

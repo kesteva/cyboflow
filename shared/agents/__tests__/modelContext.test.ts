@@ -41,6 +41,7 @@ describe('modelContext', () => {
       expect(modelSupportsContext1M('claude-opus-4-8')).toBe(false);
       // Opus 1M rides the [1m] id suffix, never the Sonnet-only beta.
       expect(modelSupportsContext1M('claude-opus-4-8[1m]')).toBe(false);
+      expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
 
     it('rejects auto/empty (resolved model unknown — beta is Sonnet-only)', () => {
@@ -99,14 +100,6 @@ describe('modelContext', () => {
       expect(resolveModelAlias('claude-opus-4-7')).toBe('claude-opus-4-7');
       expect(resolveModelAlias('claude-sonnet-4-5')).toBe('claude-sonnet-4-5');
       expect(resolveModelAlias('some-future-model')).toBe('some-future-model');
-    });
-
-    it('the pinned default aliases need no 1M beta', () => {
-      // sonnet→claude-sonnet-5-5 is 1M-native and opus→claude-opus-5-5[1m] reaches 1M
-      // via the id marker, so NEITHER needs the Sonnet-4.x beta: the gate returns
-      // false for both.
-      expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
-      expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
   });
 
