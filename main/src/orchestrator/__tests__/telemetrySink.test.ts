@@ -19,6 +19,10 @@ describe('telemetrySink — seam-error sink', () => {
   it('emitSeamError is a no-op until a sink is registered', () => {
     // No sink set — must not throw and must forward nothing.
     expect(() => emitSeamError('some-seam', new Error('boom'), { substrate: 'sdk' })).not.toThrow();
+    // Nothing is buffered/replayed: a sink registered afterwards sees no calls.
+    const sink = vi.fn();
+    setSeamErrorSink(sink);
+    expect(sink).toHaveBeenCalledTimes(0);
   });
 
   it('forwards seam, error, and tags to the registered sink', () => {

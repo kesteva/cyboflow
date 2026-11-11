@@ -238,6 +238,7 @@ describe('RunLauncher.launch', () => {
       // Session-aware WorktreeManager: branch resolved from the session worktree.
       const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub(cannedBranchName);
 
+      // No publisher passed (5th arg omitted) — the publisher is optional.
       const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
@@ -884,51 +885,6 @@ describe('RunLauncher.launch publisher', () => {
       expect(typeof firstCall[1].timestamp).toBe('string');
       expect(firstCall[1].timestamp.length).toBeGreaterThan(0);
       expect(() => new Date(firstCall[1].timestamp)).not.toThrow();
-    });
-  });
-
-  it('launch succeeds without a publisher (publisher is optional)', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      const seedWorkflowId = randomUUID();
-      db.prepare(
-        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
-      ).run(seedWorkflowId);
-
-      interface IdRow { id: string }
-      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-
-      const cannedRunId = randomUUID().replace(/-/g, '');
-      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
-      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
-      seedSession(db, 'sess-1', cannedWorktreePath);
-
-      const fakeRegistry = {
-        getById: (id: string) => {
-          const row = db.prepare(
-            'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
-          ).get(id);
-          return row ?? null;
-        },
-        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
-          db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
-          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
-          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
-        }),
-        resolveEffectiveTuningLevel: () => null,
-      } as unknown as WorkflowRegistry;
-
-      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
-
-      // No publisher passed — 5th arg omitted entirely (publisher is still optional)
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
-      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
-
-      expect(result.runId).toBe(cannedRunId);
     });
   });
 });

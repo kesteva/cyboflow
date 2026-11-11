@@ -13,8 +13,8 @@
  *   - happy path (awaiting_review)→ same; pause is valid from an idle rest too.
  *   - stopLiveRun rejection       → DB write STILL applies (fail-soft) + returns success.
  *   - race (UPDATE changes=0)     → noOp ('race').
- *   - GIT-NEUTRAL invariant       → the deps bag carries NO worktree/branch/merge
- *                                   collaborator at all (structural assertion).
+ *   - GIT-NEUTRAL invariant       → pause leaves the run's worktree/branch columns
+ *                                   byte-identical.
  *
  * Style mirrors cancelRunHandler.test.ts: real in-memory better-sqlite3 DB +
  * injected vi.fn() fakes, no tRPC wiring.
@@ -493,34 +493,24 @@ describe('pauseRunHandler (SDK-only run Pause — Phase 4b)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // GIT-NEUTRAL invariant — the deps bag has NO git collaborator at all.
+  // GIT-NEUTRAL invariant — pause never touches the run's worktree/branch columns.
   // -------------------------------------------------------------------------
 
-  it('GIT-NEUTRAL: the PauseRunDeps bag exposes no worktree/branch/merge collaborator', async () => {
-    const { runId } = seedRun(db, { status: 'running' });
+  it('GIT-NEUTRAL: pause leaves the worktree/branch columns of the run row untouched', async () => {
+    const { runId } = seedRun(db, { status: 'running', branchName: 'cyboflow/keep-me' });
     setSubstrate(db, runId, 'sdk');
     setSession(db, runId, 'sess-1');
     const deps = makeDeps(db, spy, runQueues);
+    const readCols = () =>
+      db
+        .prepare('SELECT worktree_path, branch_name, base_branch FROM workflow_runs WHERE id = ?')
+        .get(runId);
+    const before = readCols();
 
     await pauseRunHandler(runId, deps);
 
-    const keys = Object.keys(deps);
-    for (const forbidden of [
-      'worktreeManager',
-      'removeWorktreeByPath',
-      'deleteBranch',
-      'squashAndMergeWorktreeToMain',
-      'mergeWorktreeToMain',
-      'gitPush',
-      'taskStageDeriver',
-      'assertNotSessionHosted',
-    ]) {
-      expect(keys).not.toContain(forbidden);
-    }
-    // The worktree row itself is untouched by pause.
-    const wt = db.prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?').get(runId) as {
-      worktree_path: string;
-    };
-    expect(wt.worktree_path).toBe('/tmp/test');
+    expect(getRun(db, runId).status).toBe('paused');
+    expect(readCols()).toEqual(before);
+    expect(before).toMatchObject({ worktree_path: '/tmp/test', branch_name: 'cyboflow/keep-me' });
   });
 });

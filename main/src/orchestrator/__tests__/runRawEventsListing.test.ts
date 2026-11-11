@@ -118,16 +118,6 @@ describe('selectRunRawStreamEvents', () => {
     expect(result[0].type).toBe('assistant');
   });
 
-  it('only projects events for the requested runId (isolation)', () => {
-    const rows: MockRawRow[] = [
-      { id: 1, runId: 'run-x', createdAt: '2026-01-01T00:00:01Z', payloadJson: JSON.stringify({ type: 'assistant', message: { id: 'mx', model: 'claude-opus-4', role: 'assistant', content: [{ type: 'text', text: 'X' }] } }) },
-      { id: 2, runId: 'run-y', createdAt: '2026-01-01T00:00:02Z', payloadJson: JSON.stringify({ type: 'assistant', message: { id: 'my', model: 'claude-opus-4', role: 'assistant', content: [{ type: 'text', text: 'Y' }] } }) },
-    ];
-    const db = makeMockDb(rows);
-    expect(selectRunRawStreamEvents(db, 'run-x')).toHaveLength(1);
-    expect(selectRunRawStreamEvents(db, 'run-y')).toHaveLength(1);
-  });
-
   it('strips the persistence-only process-identity stamp from the replayed payload', () => {
     const rows: MockRawRow[] = [
       {

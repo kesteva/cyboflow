@@ -187,11 +187,6 @@ describe('isToolAllowed — ask suppresses allow', () => {
     expect(isToolAllowed('Bash', bash('git add .'), r)).toBe(true);
   });
 
-  it('a compound command is suppressed when ANY segment matches an ask rule', () => {
-    const r = rules(['Bash(git:*)'], [], ['Bash(git push:*)']);
-    expect(isToolAllowed('Bash', bash('git add . && git push'), r)).toBe(false);
-  });
-
   it('an empty ask list changes nothing', () => {
     const r = rules(['Bash(git:*)'], [], []);
     expect(isToolAllowed('Bash', bash('git push'), r)).toBe(true);

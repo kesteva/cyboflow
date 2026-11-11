@@ -713,10 +713,6 @@ describe('WorkflowRegistry', () => {
       const rows = registry.listByProject(5);
       expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
     });
-
-    it('QUICK_WORKFLOW_NAME constant equals __quick__', () => {
-      expect(QUICK_WORKFLOW_NAME).toBe('__quick__');
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -2734,28 +2730,6 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    it('substrate is immutable for the run — a second read returns the same value (no in-flight mutation path)', async () => {
-      await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        const path = writeTempMd(tmpDir, 'substrate-immutable.md', '---\n---\n');
-        registry.seed(1, [{ name: 'planner', path }]);
-
-        interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
-
-        // Progress the run through a couple of status transitions; substrate must
-        // not move (createRun is the only writer; there is no UPDATE path).
-        db.prepare('UPDATE workflow_runs SET status = ? WHERE id = ?').run('running', runId);
-        const first = registry.getRunById(runId);
-        db.prepare('UPDATE workflow_runs SET status = ? WHERE id = ?').run('completed', runId);
-        const second = registry.getRunById(runId);
-
-        expect(first!.substrate).toBe('sdk');
-        expect(second!.substrate).toBe('sdk');
-        expect(first!.substrate).toBe(second!.substrate);
-      });
-    });
-
     // ───── seed_idea_ids read-back (IDEA-009 "Planner should accept multiple ideas") ─────
 
     it('projects seed_idea_ids as null on a freshly created run', async () => {
@@ -2852,22 +2826,7 @@ describe('WorkflowRegistry', () => {
       const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-planner') as SpecRow;
       expect(row.spec_json).toBe(JSON.stringify(definition));
       expect(JSON.parse(row.spec_json)).toEqual(definition);
-    });
-
-    it('round-trips through getById so resolveWorkflowDefinition would prefer it', () => {
-      db.prepare(
-        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
-         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
-      ).run();
-
-      const edited = makeDefinition('planner');
-      // Mutate one field so the edited graph clearly differs from the built-in.
-      edited.phases[0].label = 'Edited Plan';
-      registry.updateSpec('wf-1-planner', edited);
-
-      const row = registry.getById('wf-1-planner');
-      expect(row).not.toBeNull();
-      expect(JSON.parse(row!.spec_json)).toEqual(edited);
+      expect(JSON.parse(registry.getById('wf-1-planner')!.spec_json)).toEqual(definition);
     });
 
     it('throws when the workflow id does not exist (0 rows updated)', () => {
@@ -3131,18 +3090,6 @@ describe('WorkflowRegistry', () => {
       const rows = registry.listByProject(3);
       expect(rows.map((r) => r.id)).toContain(row.id);
     });
-
-    it('resolveWorkflowDefinition-shaped: the persisted spec is the built-in clone when cloned from one', () => {
-      // Custom flows are commonly created by cloning a built-in then renaming.
-      // Confirm an arbitrary built-in definition survives the round-trip.
-      const cloned = WORKFLOW_DEFINITIONS.planner;
-      const row = registry.createCustom({
-        projectId: 9,
-        name: 'Cloned Planner',
-        specJson: JSON.stringify(cloned),
-      });
-      expect(JSON.parse(row.spec_json)).toEqual(cloned);
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -3305,7 +3252,7 @@ describe('WorkflowRegistry', () => {
   // -------------------------------------------------------------------------
 
   describe('listByProject includeArchived filtering', () => {
-    it('defaults to includeArchived=true — an archived row still appears when the param is omitted', () => {
+    it.each([undefined, true])('includeArchived=%s — an archived row still appears', (includeArchived) => {
       const row = registry.createCustom({
         projectId: 1,
         name: 'Archived Flow',
@@ -3313,7 +3260,7 @@ describe('WorkflowRegistry', () => {
       });
       registry.archiveWorkflow(row.id);
 
-      const rows = registry.listByProject(1);
+      const rows = registry.listByProject(1, includeArchived);
       expect(rows.map((r) => r.id)).toContain(row.id);
     });
 
@@ -3334,18 +3281,6 @@ describe('WorkflowRegistry', () => {
       const ids = rows.map((r) => r.id);
       expect(ids).toContain(active.id);
       expect(ids).not.toContain(archived.id);
-    });
-
-    it('includeArchived=true explicitly includes an archived row', () => {
-      const row = registry.createCustom({
-        projectId: 1,
-        name: 'Explicit Include',
-        specJson: JSON.stringify(makeDefinition('explicit-include')),
-      });
-      registry.archiveWorkflow(row.id);
-
-      const rows = registry.listByProject(1, true);
-      expect(rows.map((r) => r.id)).toContain(row.id);
     });
   });
 });

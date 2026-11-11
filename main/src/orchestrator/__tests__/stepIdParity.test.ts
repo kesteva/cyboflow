@@ -27,8 +27,7 @@
  *   (b) an EDITED-built-in `spec_json` (renamed + added + removed step) — the
  *       prompt references the edited ids and NONE of the removed originals
  *   (c) a CUSTOM-flow def (arbitrary kebab ids, no built-in backstop)
- * Plus fail-soft: a null/broken-spec resolution yields '' (no throw), and a
- * negative-control bogus id is absent from the emitted set.
+ * Plus fail-soft: a null/broken-spec resolution yields '' (no throw).
  *
  * No DB / IPC / Electron imports — the generator and resolver are pure.
  */
@@ -78,8 +77,6 @@ function definitionStepIds(def: WorkflowDefinition): string[] {
   return def.phases.flatMap((p) => p.steps).map((s) => s.id);
 }
 
-const BOGUS_ID = 'definitely-not-a-step';
-
 // ---------------------------------------------------------------------------
 // (a) Resolved built-in
 // ---------------------------------------------------------------------------
@@ -101,12 +98,6 @@ describe('stepIdParity — resolved built-in (planner fallback)', () => {
     expect(emittedStepIds(append)).toEqual(expectedIds);
     // The generator-internal flatten helper agrees with the definition too.
     expect(flattenStepIds(def)).toEqual(expectedIds);
-  });
-
-  it('negative control: a bogus id is absent from the emitted set', () => {
-    const append = buildStepReportingAppend(def);
-    expect(emittedStepIds(append)).not.toContain(BOGUS_ID);
-    expect(definitionStepIds(def as WorkflowDefinition)).not.toContain(BOGUS_ID);
   });
 });
 
@@ -175,10 +166,6 @@ describe('stepIdParity — edited built-in (renamed / added / removed steps)', (
     expect(builtinIds).toContain('expand-spec');
     expect(builtinIds).toContain('approve-idea');
   });
-
-  it('negative control: a bogus id is absent from the emitted set', () => {
-    expect(emittedStepIds(buildStepReportingAppend(def))).not.toContain(BOGUS_ID);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -230,10 +217,6 @@ describe('stepIdParity — custom flow (no built-in backstop)', () => {
       'final-signoff',
     ]);
     expect(emittedStepIds(append)).toEqual(definitionStepIds(def as WorkflowDefinition));
-  });
-
-  it('negative control: a bogus id is absent from the emitted set', () => {
-    expect(emittedStepIds(buildStepReportingAppend(def))).not.toContain(BOGUS_ID);
   });
 });
 

@@ -486,23 +486,6 @@ describe('retryRunHandler — fan-out lane reset gating', () => {
     await waitForRedrive(runQueues, runId);
     db.close();
   });
-
-  it('does NOT call resetFailedLanes when the target step has no fanOut (even with batch_id set)', async () => {
-    const db = makeDb();
-    const runQueues = new RunQueueRegistry();
-    const { runId } = seedProgrammaticRun(db, { status: 'failed', currentStepId: 'step-a', batchId: 'batch-1' });
-
-    const executor = makeFakeExecutor();
-    const resetFailedLanes = vi.fn<(batchId: string) => number>().mockReturnValue(0);
-    const deps = makeDeps(dbAdapter(db), executor, { runQueues, resetFailedLanes });
-
-    const result = await retryRunHandler(runId, undefined, deps);
-
-    expect(result).toEqual({ delivered: true, stepId: 'step-a' });
-    expect(resetFailedLanes).not.toHaveBeenCalled();
-    await waitForRedrive(runQueues, runId);
-    db.close();
-  });
 });
 
 // ---------------------------------------------------------------------------

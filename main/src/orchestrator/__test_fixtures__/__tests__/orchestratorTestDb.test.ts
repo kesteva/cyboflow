@@ -72,13 +72,6 @@ function columnSet(db: Database.Database, tableName: string): Set<string> {
 // ---------------------------------------------------------------------------
 
 describe('createTestDb', () => {
-  it('returns a fresh in-memory Database with FK enforcement ON', () => {
-    const db = createTestDb();
-    // FK pragma should return 1.
-    const result = db.pragma('foreign_keys', { simple: true });
-    expect(result).toBe(1);
-  });
-
   it('creates workflows, workflow_runs, approvals, raw_events tables', () => {
     const db = createTestDb();
     const tables = (

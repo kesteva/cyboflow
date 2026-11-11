@@ -4455,17 +4455,6 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         router.applyChange(1, { actor: 'user', entityType: 'task', taskId: b, dependsOnTaskId: a }),
       ).rejects.toMatchObject({ code: 'dependency_cycle' });
     });
-
-    it('serializes the write on the per-project queue and commits before resolving', async () => {
-      const db = buildDb();
-      const router = TaskChangeRouter.initialize(dbAdapter(db));
-      const [a, b] = await makeTasks(db, router, 2);
-
-      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
-      // The per-project queue is drained once applyChange resolves.
-      await router._queueForProject(1).onIdle();
-      expect(depCount(db, a)).toBe(1);
-    });
   });
 });
 

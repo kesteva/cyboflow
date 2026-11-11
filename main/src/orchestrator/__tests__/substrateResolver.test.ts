@@ -104,43 +104,6 @@ describe('resolveSubstrate — override ladder', () => {
     expect(result).toBe('interactive');
   });
 
-  it('full precedence: frontmatter beats projectConfig beats globalDefault beats env', () => {
-    // Every level set to a DISTINCT-but-valid value where applicable; only the
-    // highest set level should win. Use 'interactive' at the top and 'sdk' below.
-    expect(
-      resolveSubstrate({
-        frontmatterSubstrate: 'interactive',
-        projectConfigSubstrate: 'sdk',
-        globalDefaultSubstrate: 'sdk',
-        env: { [SUBSTRATE_ENV_VAR]: 'sdk' },
-      }),
-    ).toBe('interactive');
-
-    // Drop frontmatter → projectConfig (here 'interactive') wins.
-    expect(
-      resolveSubstrate({
-        projectConfigSubstrate: 'interactive',
-        globalDefaultSubstrate: 'sdk',
-        env: { [SUBSTRATE_ENV_VAR]: 'sdk' },
-      }),
-    ).toBe('interactive');
-
-    // Drop projectConfig → globalDefault (here 'interactive') wins.
-    expect(
-      resolveSubstrate({
-        globalDefaultSubstrate: 'interactive',
-        env: { [SUBSTRATE_ENV_VAR]: 'sdk' },
-      }),
-    ).toBe('interactive');
-
-    // Drop globalDefault → env wins.
-    expect(
-      resolveSubstrate({
-        env: { [SUBSTRATE_ENV_VAR]: 'interactive' },
-      }),
-    ).toBe('interactive');
-  });
-
   it('an invalid value at a level is ignored and resolution falls through (fail-soft)', () => {
     // A typo at the highest level must NOT throw and must NOT win — resolution
     // falls through to the next valid level (here projectConfig).

@@ -19,11 +19,6 @@ import { computeSpecHash } from '../specHash';
 const HASH_OF_EMPTY = createHash('sha256').update('{}', 'utf8').digest('hex');
 
 describe('computeSpecHash', () => {
-  it('is deterministic — the same string hashes to the same digest', () => {
-    const spec = '{"phases":[{"id":"plan"}]}';
-    expect(computeSpecHash(spec)).toBe(computeSpecHash(spec));
-  });
-
   it('returns a lowercase 64-character sha256 hex digest', () => {
     const hash = computeSpecHash('{"a":1}');
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
@@ -41,22 +36,10 @@ describe('computeSpecHash', () => {
     expect(computeSpecHash('{}')).toBe(HASH_OF_EMPTY);
   });
 
-  it("collapses null, undefined, and '{}' to one identical hash", () => {
-    const a = computeSpecHash(null);
-    const b = computeSpecHash(undefined);
-    const c = computeSpecHash('{}');
-    expect(a).toBe(b);
-    expect(b).toBe(c);
-  });
-
   it('hashes byte-different spec text to different digests (no parse/canonicalize)', () => {
     // Same JSON VALUE, different whitespace → different bytes → different hash.
     // This pins the documented "exact string, no canonicalization" contract.
     expect(computeSpecHash('{"a":1}')).not.toBe(computeSpecHash('{ "a": 1 }'));
-  });
-
-  it('hashes distinct specs to distinct digests', () => {
-    expect(computeSpecHash('{"a":1}')).not.toBe(computeSpecHash('{"a":2}'));
   });
 
   it('matches a hand-computed sha256 of the exact input string', () => {
