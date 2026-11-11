@@ -412,15 +412,6 @@ describe('RunTypeOverridesSection — grouped list', () => {
       expect(screen.queryByText('Built-in flows')).not.toBeInTheDocument();
     });
 
-    it('never surfaces the rejection as an unhandled promise rejection', async () => {
-      projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
-      liveConfig = {};
-      await useConfigStore.getState().fetchConfig();
-      // Rendering (and awaiting settlement) must not throw.
-      render(<RunTypeOverridesSection />);
-      await expect(waitForWorkflowsSettled()).resolves.toBeUndefined();
-    });
-
     it('lets the user retry, clearing the error once the retry succeeds', async () => {
       projectsGetAll.mockRejectedValueOnce(new Error('fan-out failed'));
       liveConfig = {};

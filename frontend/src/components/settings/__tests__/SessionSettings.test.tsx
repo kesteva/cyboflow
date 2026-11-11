@@ -243,20 +243,6 @@ describe('SessionSettings', () => {
       }
     });
 
-    // The picker must not grow a second hand-written alias list — every option
-    // comes from the launch surfaces' shared MODEL_OPTIONS.
-    it("offers exactly the launch surfaces' model options, plus the clear choice", () => {
-      renderGroup();
-
-      const rendered = Array.from(
-        document.body.querySelectorAll('[data-testid^="default-launch-model-"]'),
-      ).map((el) => el.getAttribute('data-testid'));
-      expect(rendered).toEqual([
-        'default-launch-model-unset',
-        ...MODEL_OPTIONS.map((o) => `default-launch-model-${o.id}`),
-      ]);
-    });
-
     it('reflects a stored model as pressed and reports a pick back through the callback', () => {
       const props = renderGroup({ defaultLaunchModel: 'sonnet' });
 
@@ -289,14 +275,15 @@ describe('SessionSettings', () => {
         .map((el) => el.getAttribute('data-testid') ?? '')
         .map((id) => id.replace('default-launch-model-', ''));
 
-    it('offers Claude aliases under a Claude runtime (and while unset)', () => {
-      renderGroup({ defaultAgentRuntime: 'claude-interactive' });
-      expect(renderedModelIds()).toEqual(['unset', ...MODEL_OPTIONS.map((o) => o.id)]);
-
-      cleanup();
-      renderGroup({ defaultAgentRuntime: undefined });
-      expect(renderedModelIds()).toEqual(['unset', ...MODEL_OPTIONS.map((o) => o.id)]);
-    });
+    // The picker must not grow a second hand-written alias list — every option
+    // comes from the launch surfaces' shared MODEL_OPTIONS.
+    it.each(['claude-interactive', 'claude-sdk', undefined] as const)(
+      "offers exactly the launch surfaces' Claude model options, plus the clear choice, under %s",
+      (runtime) => {
+        renderGroup({ defaultAgentRuntime: runtime });
+        expect(renderedModelIds()).toEqual(['unset', ...MODEL_OPTIONS.map((o) => o.id)]);
+      },
+    );
 
     it.each(['codex-sdk', 'codex-pty'] as const)(
       'offers the Codex catalog under %s — no Claude alias in sight',
@@ -571,18 +558,6 @@ describe('SessionSettings', () => {
       expect(html.indexOf('Default Agent Runtime')).toBeLessThan(
         html.indexOf('Default Launch Model'),
       );
-    });
-
-    it('offers the Codex catalog under a Codex runtime and Claude aliases otherwise', () => {
-      setCodexCatalog();
-      renderGroup({ defaultAgentRuntime: 'codex-sdk' });
-      expect(screen.getByTestId('default-launch-model-gpt-5-codex')).toBeInTheDocument();
-      expect(screen.queryByTestId('default-launch-model-opus')).not.toBeInTheDocument();
-
-      cleanup();
-      renderGroup({ defaultAgentRuntime: 'claude-sdk' });
-      expect(screen.getByTestId('default-launch-model-opus')).toBeInTheDocument();
-      expect(screen.queryByTestId('default-launch-model-gpt-5-codex')).not.toBeInTheDocument();
     });
 
     it('says it is loading rather than showing a bare Auto-only list', () => {

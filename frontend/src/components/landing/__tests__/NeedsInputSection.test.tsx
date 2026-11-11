@@ -264,7 +264,8 @@ describe('NeedsInputSection', () => {
     expect(screen.queryByTestId('pause-switch-open')).not.toBeInTheDocument();
   });
 
-  it('routes an idle-session-sourced review item to the quick session, not the run', () => {
+  it('routes an idle-session-sourced review item to the quick session, not the run', async () => {
+    const user = userEvent.setup();
     // The page-level `openReviewItem` handler (LandingHome) is what decodes the
     // `idle-session:<id>` source prefix; NeedsInputSection's job is only to hand
     // the raw item back through onOpenReviewItem, which it does unconditionally.
@@ -276,6 +277,8 @@ describe('NeedsInputSection', () => {
     });
     render(<NeedsInputSection {...baseProps} reviewItems={[item]} onOpenReviewItem={onOpenReviewItem} />);
     expect(screen.getByText('Idle session needs your attention')).toBeInTheDocument();
+    await user.click(screen.getByText('Answer →'));
+    expect(onOpenReviewItem).toHaveBeenCalledWith(item);
   });
 
   it('names the halted session on a review item, resolved from its run', () => {

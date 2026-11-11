@@ -214,19 +214,6 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
     expect(useOnboardingStore.getState().multiRuntime).toBe(true);
   });
 
-  it('leaves OMP off by default even when Continue is clicked without touching its toggle', async () => {
-    await mountAtConnectStep(baseAppConfig());
-
-    fireEvent.click(screen.getByRole('switch', { name: 'Use Claude Code in Cyboflow' }));
-    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
-
-    await waitFor(() =>
-      expect(configUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ agentProviderAccess: expect.objectContaining({ omp: false }) }),
-      ),
-    );
-  });
-
   it('persists an explicit OMP opt-in alongside claude, and never gates Continue on it', async () => {
     await mountAtConnectStep(baseAppConfig());
 

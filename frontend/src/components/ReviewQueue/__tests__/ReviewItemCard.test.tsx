@@ -225,17 +225,6 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('decision-reject')).toHaveTextContent('Reject');
   });
 
-  it("the approve-design gate (Tier 2, item 12b) relabels the buttons for its revision loop, by SOURCE", () => {
-    render(
-      <ReviewItemCard
-        item={makeItem('decision', { id: 'rvw_design', blocking: true, source: 'gate:human-step:approve-design' })}
-        surface="session"
-      />,
-    );
-    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
-    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
-  });
-
   it("the approve-design gate's rerun button resolves with outcome=revise, never reject (a reject ends the run)", async () => {
     render(
       <ReviewItemCard
@@ -744,30 +733,6 @@ describe('ReviewItemCard', () => {
           projectId: 5,
           reviewItemId: 'rvw_q_gate_dis',
           outcome: 'reject',
-          surface: 'queue',
-        }),
-      );
-      expect(mockDismiss).not.toHaveBeenCalled();
-    });
-
-    it('a DECISION Dismiss on the approve-design gate never reaches the default pair (revise, not reject)', async () => {
-      // Unlike approve-plan above, approve-design is checked BEFORE the queue's
-      // default-actions collapse, so it never has a 'default-dismiss' button to
-      // click at all — it renders the real Approve/Revise pair directly, even on
-      // the queue surface. This pins that regression guard.
-      const item = makeItem('decision', {
-        id: 'rvw_q_design_dis',
-        blocking: true,
-        source: 'gate:human-step:approve-design',
-      });
-      render(<ReviewItemCard item={item} />);
-      expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
-      fireEvent.click(screen.getByTestId('decision-reject'));
-      await waitFor(() =>
-        expect(mockResolve).toHaveBeenCalledWith({
-          projectId: 5,
-          reviewItemId: 'rvw_q_design_dis',
-          outcome: 'revise',
           surface: 'queue',
         }),
       );

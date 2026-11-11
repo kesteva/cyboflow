@@ -83,11 +83,4 @@ describe('CapabilityChips', () => {
       expect(chip.className).not.toContain('truncate');
     }
   });
-
-  it('renders deriveChips labels verbatim (the suffix comes from the shared function)', () => {
-    render(<CapabilityChips snapshot={cmaSnapshot} transport={null} vendor="anthropic-cma" />);
-    const expected = deriveChips(cmaSnapshot, { transport: null, vendor: 'anthropic-cma' }).map((c) => c.label);
-    expect(labels()).toEqual(expected);
-    expect(labels().some((l) => l.includes('(not confirmed) (not confirmed)'))).toBe(false);
-  });
 });

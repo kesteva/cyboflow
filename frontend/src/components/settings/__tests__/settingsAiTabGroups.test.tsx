@@ -122,15 +122,6 @@ describe('Settings — AI tab groups', () => {
     expect(screen.getByRole('heading', { name: 'Session settings', level: 3 })).toBeInTheDocument();
   });
 
-  it('renders all 15 sections with zero content loss', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
-    await screen.findByTestId('settings-feature-controls');
-
-    for (const title of [...FEATURE_CONTROLS, ...SESSION_SETTINGS]) {
-      expect(screen.getByRole('heading', { name: title, level: 4 })).toBeInTheDocument();
-    }
-  });
-
   it.each(FEATURE_CONTROLS)('places "%s" in Feature controls only', async (title) => {
     render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
 

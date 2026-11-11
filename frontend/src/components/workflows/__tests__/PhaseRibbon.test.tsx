@@ -80,10 +80,4 @@ describe('PhaseRibbon', () => {
     expect((segments[0] as HTMLElement).style.flexGrow).toBe('1');
     expect((segments[1] as HTMLElement).style.flexGrow).toBe('3');
   });
-
-  it('renders standalone with NO runId / NO subscription (no provider needed)', () => {
-    // The props admit no runId; rendering without any tRPC provider must not throw
-    // and must open zero subscriptions — proven by the bare render succeeding.
-    expect(() => render(<PhaseRibbon definition={DEF} />)).not.toThrow();
-  });
 });

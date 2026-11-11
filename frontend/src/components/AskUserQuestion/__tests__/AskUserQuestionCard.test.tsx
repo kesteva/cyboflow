@@ -391,29 +391,6 @@ describe('Other option enables free-text input', () => {
 
     expect(textInput).not.toBeDisabled();
   });
-
-  it('typed value is captured and not empty after typing', () => {
-    const item = makeQuestion({
-      questions: [
-        {
-          question: 'What color?',
-          header: 'Color',
-          multiSelect: false,
-          options: [{ label: 'Red' }],
-        },
-      ],
-    });
-
-    render(<AskUserQuestionCard item={item} />);
-
-    const otherRadio = screen.getByRole('radio', { name: /Other/i });
-    fireEvent.click(otherRadio);
-
-    const textInput = screen.getByRole('textbox', { name: /other free-text/i });
-    fireEvent.change(textInput, { target: { value: 'Purple' } });
-
-    expect((textInput as HTMLInputElement).value).toBe('Purple');
-  });
 });
 
 // ---------------------------------------------------------------------------

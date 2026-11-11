@@ -140,7 +140,8 @@ describe('AgentComposer', () => {
       dataTransfer: { files: [imageFile('dropped.png', 'image/png')] },
     });
 
-    await screen.findByTestId('agent-composer-attachments');
+    const strip = await screen.findByTestId('agent-composer-attachments');
+    expect(strip.querySelectorAll('img')).toHaveLength(1);
   });
 
   it('send passes the wire-shaped images and clears them', async () => {
@@ -212,16 +213,6 @@ describe('AgentComposer', () => {
     await waitFor(() =>
       expect(screen.getByTestId('agent-composer-attach-error')).toHaveTextContent('At most 4 images'),
     );
-  });
-
-  it('a text-only send still omits the images argument', () => {
-    const onSend = vi.fn();
-    render(<AgentComposer onSend={onSend} disabled={false} />);
-
-    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'plain' } });
-    fireEvent.click(screen.getByTestId('agent-composer-send'));
-
-    expect(onSend).toHaveBeenCalledWith('plain', undefined);
   });
 
   // ---------------------------------------------------------------------
@@ -373,11 +364,6 @@ describe('AgentComposer', () => {
     expect(screen.getByTestId('agent-composer-queue')).toBeInTheDocument();
     expect(screen.getByTestId('agent-composer-interrupt-send')).toBeInTheDocument();
     expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
-  });
-
-  it('the textarea stays typeable while sending (not `disabled`)', () => {
-    render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} onQueue={vi.fn()} />);
-    expect(screen.getByTestId('agent-composer-input')).not.toBeDisabled();
   });
 
   it('clicking Queue calls onQueue with the trimmed text and clears the draft', () => {
