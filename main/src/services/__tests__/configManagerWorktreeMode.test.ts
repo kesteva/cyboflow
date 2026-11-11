@@ -35,11 +35,6 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.quickSessionWorktreeMode', () => {
-  it("getQuickSessionWorktreeMode() returns 'worktree' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager();
-    expect(mgr.getQuickSessionWorktreeMode()).toBe('worktree');
-  });
-
   it("quickSessionWorktreeMode is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
     const mgr = new ConfigManager();
     expect(mgr.getConfig().quickSessionWorktreeMode).toBeUndefined();

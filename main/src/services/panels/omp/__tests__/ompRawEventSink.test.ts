@@ -80,10 +80,14 @@ describe('OmpRawEventSink', () => {
   it('warns instead of throwing when the insert fails', () => {
     const db = makeDb();
     try {
-      const sink = new OmpRawEventSink(db, { warn: vi.fn() } as unknown as Logger);
+      const warn = vi.fn();
+      const sink = new OmpRawEventSink(db, { warn } as unknown as Logger);
       db.exec('DROP TABLE raw_events');
 
       expect(() => sink.persist(RUN_ID, { type: 'turn_start' })).not.toThrow();
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain(RUN_ID);
+      expect(warn.mock.calls[0][0]).toContain('turn_start');
     } finally {
       db.close();
     }

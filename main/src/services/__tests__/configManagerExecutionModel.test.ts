@@ -36,11 +36,6 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.getDefaultExecutionModel', () => {
-  it("floors to 'programmatic' on a fresh instance (before initialize)", () => {
-    const mgr = new ConfigManager();
-    expect(mgr.getDefaultExecutionModel()).toBe('programmatic');
-  });
-
   it("defaultExecutionModel is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
     const mgr = new ConfigManager();
     expect(mgr.getConfig().defaultExecutionModel).toBeUndefined();

@@ -101,19 +101,15 @@ describe('runQuitDrain', () => {
     expect(finish).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the deadline timer when the teardown wins the race', async () => {
+  it('clears the deadline timer when the teardown wins the race (and arms no watchdog without forceExit)', async () => {
     // Left armed, the timer would keep the process alive for its full duration
-    // after the teardown is already done — a visibly slow quit.
+    // after the teardown is already done — a visibly slow quit. With no
+    // forceExit supplied, no post-quit watchdog is armed either.
     await runQuitDrain({ drain: async () => {}, finish: vi.fn() });
     expect(vi.getTimerCount()).toBe(0);
   });
 
   describe('post-quit exit watchdog', () => {
-    it('is not armed at all without forceExit', async () => {
-      await runQuitDrain({ drain: async () => {}, finish: vi.fn() });
-      expect(vi.getTimerCount()).toBe(0);
-    });
-
     it('forces the exit only once the post-quit budget is exhausted, after finish', async () => {
       // The drain deadline bounds our teardown; this bounds what Electron does
       // AFTER the re-issued quit, where a post-will-quit hang was observed.

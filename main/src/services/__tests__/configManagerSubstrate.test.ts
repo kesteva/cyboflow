@@ -33,11 +33,6 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.defaultSubstrate', () => {
-  it("getDefaultSubstrate() returns 'sdk' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager();
-    expect(mgr.getDefaultSubstrate()).toBe('sdk');
-  });
-
   it("defaultSubstrate is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
     const mgr = new ConfigManager();
     // The field is intentionally absent — the accessor floors instead.

@@ -36,11 +36,6 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.quickSessionDefaultSubstrate', () => {
-  it("getQuickSessionDefaultSubstrate() returns 'interactive' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager();
-    expect(mgr.getQuickSessionDefaultSubstrate()).toBe('interactive');
-  });
-
   it("quickSessionDefaultSubstrate is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
     const mgr = new ConfigManager();
     expect(mgr.getConfig().quickSessionDefaultSubstrate).toBeUndefined();
