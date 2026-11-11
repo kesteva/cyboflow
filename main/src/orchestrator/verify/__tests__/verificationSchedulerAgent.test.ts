@@ -2157,7 +2157,7 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
       artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
+      config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
       runbookStatus: async () => {

@@ -475,6 +475,12 @@ describe('VerifyRunbookStore — an absent file is record-authoritative (F10)', 
     expect(persistedStatus(h.db)).toBe('proven');
 
     // The tree that DOES carry it is still proven, by the full conjunction.
+    // F10: an absent file NEVER answers 'proven-file-absent-here' any more — it is
+    // judged on the other conjuncts, and the carrying tree reads proven for both views.
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
+      status: 'proven',
+      reason: 'proven',
+    });
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
     h.db.close();
   });
@@ -1153,27 +1159,6 @@ describe('VerifyRunbookStore.statusDetail', () => {
       reason: 'draft',
       fileDeclaresModality: false,
     });
-    h.db.close();
-  });
-
-  it('NEVER answers proven-file-absent-here any more — an absent file is judged on the other conjuncts (F10)', async () => {
-    const h = makeHarness();
-    await proveWeb(h);
-
-    // The pre-merge state used to be its own refusal. It is now simply the
-    // record's answer, because the record is what the runner executes.
-    expect(await h.store.statusDetail(1, '/tmp/wt-b', 'web')).toEqual({
-      status: 'proven',
-      reason: 'proven',
-    });
-    expect(persistedStatus(h.db)).toBe('proven');
-
-    // And the tree that carries it still reads proven, for both views.
-    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
-      status: 'proven',
-      reason: 'proven',
-    });
-    expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
     h.db.close();
   });
 

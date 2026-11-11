@@ -28,7 +28,7 @@ describe('buildBuiltInWorkflows', () => {
 
   it('points each descriptor at an existing, readable, non-empty prompt .md', () => {
     for (const descriptor of buildBuiltInWorkflows()) {
-      expect(descriptor.path, `${descriptor.name} path`).toMatch(/\.md$/);
+      expect(descriptor.path, `${descriptor.name} path`).toMatch(new RegExp(`${descriptor.name}\\.md$`));
       const body = readFileSync(descriptor.path, 'utf-8');
       expect(body.trim().length, `${descriptor.name} prompt body non-empty`).toBeGreaterThan(0);
     }
@@ -310,14 +310,6 @@ describe('buildBuiltInWorkflows', () => {
     );
     // human-review must be the LAST step (the terminal merge gate).
     expect(steps[steps.length - 1]!.id, 'human-review is the terminal step').toBe('human-review');
-  });
-
-  it('ship is planner (idea → epics → tasks) concatenated with sprint to integration', () => {
-    const ship = buildBuiltInWorkflows().find((d) => d.name === 'ship');
-    expect(ship, 'ship descriptor present').toBeDefined();
-    expect(ship!.path, 'ship path').toMatch(/ship\.md$/);
-    const body = readFileSync(ship!.path, 'utf-8');
-    expect(body.trim().length, 'ship prompt body non-empty').toBeGreaterThan(0);
   });
 
   it('planner and ship preserve stub expansion and adversarial-review ordering', () => {

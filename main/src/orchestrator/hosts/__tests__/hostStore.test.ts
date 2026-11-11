@@ -100,7 +100,13 @@ describe('HostStore writes', () => {
   it('an archived label can be reused', async () => {
     const id = await store.addSsh({ label: 'Box', sshTarget: 'box' });
     await store.archive(id);
-    await expect(store.addSsh({ label: 'Box', sshTarget: 'box2' })).resolves.toBeTruthy();
+    const newId = await store.addSsh({ label: 'Box', sshTarget: 'box2' });
+    expect(newId).not.toBe(id);
+    expect(store.list()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: newId, label: 'Box', sshTarget: 'box2' })]),
+    );
+    expect(store.list().map((h) => h.id)).not.toContain(id);
+    expect(store.get(id)?.archivedAt).toMatch(ISO_RE);
   });
 
   it('update refuses This Mac and unknown ids; target change clears probe data', async () => {

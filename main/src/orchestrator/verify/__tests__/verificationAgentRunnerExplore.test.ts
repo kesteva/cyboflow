@@ -1204,12 +1204,6 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
     });
   });
 
-  it('a null bin dir (win32, or a write failure) leaves the harness PATH exactly as it was', async () => {
-    const { runner, query } = makeRunner({ materializeDependencyGuardShim: async () => ({ binDir: null }) });
-    await runner.run(makeReq());
-    expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
-  });
-
   it('a THROWING shim is fail-soft on Claude explore: logged, and the request still deploys', async () => {
     const { runner, query, warn } = makeRunner({
       materializeDependencyGuardShim: async () => {

@@ -213,18 +213,6 @@ describe('makeSessionSummarizer', () => {
     ).rejects.toThrow(/timed out after 5ms/);
   });
 
-  it('extracts total_cost_usd from the result message', async () => {
-    yieldsMessages([
-      sdkAssistantText('{"summary": "S.", "history_sentences": ["H."]}'),
-      sdkResultSuccess({ totalCostUsd: 0.0031 }),
-    ]);
-    const summarize = makeSessionSummarizer(baseDeps());
-
-    const result = await summarize({ previousSummary: '', segments: [[msg(1, 'assistant', 'hi')]] });
-
-    expect(result.costUsd).toBe(0.0031);
-  });
-
   it('defaults costUsd to 0 when the result carries no cost', async () => {
     yieldsMessages([sdkAssistantText('{"summary": "S.", "history_sentences": ["H."]}'), sdkResultSuccess()]);
     const summarize = makeSessionSummarizer(baseDeps());

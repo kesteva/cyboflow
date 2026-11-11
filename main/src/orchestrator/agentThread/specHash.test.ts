@@ -13,7 +13,6 @@
  *     even if the differential tests above somehow still pass.
  */
 import { describe, it, expect } from 'vitest';
-import { createHash } from 'node:crypto';
 import { canonicalJsonStringify, computeSpecHash } from './specHash';
 
 describe('canonicalJsonStringify', () => {
@@ -69,10 +68,6 @@ describe('computeSpecHash', () => {
     expect(computeSpecHash(value)).toBe(computeSpecHash(value));
   });
 
-  it('returns a lowercase 64-character sha256 hex digest', () => {
-    expect(computeSpecHash({ a: 1 })).toMatch(/^[0-9a-f]{64}$/);
-  });
-
   it('produces the same hash for key-order permutations, including nested objects inside arrays', () => {
     const a = { workflowId: 'planner', definition: { phases: [{ id: 'plan', steps: [{ name: 'z' }, { name: 'a' }] }], version: 2 } };
     const b = { definition: { version: 2, phases: [{ steps: [{ name: 'z' }, { name: 'a' }], id: 'plan' }] }, workflowId: 'planner' };
@@ -95,11 +90,5 @@ describe('computeSpecHash', () => {
     expect(computeSpecHash({ b: 1, a: 2 })).toBe(
       'd3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772',
     );
-  });
-
-  it('matches a hand-computed sha256 of canonicalJsonStringify(value)', () => {
-    const value = { nested: { z: 1, a: [3, 1, 2] } };
-    const expected = createHash('sha256').update(canonicalJsonStringify(value), 'utf8').digest('hex');
-    expect(computeSpecHash(value)).toBe(expected);
   });
 });

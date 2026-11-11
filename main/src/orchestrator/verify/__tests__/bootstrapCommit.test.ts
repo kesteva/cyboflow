@@ -50,22 +50,17 @@ describe('commitPathspec', () => {
     // The whole defect in one assertion: `commit -- <paths>` is a partial
     // commit, so git builds a temporary index from HEAD plus these paths and
     // whatever siblings have staged is neither committed nor disturbed.
+    //
+    // `-f` on the add is load-bearing too: many repos exclude `.cyboflow/` (it is
+    // where cyboflow keeps its own worktrees), so a plain `git add` of the
+    // runbook is a silent no-op there, and it surfaced live on the setup flow
+    // ten minutes later as a proof failing against a snapshot that did not
+    // contain the file.
     const { git, calls } = fakeGit();
     return commitPathspec({ git, paths: ['.cyboflow/verify-runbook.json'], message: 'msg' }).then(() => {
       expect(calls[0]).toEqual(['add', '-f', '--', '.cyboflow/verify-runbook.json']);
       const commit = calls.find((c) => c[0] === 'commit');
       expect(commit).toEqual(['commit', '-m', 'msg', '--', '.cyboflow/verify-runbook.json']);
-    });
-  });
-
-  it('uses `add -f`, because many repos exclude `.cyboflow/`', () => {
-    // Not a hunch: a plain `git add` of the runbook is a silent no-op in a repo
-    // that ignores or locally-excludes `.cyboflow/` (it is where cyboflow keeps
-    // its own worktrees), and it surfaced live on the setup flow ten minutes
-    // later as a proof failing against a snapshot that did not contain the file.
-    const { git, calls } = fakeGit();
-    return commitPathspec({ git, paths: ['.cyboflow/verify-runbook.json'], message: 'm' }).then(() => {
-      expect(calls[0]).toContain('-f');
     });
   });
 
@@ -118,12 +113,18 @@ describe('commitPathspec — index.lock', () => {
   });
 
   it('gives up after the attempt cap rather than retrying forever', async () => {
+    let attempts = 0;
     const { git } = fakeGit({
-      fail: (args) => (args[0] === 'add' ? new Error('index.lock exists') : null),
+      fail: (args) => {
+        if (args[0] !== 'add') return null;
+        attempts += 1;
+        return new Error('index.lock exists');
+      },
     });
     await expect(commitPathspec({ git, paths: ['a.json'], message: 'm', backoffMs: 1 })).rejects.toThrow(
       /index\.lock/,
     );
+    expect(attempts).toBe(INDEX_LOCK_MAX_ATTEMPTS);
   });
 
   it('does NOT retry an error that waiting cannot fix', async () => {
@@ -181,10 +182,5 @@ describe('isIndexLockContention', () => {
     // collision exits 128 exactly like a dozen unrelated errors, so keying on
     // the code would retry things that can never succeed.
     expect(isIndexLockContention(message)).toBe(false);
-  });
-
-  it('the attempt cap is a real bound, not an accidental infinity', () => {
-    expect(INDEX_LOCK_MAX_ATTEMPTS).toBeGreaterThan(1);
-    expect(Number.isFinite(INDEX_LOCK_MAX_ATTEMPTS)).toBe(true);
   });
 });
