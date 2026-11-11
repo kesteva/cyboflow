@@ -125,19 +125,17 @@ describe('resolveMcpServerScriptPath — packaged mode', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveMcpServerScriptPath — memoization', () => {
-  it('returns the same value on 5 consecutive calls without dirOverride', () => {
+  it('memoizes the first result: a later call without a reset ignores a changed isPackaged', () => {
     mockIsPackaged = false;
+    const first = resolveMcpServerScriptPath();
 
-    const results: string[] = [];
-    for (let i = 0; i < 5; i++) {
-      results.push(resolveMcpServerScriptPath());
-    }
+    // Flip to packaged WITHOUT resetting the cache — a memoized resolver must
+    // still return the first value; a non-memoized one would switch to asar.
+    mockIsPackaged = true;
+    const second = resolveMcpServerScriptPath();
 
-    // All five calls must return the exact same string.
-    const first = results[0];
-    for (const r of results) {
-      expect(r).toBe(first);
-    }
+    expect(second).toBe(first);
+    expect(second).not.toContain('app.asar.unpacked');
   });
 
   it('cache is reset between tests via __resetCacheForTests()', () => {

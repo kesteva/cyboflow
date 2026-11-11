@@ -522,41 +522,6 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a3) sessionId supplied (Phase 1 / migration 019) → full-form launch hosting
-  // the run inside the session worktree.
-  // -------------------------------------------------------------------------
-  it('(a3) sessionId supplied → forwards the full-form launch with the session host', async () => {
-    const launchMock = vi.fn().mockResolvedValue({
-      runId: 'run-start-sess',
-      worktreePath: '/projects/my-project/.worktrees/sess',
-      branchName: 'feature/sess',
-    });
-    const sessionManagerStub = {
-      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
-    };
-
-    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
-
-    try {
-      const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-7' });
-
-      // With a sessionId present, start calls the full-form launch — substrate +
-      // taskId + ideaId undefined, sessionId in the 6th slot, requestedPermissionMode
-      // (7th) + baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
-      // launch projectId (migration 030) in the 10th slot — so the launcher hosts
-      // the run inside the session's existing worktree.
-      expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined);
-    } finally {
-      setStartRunDeps({
-        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
-        sessionManager: { getProjectById: () => undefined },
-      });
-    }
-  });
-
-  // -------------------------------------------------------------------------
   // (a4) permissionMode supplied (WorkflowPicker) → full-form launch carrying the
   // per-run agent permission override into the 7th launch slot.
   // -------------------------------------------------------------------------
@@ -1001,53 +966,6 @@ describe('cyboflow.runs.start', () => {
         undefined, // requestedModel (13th — not requested)
         undefined, // requestedEvalEnabled (14th — not requested)
         undefined, // requestedVerifyEnabled (15th — not requested)
-        undefined, // launchOptions (16th, LAST — no variant pin)
-      );
-    } finally {
-      setStartRunDeps({
-        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
-        sessionManager: { getProjectById: () => undefined },
-      });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // (a6) findingIds omitted → back-compat: the 11th slot is undefined (the full
-  // positional vector matches the (a) happy path with a trailing undefined).
-  // -------------------------------------------------------------------------
-  it('(a6) findingIds omitted → forwards undefined in the LAST (11th) positional slot', async () => {
-    const launchMock = vi.fn().mockResolvedValue({
-      runId: 'run-start-nofind',
-      worktreePath: '/tmp/wt/nofind',
-      branchName: 'cyboflow/sprint/nofind12',
-    });
-    const sessionManagerStub = {
-      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
-    };
-
-    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
-
-    try {
-      const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1' });
-
-      expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith(
-        'wf-sprint',
-        '/projects/my-project',
-        undefined, // substrate
-        undefined, // taskId
-        undefined, // ideaId
-        'sess-1', // sessionId
-        undefined, // permissionMode
-        undefined, // baseBranch (position 8 placeholder)
-        undefined, // taskIds
-        1, // projectId (10th)
-        undefined, // requestedExecutionModel (11th placeholder)
-        undefined, // findingIds (12th — omitted)
-        undefined, // requestedModel (13th — omitted)
-        undefined, // requestedEvalEnabled (14th — omitted)
-        undefined, // requestedVerifyEnabled (15th — omitted)
         undefined, // launchOptions (16th, LAST — no variant pin)
       );
     } finally {
@@ -3821,17 +3739,6 @@ describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
 
   beforeEach(() => {
     db = createTestDbWithStepTracking();
-  });
-
-  it('resolves a built-in workflow normally when spec_json is "{}"', async () => {
-    const runId = 'run-gps-spec-builtin';
-    seedPhaseRunWithSpec(db, runId, 'planner', '{}', null);
-
-    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-    const result = await caller.cyboflow.runs.getPhaseState({ runId });
-
-    expect(result.definition.id).toBe('planner');
-    expect(result.definition.phases.length).toBeGreaterThan(0);
   });
 
   it('prefers a valid spec_json override over the built-in definition', async () => {

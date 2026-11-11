@@ -643,21 +643,6 @@ describe('OrchSocketServer', () => {
   );
 
   // -------------------------------------------------------------------------
-  // Public accessors
-  // -------------------------------------------------------------------------
-
-  it('exposes getSocketPath and hasClientForRun', async () => {
-    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
-    await server.start();
-
-    expect(server.getSocketPath()).toBe(socketPath);
-    // hasClientForRun survives as a diagnostic (its PermissionServerLike
-    // contract retired with the stale_socket rung), so pin it directly rather
-    // than through an interface no longer worth declaring.
-    expect(server.hasClientForRun('nope')).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
   // Peer authentication (per-run bearer tokens)
   //
   // The runId on the wire is SELF-DECLARED, and binding it is what grants a

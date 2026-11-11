@@ -409,19 +409,11 @@ describe('cyboflow.verificationRequests.list', () => {
     expect(result).toEqual([]);
   });
 
-  it('rejects projectId 0 without querying', async () => {
+  it.each([0, -2])('rejects projectId %i without querying', async (projectId) => {
     const { caller, db } = buildCaller();
     openDb = db;
     await expect(
-      caller.cyboflow.verificationRequests.list({ projectId: 0 }),
-    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
-  });
-
-  it('rejects a negative projectId', async () => {
-    const { caller, db } = buildCaller();
-    openDb = db;
-    await expect(
-      caller.cyboflow.verificationRequests.list({ projectId: -2 }),
+      caller.cyboflow.verificationRequests.list({ projectId }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
   });
 

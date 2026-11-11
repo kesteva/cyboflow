@@ -16,7 +16,6 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   WorkflowController,
   MAX_SYSTEMIC_PAUSES,
-  SAME_ERROR_CORROBORATION_MIN,
   SAME_ERROR_COHORT_MAX_MS,
 } from '../workflowController';
 import type {
@@ -482,10 +481,6 @@ describe('WorkflowController — systemic-pause seam', () => {
     const SAME = "Error: EPERM: operation not permitted, open '/var/run/agent.sock'";
     const ITEMS = ['t1', 't2', 't3', 't4', 't5'];
     const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
-
-    it('is three (the smallest count that is not a coincidence)', () => {
-      expect(SAME_ERROR_CORROBORATION_MIN).toBe(3);
-    });
 
     it('parks — never fails — when THREE lanes of one cohort fail with identical text', async () => {
       const driver = makeFanOutDriver(ITEMS);

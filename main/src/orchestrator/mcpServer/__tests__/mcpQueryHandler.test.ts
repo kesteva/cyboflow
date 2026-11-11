@@ -3524,10 +3524,10 @@ describe('McpQueryHandler', () => {
 
     it('never throws on a DB fault during the async create (the run is already replied to)', async () => {
       // The chokepoint's late failure is fire-and-forget — the synchronous reply
-      // is ok:true and the handler returns without awaiting. Even if we surface a
-      // genuine fault by dropping the table after the reply, handleMessage must
-      // have resolved cleanly.
+      // is ok:true and the handler returns without awaiting. Inject a genuine
+      // fault into the chokepoint; handleMessage must still have resolved cleanly.
       seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+      vi.spyOn(ReviewItemRouter.getInstance(), 'applyReviewItem').mockRejectedValue(new Error('db fault'));
 
       const { socket, writes } = makeSocketDouble();
       await expect(
@@ -3539,7 +3539,9 @@ describe('McpQueryHandler', () => {
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
-      await drain();
+      await expect(drain()).resolves.toBeUndefined();
+      const count = reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number };
+      expect(count.n).toBe(0);
     });
   });
 
@@ -7601,24 +7603,14 @@ describe('interactive-turn-end', () => {
     const handler = new McpQueryHandler(dbAdapter(db));
     const { socket, writes } = makeSocketDouble();
 
-    await handler.handleMessage(
-      { type: 'interactive-turn-end', requestId: 'tte-3', runId: 'run-1' },
-      socket,
-    );
+    await expect(
+      handler.handleMessage({ type: 'interactive-turn-end', requestId: 'tte-3', runId: 'run-1' }, socket),
+    ).resolves.toBeUndefined();
 
+    expect(writes).toHaveLength(1);
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(false);
     expect(response.error).toBe('turn_end_unavailable');
-  });
-
-  it('never throws and always replies exactly once, synchronously', async () => {
-    const handler = new McpQueryHandler(dbAdapter(db));
-    const { socket, writes } = makeSocketDouble();
-
-    await expect(
-      handler.handleMessage({ type: 'interactive-turn-end', requestId: 'tte-4', runId: 'run-1' }, socket),
-    ).resolves.toBeUndefined();
-    expect(writes).toHaveLength(1);
   });
 });
 
@@ -7765,6 +7757,8 @@ describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
     // Guards the list above against a new handlers/ file that is not a .ts
     // source, and against the directory moving out from under it.
     expect(HANDLER_FAMILY.length).toBeGreaterThanOrEqual(5);
+    expect(HANDLER_FAMILY).toContain(join('handlers', 'verifyToolHandlers.ts'));
+    expect(HANDLER_FAMILY).toContain(join('handlers', 'workflowConfigHandlers.ts'));
   });
 
   it('the MCP server tool schema never exposes a bootstrap-proof input', () => {

@@ -38,12 +38,6 @@ describe('orchSocketEndpoint', () => {
       );
     });
 
-    it('is stable for the same posixPath', () => {
-      expect(orchSocketEndpoint(DEV, 'win32', 'ada')).toBe(
-        orchSocketEndpoint(DEV, 'win32', 'ada'),
-      );
-    });
-
     it('differs per kind — parallel instances must not share a pipe', () => {
       // Same account, different data dir: the hash is the whole discriminator.
       expect(orchSocketEndpoint(STABLE, 'win32', 'ada')).toBe(
