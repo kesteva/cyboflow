@@ -89,13 +89,6 @@ describe('RunActionBar', () => {
     expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
   });
 
-  it('renders the Cancel button for an active, non-terminal run', () => {
-    activate({ status: 'running' });
-    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
-    expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
-    expect(screen.getByTestId('run-action-cancel')).toBeInTheDocument();
-  });
-
   it.each(['queued', 'starting', 'running', 'awaiting_review', 'stuck', 'awaiting_input', 'paused'])(
     'shows Cancel for non-terminal status %s',
     (status) => {

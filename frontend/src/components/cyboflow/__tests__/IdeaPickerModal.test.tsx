@@ -470,13 +470,23 @@ describe('IdeaPickerModal — "New idea" draft persistence', () => {
     localStorage.setItem(IDEA_PICKER_MODAL_DRAFT_KEY, '{not valid json');
     const r1 = render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} />);
     await screen.findByLabelText('Select idea');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-mode-new'));
+    });
+    expect(screen.getByLabelText('Idea title')).toHaveValue('');
+    expect(screen.getByLabelText('Idea body')).toHaveValue('');
     r1.unmount();
 
     // Parseable JSON, but the wrong shape (missing pendingKey/attachments).
-    localStorage.setItem(IDEA_PICKER_MODAL_DRAFT_KEY, JSON.stringify({ projectId: 1, title: 'x' }));
+    localStorage.setItem(IDEA_PICKER_MODAL_DRAFT_KEY, JSON.stringify({ projectId: 1, title: 'x', body: 'y' }));
     mockList.mockResolvedValue(structuredClone(ITEMS));
     const r2 = render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} />);
     await screen.findByLabelText('Select idea');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-mode-new'));
+    });
+    expect(screen.getByLabelText('Idea title')).toHaveValue('');
+    expect(screen.getByLabelText('Idea body')).toHaveValue('');
     r2.unmount();
   });
 

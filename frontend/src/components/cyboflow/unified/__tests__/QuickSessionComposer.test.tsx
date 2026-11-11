@@ -197,12 +197,13 @@ beforeEach(() => {
 
 describe('QuickSessionComposer — SDK', () => {
   it('routes ⌘↵ to handleContinueConversation when not waiting', async () => {
-    const cont = vi.fn();
+    const cont = vi.fn().mockResolvedValue({ success: true });
     render(<Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />);
     const textarea = screen.getByRole('textbox');
     fireEvent.change(textarea, { target: { value: 'continue this' } });
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
+    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 
   it('routes ⌘↵ to handleSendInput when status is waiting', async () => {
@@ -859,19 +860,6 @@ describe('QuickSessionComposer — pending-send (optimistic echo)', () => {
       const list = usePendingSendStore.getState().byHost[HOST] ?? [];
       expect(list.some((e) => e.status === 'failed' && e.text === 'will not queue')).toBe(true);
     });
-  });
-
-  it('uses the CONTINUE path (not the queue) when the session is IDLE', async () => {
-    const cont = vi.fn().mockResolvedValue({ success: true });
-    render(
-      <Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />,
-    );
-    const textarea = screen.getByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'idle send' } });
-    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-
-    await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
-    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 
   it('repopulates the composer from a staged draft request (reopen)', async () => {

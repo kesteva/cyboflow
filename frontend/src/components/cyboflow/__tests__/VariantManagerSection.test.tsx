@@ -5,7 +5,6 @@
  * Verifies:
  *   (a) create-from-current calls variants.create then invalidates the list.
  *   (a2) create-from-current then OPENS the newly created row in the editor.
- *   (b) "Add to rotation" calls setStatus('active').
  *   (c) "Pause" calls setStatus('paused').
  *   (d) "Retire" calls setStatus('retired').
  *   (e) weight blur commits variants.update({ weight }).
@@ -177,23 +176,6 @@ describe('VariantManagerSection', () => {
     await waitFor(() => {
       expect(screen.getByTestId('mock-variant-editor-modal')).toHaveTextContent('My Variant');
     });
-  });
-
-  it('(b) "Add to rotation" calls setStatus active', async () => {
-    setVariantsHook({
-      variants: [makeVariant({ status: 'draft' })],
-      baseline: null,
-      loading: false,
-      error: null,
-    });
-    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
-
-    fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
-
-    await waitFor(() => {
-      expect(mockSetStatus).toHaveBeenCalledWith({ variantId: 'wfv_1', status: 'active' });
-    });
-    expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
   });
 
   it('(c) "Pause" calls setStatus paused for an active variant', async () => {
@@ -541,6 +523,9 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
 
     await waitFor(() => {
       expect(mockSetStatus).toHaveBeenCalledWith({ variantId: 'wfv_1', status: 'active' });
+    });
+    await waitFor(() => {
+      expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
     });
     expect(screen.queryByTestId('rotation-supersede-confirm')).not.toBeInTheDocument();
   });

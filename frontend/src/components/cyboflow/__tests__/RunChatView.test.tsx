@@ -303,6 +303,9 @@ function seedRun(
 
 describe('RunChatView — substrate branch', () => {
   it("interactive: renders InteractiveTerminalView, drops the rail + ChatTranscript, keeps composer + approvals", async () => {
+    mockListUnifiedMessages.mockImplementation(async () => [
+      { id: 'a-1', role: 'assistant', timestamp: '2026-05-26T00:00:00Z', segments: [{ type: 'text', content: 'hi' }] },
+    ]);
     seedRun('run-int', 'interactive');
 
     render(<RunChatView runId="run-int" />);
@@ -380,21 +383,6 @@ describe('RunChatView — substrate branch', () => {
     });
     expect(screen.getByTestId('prompt-navigation')).toBeInTheDocument();
     expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
-  });
-
-  it("interactive: does NOT render the structured ChatTranscript (no double-render)", async () => {
-    mockListUnifiedMessages.mockImplementation(async () => [
-      { id: 'a-1', role: 'assistant', timestamp: '2026-05-26T00:00:00Z', segments: [{ type: 'text', content: 'hi' }] },
-    ]);
-    seedRun('run-int2', 'interactive');
-
-    render(<RunChatView runId="run-int2" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('interactive-terminal-view')).toBeInTheDocument();
-    });
-    // Even with messages available, the ChatTranscript is not in the DOM.
-    expect(screen.queryByTestId('chat-transcript')).not.toBeInTheDocument();
   });
 });
 
