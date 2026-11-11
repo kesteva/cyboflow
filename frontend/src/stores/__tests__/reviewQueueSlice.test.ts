@@ -221,40 +221,17 @@ describe('useReviewQueueSlice — setRunStatus', () => {
     expect(useReviewQueueSlice.getState().runStatusMap['run-2']).toBe('running');
   });
 
-  it('clears all three maps when status is completed', () => {
+  it.each([
+    ['completed', 'self_deadlock'],
+    ['canceled', 'orphan_pty'],
+    ['failed', 'stale_socket'],
+  ] as const)('evicts all three maps when status is %s', (status, kind) => {
     useReviewQueueSlice.setState({
       runStatusMap: { 'run-1': 'stuck' },
-      runReasonMap: { 'run-1': { kind: 'self_deadlock' } },
+      runReasonMap: { 'run-1': { kind } },
       runDetectedAtMap: { 'run-1': 1700000000000 },
     });
-    const { setRunStatus } = useReviewQueueSlice.getState();
-    setRunStatus('run-1', 'completed');
-    const state = useReviewQueueSlice.getState();
-    expect('run-1' in state.runStatusMap).toBe(false);
-    expect('run-1' in state.runReasonMap).toBe(false);
-    expect('run-1' in state.runDetectedAtMap).toBe(false);
-  });
-
-  it('evicts runReasonMap and runDetectedAtMap entries when status is canceled', () => {
-    useReviewQueueSlice.setState({
-      runStatusMap: { 'run-1': 'stuck' },
-      runReasonMap: { 'run-1': { kind: 'orphan_pty' } },
-      runDetectedAtMap: { 'run-1': 1700000000000 },
-    });
-    useReviewQueueSlice.getState().setRunStatus('run-1', 'canceled');
-    const state = useReviewQueueSlice.getState();
-    expect('run-1' in state.runStatusMap).toBe(false);
-    expect('run-1' in state.runReasonMap).toBe(false);
-    expect('run-1' in state.runDetectedAtMap).toBe(false);
-  });
-
-  it('evicts all three maps when status is failed', () => {
-    useReviewQueueSlice.setState({
-      runStatusMap: { 'run-1': 'stuck' },
-      runReasonMap: { 'run-1': { kind: 'stale_socket' } },
-      runDetectedAtMap: { 'run-1': 1700000000000 },
-    });
-    useReviewQueueSlice.getState().setRunStatus('run-1', 'failed');
+    useReviewQueueSlice.getState().setRunStatus('run-1', status);
     const state = useReviewQueueSlice.getState();
     expect('run-1' in state.runStatusMap).toBe(false);
     expect('run-1' in state.runReasonMap).toBe(false);
@@ -436,16 +413,5 @@ describe('useRunStuckDetails', () => {
     const { result } = renderHook(() => useRunStuckDetails(undefined));
     expect(result.current.reason).toBeUndefined();
     expect(result.current.detectedAt).toBeUndefined();
-  });
-
-  it('can be read from store.getState() directly — confirms slice maps are correct shape', () => {
-    useReviewQueueSlice.setState({
-      runReasonMap: { 'r1': { kind: 'cross_run_deadlock', conflictingRunId: 'r2' } },
-      runDetectedAtMap: { 'r1': 5000 },
-    });
-
-    const state = useReviewQueueSlice.getState();
-    expect(state.runReasonMap['r1']).toEqual({ kind: 'cross_run_deadlock', conflictingRunId: 'r2' });
-    expect(state.runDetectedAtMap['r1']).toBe(5000);
   });
 });

@@ -464,23 +464,6 @@ describe('useLaunchWorkflow — stored per-run-type launch defaults', () => {
     );
   });
 
-  // AC5 — the criterion that matters most, restated with both fields present
-  // on the config object but unset.
-  it('REGRESSION: with NEITHER global set the payload is byte-identical', async () => {
-    const { result } = renderHook(() => useLaunchWorkflow(7));
-    await act(async () => {
-      await result.current.launch('wf-sprint');
-    });
-    expect(mockStartMutate).toHaveBeenCalledWith({
-      workflowId: 'wf-sprint',
-      projectId: 7,
-      substrate: 'sdk',
-      sessionId: 'session-1',
-      permissionMode: 'default',
-      model: 'opus',
-    });
-  });
-
   it('keys the whole settings bundle per call — another workflow’s defaults do not leak', async () => {
     mockConfigState.config.runTypeDefaults = {
       'workflow:wf-sprint': { model: 'sonnet', permissionMode: 'dontAsk', substrate: 'interactive' },

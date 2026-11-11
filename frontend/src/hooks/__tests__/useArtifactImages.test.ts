@@ -7,10 +7,10 @@
  *     basename -> dataUrl map,
  *   - an unsuccessful response surfaces res.error,
  *   - a rejected IPC promise surfaces a loading=false error,
- *   - the in-flight result is dropped after unmount (no state update / no throw).
+ *   - a stale in-flight result is dropped when the inputs change.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 import { useArtifactImages } from '../useArtifactImages';
 import type { IPCResponse } from '../../utils/api';
 
@@ -81,15 +81,26 @@ describe('useArtifactImages', () => {
     expect(result.current.error).toBe('ipc boom');
   });
 
-  it('drops an in-flight result after unmount (no throw)', async () => {
-    let resolveFn!: (v: LoadImagesResult) => void;
-    loadImages.mockReturnValue(new Promise<LoadImagesResult>((res) => { resolveFn = res; }));
+  it('drops a stale in-flight result after the inputs change', async () => {
+    let resolveA!: (v: LoadImagesResult) => void;
+    loadImages.mockReturnValueOnce(new Promise<LoadImagesResult>((res) => { resolveA = res; }));
+    loadImages.mockResolvedValueOnce({
+      success: true,
+      data: { images: [{ fileName: 'other.png', dataUrl: 'data:image/png;base64,BBB' }] },
+    });
 
-    const { unmount } = renderHook(() => useArtifactImages('run-1', ['home.png']));
-    unmount();
-    // Resolve after unmount — the cancelled guard must swallow it.
-    expect(() =>
-      resolveFn({ success: true, data: { images: [{ fileName: 'home.png', dataUrl: 'data:image/png;base64,AAA' }] } }),
-    ).not.toThrow();
+    const { result, rerender } = renderHook(
+      ({ runId, files }: { runId: string; files: string[] }) => useArtifactImages(runId, files),
+      { initialProps: { runId: 'run-1', files: ['home.png'] } },
+    );
+    rerender({ runId: 'run-2', files: ['other.png'] });
+    await waitFor(() => expect(result.current.images).toEqual({ 'other.png': 'data:image/png;base64,BBB' }));
+
+    // The first (now cancelled) request resolves late — it must be ignored.
+    await act(async () => {
+      resolveA({ success: true, data: { images: [{ fileName: 'home.png', dataUrl: 'data:image/png;base64,AAA' }] } });
+    });
+    expect(result.current.images).toEqual({ 'other.png': 'data:image/png;base64,BBB' });
+    expect(result.current.images).not.toHaveProperty('home.png');
   });
 });

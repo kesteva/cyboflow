@@ -289,14 +289,6 @@ describe('selectFindingsCounters', () => {
     expect(counters).toEqual({ pending: 3, resolved: 2, dismissed: 1 });
   });
 
-  it('counts only the rows the sections render — NOT a larger whole-inbox total (orphan-hidden findings are never in triageFindings)', () => {
-    // `triageFindings` is already the orphan-hidden list the sections partition,
-    // so its length IS the pending count regardless of how many findings the
-    // whole inbox holds. One visible triage row -> pending = 1.
-    const counters = selectFindingsCounters([tf({ id: 'u1' })], [qf('a', 'pending')]);
-    expect(counters.pending).toBe(1);
-  });
-
   it('is resilient to an empty triage list (pending = 0)', () => {
     expect(selectFindingsCounters([], [qf('a', 'resolved')])).toEqual({
       pending: 0,

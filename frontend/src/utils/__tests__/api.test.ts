@@ -144,7 +144,9 @@ describe('API — happy path forwards args verbatim', () => {
 
   it('models.onAvailabilityChanged registers the callback and returns the bridge unsubscribe', () => {
     const cb = (_: ModelAvailabilityMap) => {};
-    API.models.onAvailabilityChanged(cb);
+    const bridgeUnsub = vi.fn();
+    modelsOnChanged.mockReturnValueOnce(bridgeUnsub);
+    expect(API.models.onAvailabilityChanged(cb)).toBe(bridgeUnsub);
     expect(modelsOnChanged).toHaveBeenCalledWith(cb);
   });
 });
