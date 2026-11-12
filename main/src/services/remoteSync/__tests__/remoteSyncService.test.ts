@@ -111,6 +111,10 @@ const fakeFetch: FetchLike = (async (input: Parameters<FetchLike>[0], init?: Par
     const holder = { key: req.key, deviceId: 'dev-1', label: req.label, claimedAt: 1 };
     return json({ key: req.key, state: 'held_by_you', holder });
   }
+  if (url.pathname === '/v1/devices') {
+    const row = (id: unknown, name: string): Record<string, unknown> => ({ id, code: 'ABC', name, createdAt: 1 });
+    return json({ devices: [row('dev-1', 'Studio'), row('dev-2', 'Laptop'), row('dev-3', ' '), row(7, 'bad row')] });
+  }
   if (url.pathname === '/v1/projects' && init?.method === 'GET') return json({ projects: remoteProjects });
   if (url.pathname === '/v1/projects' && init?.method === 'POST') {
     const req = JSON.parse(String(init.body)) as { name: string; fingerprint: string };
@@ -453,6 +457,135 @@ describe('status for the Sync section', () => {
     ]);
     expect(service.getLog(projectId).some((l) => l.endsWith('created remote project rp'))).toBe(true);
     expect(service.getLog(other)).toEqual([]);
+  });
+});
+
+describe('conflict device names', () => {
+  const deviceFetches = (): number => requests.filter((r) => r === 'GET /v1/devices').length;
+  const nameOf = (): string | null => service.listConflicts(projectId, 'open')[0].current.deviceName;
+
+  /** A synced project with one open conflict whose applied edit came from dev-2. */
+  async function conflictFromOtherDevice(): Promise<void> {
+    service.start();
+    await service.enableProject({ projectId, mode: 'create' });
+    await service.idle();
+    service.store.upsertServerConflict(projectId, {
+      id: 'c1', projectId: 'rp', entityId: 'e1', kind: 'field', field: 'title', entityRef: null, entityTitle: null,
+      current: { value: 'Theirs', device: 'dev-2', hlc: null },
+      other: { value: 'Mine', device: 'dev-1', hlc: null },
+      createdAt: 1, seq: 1,
+    });
+  }
+
+  /** Resolves on the change event that carries a new conflicts revision. */
+  function namesArrive(): Promise<void> {
+    const status = service.getStatus();
+    const from = status.available ? status.conflictsRevision : 0;
+    return new Promise<void>((resolve) => {
+      const onChanged = (): void => {
+        const next = service.getStatus();
+        if (!next.available || next.conflictsRevision <= from) return;
+        service.off('changed', onChanged);
+        resolve();
+      };
+      service.on('changed', onChanged);
+    });
+  }
+
+  it('names the other machine from the device list, fetched once in the background', async () => {
+    await conflictFromOtherDevice();
+    const arrived = namesArrive();
+
+    const [before] = service.listConflicts(projectId, 'open');
+    expect(before.current).toMatchObject({ device: 'dev-2', thisDevice: false, deviceName: null });
+    service.listConflicts(projectId, 'open');
+    await arrived;
+
+    const [after] = service.listConflicts(projectId, 'open');
+    expect(after.current.deviceName).toBe('Laptop');
+    expect(after.other).toMatchObject({ thisDevice: true, deviceName: 'Studio' });
+    expect(deviceFetches()).toBe(1);
+  });
+
+  it('looks the device up after the first pass once the token unlocks', async () => {
+    await conflictFromOtherDevice();
+    const token = cloud.token;
+    cloud.token = null;
+    expect(nameOf()).toBeNull();
+    expect(deviceFetches()).toBe(0);
+
+    cloud.token = token;
+    const arrived = namesArrive();
+    await service.syncNow(projectId);
+    await arrived;
+    expect(nameOf()).toBe('Laptop');
+  });
+
+  it('tries again after a pass once a failed fetch may be retried', async () => {
+    await conflictFromOtherDevice();
+    failNext = json({ error: 'unavailable' }, 503);
+    expect(nameOf()).toBeNull();
+    await vi.waitFor(() => expect(deviceFetches()).toBe(1));
+
+    // Too soon: a pass does not ask again. Nothing re-reads the conflicts, so the retry is the service's own.
+    await service.syncNow(projectId);
+    expect(deviceFetches()).toBe(1);
+
+    const later = Date.now() + 61_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => later);
+    try {
+      const arrived = namesArrive();
+      await service.syncNow(projectId);
+      await arrived;
+      expect(nameOf()).toBe('Laptop');
+      expect(deviceFetches()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('hands a revoked token found by the lookup back to the cloud sign-in', async () => {
+    await conflictFromOtherDevice();
+    failNext = json({ error: 'device_revoked' }, 401);
+    expect(nameOf()).toBeNull();
+    await vi.waitFor(() => expect(cloud.revoked).toEqual(['device_revoked']));
+  });
+
+  it('forgets the names on sign-out and fetches again for the next sign-in', async () => {
+    await conflictFromOtherDevice();
+    const arrived = namesArrive();
+    service.listConflicts(projectId, 'open');
+    await arrived;
+    expect(nameOf()).toBe('Laptop');
+
+    const device = cloud.device as CloudDevice;
+    cloud.device = null;
+    cloud.emit('signedOut');
+    expect(nameOf()).toBeNull();
+
+    cloud.device = device;
+    cloud.emit('signedIn', { device, isNewDevice: false });
+    await service.idle();
+    const again = namesArrive();
+    service.listConflicts(projectId, 'open');
+    await again;
+    expect(nameOf()).toBe('Laptop');
+    expect(deviceFetches()).toBe(2);
+  });
+
+  it('keeps a device with a blank name unnamed', async () => {
+    await conflictFromOtherDevice();
+    service.store.upsertServerConflict(projectId, {
+      id: 'c2', projectId: 'rp', entityId: 'e2', kind: 'field', field: 'title', entityRef: null, entityTitle: null,
+      current: { value: 'Theirs', device: 'dev-3', hlc: null },
+      other: { value: 'Mine', device: 'dev-1', hlc: null },
+      createdAt: 2, seq: 2,
+    });
+    const arrived = namesArrive();
+    service.listConflicts(projectId, 'open');
+    await arrived;
+    const blank = service.listConflicts(projectId, 'open').find((c) => c.id === 'c2');
+    expect(blank?.current.deviceName).toBeNull();
   });
 });
 

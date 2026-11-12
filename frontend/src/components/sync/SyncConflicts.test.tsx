@@ -29,10 +29,12 @@ vi.mock('../../trpc/client', () => ({
 
 import { useRemoteSyncConflictsStore } from '../../stores/remoteSyncConflictsStore';
 import { useBacklogStore } from '../../stores/backlogStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { SyncConflictsHost } from './SyncConflictsHost';
 import { SyncConflictBadge } from './SyncConflictBadge';
 import { SyncConflictBanner } from './SyncConflictBanner';
 import { SyncConflictDialog } from './SyncConflictDialog';
+import { sideLabel } from './syncConflictText';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
 function project(over: Partial<RemoteSyncProjectStatus> = {}): RemoteSyncProjectStatus {
@@ -52,7 +54,7 @@ function project(over: Partial<RemoteSyncProjectStatus> = {}): RemoteSyncProject
   };
 }
 
-function status(projects: RemoteSyncProjectStatus[], enabled = true): RemoteSyncStatus {
+function status(projects: RemoteSyncProjectStatus[], enabled = true, conflictsRevision = 0): RemoteSyncStatus {
   return {
     available: true,
     enabled,
@@ -62,6 +64,7 @@ function status(projects: RemoteSyncProjectStatus[], enabled = true): RemoteSync
     staging: false,
     signedIn: true,
     projects,
+    conflictsRevision,
   };
 }
 
@@ -75,8 +78,8 @@ function conflict(over: Partial<RemoteSyncConflict> = {}): RemoteSyncConflict {
     entityTitle: 'Do thing',
     kind: 'field',
     field: 'title',
-    current: { value: 'Mine', device: 'd1', thisDevice: true, at: 1_700_000_000_000 },
-    other: { value: 'Theirs', device: 'd2', thisDevice: false, at: 1_700_000_100_000 },
+    current: { value: 'Mine', device: 'd1', thisDevice: true, deviceName: null, at: 1_700_000_000_000 },
+    other: { value: 'Theirs', device: 'd2', thisDevice: false, deviceName: null, at: 1_700_000_100_000 },
     extra: null,
     createdAt: 10,
     resolvedAt: null,
@@ -85,6 +88,7 @@ function conflict(over: Partial<RemoteSyncConflict> = {}): RemoteSyncConflict {
     changedSince: false,
     currentNow: 'Mine',
     actions: ['keep', 'use_other', 'merge'],
+    edges: null,
     ...over,
   };
 }
@@ -142,6 +146,30 @@ describe('sync conflicts UI', () => {
       await waitFor(() => expect(screen.getByTestId('sync-indicator')).toHaveAttribute('data-state', 'error'));
     });
 
+    it('flags held deletions and opens the Sync settings when nothing else needs review', async () => {
+      await mountHost(status([project({ heldDeletes: 30 })]));
+      const indicator = await screen.findByTestId('sync-indicator');
+      expect(indicator).toHaveAttribute('aria-label', 'Sync idle, 30 deletions waiting to sync');
+      expect(screen.getByTestId('sync-indicator-held')).toBeInTheDocument();
+      fireEvent.click(indicator);
+      expect(useNavigationStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'integrations' });
+    });
+
+    it('opens the Conflicts view when the status counts conflicts the list has not loaded yet', async () => {
+      useNavigationStore.setState({ settingsOpen: false });
+      await mountHost(status([project({ openConflicts: 2, heldDeletes: 30 })]), []);
+      fireEvent.click(await screen.findByTestId('sync-indicator'));
+      expect(await screen.findByTestId('sync-conflicts-view')).toBeInTheDocument();
+      expect(useNavigationStore.getState().settingsOpen).toBe(false);
+    });
+
+    it('spins while a pass runs even with deletions held', async () => {
+      await mountHost(status([project({ heldDeletes: 30, syncing: true })]));
+      const indicator = await screen.findByTestId('sync-indicator');
+      expect(indicator).toHaveAttribute('data-state', 'syncing');
+      expect(screen.queryByTestId('sync-indicator-held')).not.toBeInTheDocument();
+    });
+
     it('shows the open count excluding pending, and opens the view on click', async () => {
       await mountHost(status([project({ openConflicts: 2 })]), [
         conflict(),
@@ -151,6 +179,18 @@ describe('sync conflicts UI', () => {
       expect(badge).toHaveTextContent('1');
       fireEvent.click(screen.getByTestId('sync-indicator'));
       expect(await screen.findByTestId('sync-conflicts-view')).toBeInTheDocument();
+    });
+  });
+
+  describe('refresh', () => {
+    it('re-reads the conflicts when the revision moves with the counts unchanged', async () => {
+      await mountHost(status([project({ openConflicts: 1 })]), [conflict()]);
+      await waitFor(() => expect(useRemoteSyncConflictsStore.getState().conflicts).toHaveLength(1));
+      const named = conflict({ current: { value: 'Mine', device: 'd2', thisDevice: false, deviceName: 'Studio', at: 1 } });
+      m.listConflicts.mockResolvedValue([named]);
+      act(() => pushStatus(status([project({ openConflicts: 1 })])));
+      act(() => pushStatus(status([project({ openConflicts: 1 })], true, 1)));
+      await waitFor(() => expect(useRemoteSyncConflictsStore.getState().conflicts[0].current.deviceName).toBe('Studio'));
     });
   });
 
@@ -225,6 +265,43 @@ describe('sync conflicts UI', () => {
       );
     });
 
+    it('describes a dependency conflict as its two edges and sends swap', async () => {
+      openDialogFor(
+        conflict({
+          kind: 'dependency_edge',
+          field: 'depends_on',
+          actions: ['keep', 'swap'],
+          extra: { removedEdge: { taskId: 'ta', dependsOnId: 'tb' }, keptEdge: { taskId: 'tb', dependsOnId: 'ta' } },
+          edges: {
+            removed: { task: 'TASK-1 Cut the branch', dependsOn: 'TASK-2 Tag the build' },
+            kept: { task: 'TASK-2 Tag the build', dependsOn: 'TASK-1 Cut the branch' },
+          },
+        }),
+      );
+      const edges = screen.getByTestId('sync-conflict-edges');
+      expect(edges).toHaveTextContent('Removed: TASK-1 Cut the branch depends on TASK-2 Tag the build');
+      expect(edges).toHaveTextContent('Kept: TASK-2 Tag the build depends on TASK-1 Cut the branch');
+      fireEvent.click(screen.getByRole('button', { name: 'Swap (restore this edge, remove the other)' }));
+      await waitFor(() =>
+        expect(m.resolveConflict).toHaveBeenCalledWith({ conflictId: 'c1', action: { kind: 'swap' } }),
+      );
+    });
+
+    it('lists a lone removed edge, naming a task that is gone here', () => {
+      openDialogFor(
+        conflict({
+          kind: 'dependency_edge',
+          field: 'depends_on',
+          actions: ['keep'],
+          edges: { removed: { task: 'TASK-1 Cut the branch', dependsOn: null }, kept: null },
+        }),
+      );
+      const edges = screen.getByTestId('sync-conflict-edges');
+      expect(edges).toHaveTextContent('Removed: TASK-1 Cut the branch depends on a deleted task');
+      expect(edges).not.toHaveTextContent('Kept:');
+      expect(edges).toHaveTextContent('A dependency added on another machine at the same time made a cycle.');
+    });
+
     it('sends use_other', async () => {
       openDialogFor(conflict());
       fireEvent.click(screen.getByRole('button', { name: 'Use the other value' }));
@@ -252,8 +329,8 @@ describe('sync conflicts UI', () => {
       openDialogFor(
         conflict({
           field: 'body',
-          current: { value: 'a\nb', device: null, thisDevice: true, at: 1 },
-          other: { value: 'a\nc', device: null, thisDevice: false, at: 2 },
+          current: { value: 'a\nb', device: null, thisDevice: true, deviceName: null, at: 1 },
+          other: { value: 'a\nc', device: null, thisDevice: false, deviceName: null, at: 2 },
           changedSince: true,
           currentNow: 'a\nNEWEST',
         }),
@@ -270,7 +347,7 @@ describe('sync conflicts UI', () => {
         conflict({
           kind: 'delete_vs_edit',
           field: null,
-          other: { value: { title: 'Lost title' }, device: null, thisDevice: false, at: 1 },
+          other: { value: { title: 'Lost title' }, device: null, thisDevice: false, deviceName: null, at: 1 },
           actions: ['keep', 'recreate'],
         }),
       );
@@ -355,6 +432,22 @@ describe('sync conflicts UI', () => {
       );
       fireEvent.click(screen.getByRole('button', { name: 'Review' }));
       expect(useRemoteSyncConflictsStore.getState().dialogConflictId).toBe('c1');
+    });
+
+    it('name the other machine once its name is known, keeping its case', () => {
+      useRemoteSyncConflictsStore.setState({
+        conflicts: [
+          conflict({
+            current: { value: 'Theirs', device: 'd2', thisDevice: false, deviceName: 'Studio', at: 1 },
+            other: { value: 'Mine', device: 'd1', thisDevice: true, deviceName: null, at: 2 },
+          }),
+        ],
+      });
+      render(<SyncConflictBanner entityId="e1" />);
+      expect(screen.getByTestId('sync-conflict-banner')).toHaveTextContent(
+        'Title changed on two machines — the edit from Studio was applied.',
+      );
+      expect(sideLabel(useRemoteSyncConflictsStore.getState().conflicts[0].current)).toMatch(/^Studio · /);
     });
   });
 });

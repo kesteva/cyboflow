@@ -115,6 +115,8 @@ export interface RemoteSyncConflictSide {
   device: string | null;
   /** This computer wrote it. */
   thisDevice: boolean;
+  /** The writing device's name from the account's device list, or null while it is unknown. */
+  deviceName: string | null;
   /** When it was written (epoch ms, from its HLC), or null. */
   at: number | null;
 }
@@ -141,6 +143,12 @@ export type RemoteSyncConflictAction =
  * something the user did not see happen. Conflicts apply automatically; this
  * is the record the user reviews.
  */
+/** One dependency as display text: each task's "REF title", or null where it no longer exists on this machine. */
+export interface RemoteSyncConflictEdge {
+  task: string | null;
+  dependsOn: string | null;
+}
+
 export interface RemoteSyncConflict {
   id: string;
   projectId: number;
@@ -170,6 +178,8 @@ export interface RemoteSyncConflict {
   currentNow: unknown;
   /** The actions this conflict offers, the default first. */
   actions: RemoteSyncConflictAction['kind'][];
+  /** dependency_edge: the edge the cycle repair removed and the one it kept; null for other kinds. */
+  edges: { removed: RemoteSyncConflictEdge | null; kept: RemoteSyncConflictEdge | null } | null;
 }
 
 export type RemoteSyncResolveResult = { ok: true } | { ok: false; message: string };
@@ -194,4 +204,6 @@ export type RemoteSyncStatus =
       staging: boolean;
       signedIn: boolean;
       projects: RemoteSyncProjectStatus[];
+      /** Bumped when conflict views change without a count changing (a device name arrived): re-read them. */
+      conflictsRevision: number;
     };

@@ -52,6 +52,7 @@ function devStatus(overrides: Partial<Extract<RemoteSyncStatus, { available: tru
     staging: true,
     signedIn: false,
     projects: [],
+    conflictsRevision: 0,
     ...overrides,
   };
 }

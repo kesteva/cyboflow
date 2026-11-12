@@ -55,6 +55,10 @@ export const SYNC_BACKOFF_CAP_MS = 120_000;
 export const CHECKSUM_EVERY_PASSES = 12;
 /** The service's limit on a project name. */
 const MAX_PROJECT_NAME = 200;
+/** How long a fetched device list is trusted before conflicts may fetch it again. */
+const DEVICE_NAMES_REFRESH_MS = 5 * 60_000;
+/** How soon a device list fetch that failed on the network may be tried again. */
+const DEVICE_NAMES_RETRY_MS = 60_000;
 
 export interface RemoteSyncServiceDeps {
   db: DatabaseLike;
@@ -101,6 +105,16 @@ export class RemoteSyncService extends EventEmitter {
   private readonly cleanups: Array<() => void> = [];
   private started = false;
   private readonly now: () => number;
+  /** Device id → name from the account's device list, so conflicts can name the other machine. */
+  private readonly deviceNames = new Map<string, string>();
+  /** The account the cached names belong to; a fetch that returns after it changed is dropped. */
+  private deviceNamesAccountId: string | null = null;
+  /** The earliest time the device list may be fetched again. */
+  private deviceNamesNextFetchAt = 0;
+  private deviceNamesLoading = false;
+  /** A name is still missing and the list couldn't be fetched just then: look again after the next pass. */
+  private deviceNamesWanted = false;
+  private conflictsRevision = 0;
 
   constructor(private readonly deps: RemoteSyncServiceDeps) {
     super();
@@ -210,6 +224,12 @@ export class RemoteSyncService extends EventEmitter {
     const device = cloud?.getDevice() ?? null;
     const enabled = configManager.isRemoteSyncEnabled();
     const row = this.store.getDevice();
+    if ((device?.accountId ?? null) !== this.deviceNamesAccountId) {
+      this.deviceNamesAccountId = device?.accountId ?? null;
+      this.deviceNames.clear();
+      this.deviceNamesNextFetchAt = 0;
+      this.deviceNamesWanted = false;
+    }
     if (!device) {
       if (row?.active) this.store.setDeviceActive(false);
       this.engine = null;
@@ -352,6 +372,7 @@ export class RemoteSyncService extends EventEmitter {
         this.deps.logger?.warn('[remoteSync] tracker claim refresh failed', { projectId, error: describe(err) });
       }
       if (rt.okPasses % CHECKSUM_EVERY_PASSES === 0) await this.runChecksum(projectId, engine);
+      if (this.deviceNamesWanted) this.fetchDeviceNames();
       return;
     }
     if (outcome.status === 'skipped') return;
@@ -401,7 +422,60 @@ export class RemoteSyncService extends EventEmitter {
   /** Conflicts for the Conflicts view: open ones, or those resolved in the last 30 days. Every synced project when none is named. */
   listConflicts(projectId: number | null, view: 'open' | 'resolved'): RemoteSyncConflict[] {
     const ids = projectId === null ? this.store.listProjects().map((p) => p.projectId) : [projectId];
-    return ids.flatMap((id) => listConflictViews(this.conflictDeps(), id, view));
+    const views = ids.flatMap((id) => listConflictViews(this.conflictDeps(), id, view));
+    this.noteConflictDevices(views);
+    return views;
+  }
+
+  /** Keep the device names fresh for the other machines these conflicts name. */
+  private noteConflictDevices(views: RemoteSyncConflict[]): void {
+    const others = views.flatMap((v) => [v.current, v.other]).filter((side) => !side.thisDevice && side.device !== null);
+    if (others.length === 0) return;
+    if (!this.fetchDeviceNames() && others.some((side) => side.deviceName === null)) this.deviceNamesWanted = true;
+  }
+
+  /**
+   * Fetch the account's device list in the background; listeners re-read the conflicts on the
+   * change event. False when it can't run now (sync not ready, or the list was fetched too recently).
+   */
+  private fetchDeviceNames(): boolean {
+    if (this.deviceNamesLoading) return true;
+    if (this.now() < this.deviceNamesNextFetchAt) return false;
+    const client = this.readyClient();
+    if (!client) return false;
+    const accountId = this.deviceNamesAccountId;
+    this.deviceNamesLoading = true;
+    this.deviceNamesWanted = false;
+    this.deviceNamesNextFetchAt = this.now() + DEVICE_NAMES_REFRESH_MS;
+    void client
+      .listDevices()
+      .then((devices) => {
+        if (accountId !== this.deviceNamesAccountId) {
+          this.deviceNamesWanted = true;
+          return;
+        }
+        let changed = false;
+        for (const d of devices) {
+          if (d.name.trim() === '' || this.deviceNames.get(d.id) === d.name) continue;
+          this.deviceNames.set(d.id, d.name);
+          changed = true;
+        }
+        if (!changed) return;
+        this.conflictsRevision += 1;
+        this.emitChanged();
+      })
+      .catch((err: unknown) => {
+        this.deps.logger?.warn('[remoteSync] device list failed', { error: describe(err) });
+        if (accountId !== this.deviceNamesAccountId) return;
+        this.handOffAuthFailure(err);
+        const transient = err instanceof SyncHttpError && (err.kind === 'network' || err.kind === 'retryable');
+        if (transient) this.deviceNamesNextFetchAt = this.now() + DEVICE_NAMES_RETRY_MS;
+        this.deviceNamesWanted = true;
+      })
+      .finally(() => {
+        this.deviceNamesLoading = false;
+      });
+    return true;
   }
 
   /** Settle a conflict as the user; the next pass (kicked now) sends it. */
@@ -414,7 +488,14 @@ export class RemoteSyncService extends EventEmitter {
   }
 
   private conflictDeps(): ConflictDeps {
-    return { db: this.deps.db, router: this.deps.router, store: this.store, deviceId: this.deps.cloud?.getDevice()?.deviceId ?? null, now: this.now };
+    return {
+      db: this.deps.db,
+      router: this.deps.router,
+      store: this.store,
+      deviceId: this.deps.cloud?.getDevice()?.deviceId ?? null,
+      deviceName: (id) => this.deviceNames.get(id) ?? null,
+      now: this.now,
+    };
   }
 
   /** The user confirmed a held mass delete: push it now. */
@@ -646,6 +727,7 @@ export class RemoteSyncService extends EventEmitter {
       staging: device ? isStagingOrigin(device.origin) : false,
       signedIn: device !== null,
       projects,
+      conflictsRevision: this.conflictsRevision,
     };
   }
 
