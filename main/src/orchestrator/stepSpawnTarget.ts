@@ -12,9 +12,10 @@
  * the rail but the Claude default at spawn; a Claude alias pin on a Codex run
  * was painted on the rail but ignored at spawn; …). Keep every rule here.
  *
- * The two spawn-time GATES `main/src/index.ts`'s `resolveStepAgent` applies
- * before handing a pin to the spawner live here too ({@link gateRuntimePin},
- * {@link usableModelAlias}) so the rail can apply them with the same code.
+ * The spawn-time GATES `programmaticRunnerComposition.ts`'s `resolveStepAgent`
+ * applies before handing a pin to the spawner live here too
+ * ({@link gateStepAgentPin}, {@link usableModelAlias}) so the rail can apply
+ * them with the same code.
  */
 import { providerForRuntime, type AgentProvider, type WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { guardedModelByAlias } from '../../../shared/types/modelAvailability';
@@ -94,6 +95,52 @@ export function providerModelAfterRuntimeDrop(
 ): string | undefined {
   if (!providerModel) return undefined;
   return providerForRuntime(droppedRuntime) === runProvider ? providerModel : undefined;
+}
+
+/** The one runtime of each provider a remote environment can host (mirrors hostsBridge's HostLaunchRuntime). */
+const REMOTE_RUNTIME_BY_PROVIDER: Partial<Record<AgentProvider, WorkflowAgentRuntime>> = {
+  claude: 'claude-sdk',
+  codex: 'codex-sdk',
+};
+
+/**
+ * The runtime a REMOTE run uses for a per-agent runtime pin: the pin itself when the environment can host it, else
+ * the SAME provider's SDK runtime (Claude CLI → Claude SDK), else `undefined` — that provider has no runtime there
+ * (Pi, OMP), so the pin is dropped and the step falls back to the run's own runtime. The launch gate vets only the
+ * run's stamped runtime; an unmoved local-only pin would dispatch to a local-only manager with the remote worktree
+ * path as cwd.
+ */
+export function remoteRuntimeForPin(runtime: WorkflowAgentRuntime): WorkflowAgentRuntime | undefined {
+  return REMOTE_RUNTIME_BY_PROVIDER[providerForRuntime(runtime)];
+}
+
+/** Why a per-agent runtime pin is not honored as written, or null when it is (or there is none). */
+export type StepPinChange = 'provider-disabled' | 'remote';
+
+/**
+ * The spawn-time gates over a per-agent pin, as ONE reduction: the provider-access gate ({@link gateRuntimePin}),
+ * then the remote-run gate ({@link remoteRuntimeForPin}). A pin whose runtime is DROPPED takes its `providerModel`
+ * with it unless the step falls back onto the same provider ({@link providerModelAfterRuntimeDrop}); a pin MOVED to
+ * its provider's SDK runtime keeps both models. The Claude `model` alias and the effort are not gated here.
+ */
+export function gateStepAgentPin(
+  pin: Pick<StepAgentPin, 'runtime' | 'providerModel'>,
+  ctx: { isProviderEnabled: (provider: AgentProvider) => boolean; runIsRemote: boolean; runProvider: AgentProvider },
+): { runtime: WorkflowAgentRuntime | undefined; providerModel: string | undefined; changed: StepPinChange | null } {
+  const pinned = pin.runtime ?? undefined;
+  let runtime = gateRuntimePin(pinned, ctx.isProviderEnabled);
+  let changed: StepPinChange | null = pinned !== undefined && runtime === undefined ? 'provider-disabled' : null;
+  if (runtime !== undefined && ctx.runIsRemote) {
+    const remote = remoteRuntimeForPin(runtime);
+    if (remote !== runtime) {
+      runtime = remote;
+      changed = 'remote';
+    }
+  }
+  const providerModel = pinned !== undefined && runtime === undefined
+    ? providerModelAfterRuntimeDrop(pinned, ctx.runProvider, pin.providerModel)
+    : pin.providerModel ?? undefined;
+  return { runtime, providerModel, changed };
 }
 
 /**

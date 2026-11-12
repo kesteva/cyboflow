@@ -20,10 +20,13 @@
  *      `agentOverlayWriter.resolveRunEffectiveAgents` materializes to disk).
  *      A step with no effective-agent entry is treated as fully inheriting
  *      (no pin) — a missing row is not a broken row.
- *   2. Apply the spawn-time gates `main/src/index.ts`'s `resolveStepAgent`
- *      applies (when injected): a runtime pin on a provider switched off in
- *      Settings is dropped ({@link gateRuntimePin}), and an unavailable guarded
- *      model alias is swapped for its fallback ({@link usableModelAlias}).
+ *   2. Apply the spawn-time gates `resolveStepAgent` applies
+ *      ({@link gateStepAgentPin}): a runtime pin on a provider switched off in
+ *      Settings is dropped (when the gates are injected); on a REMOTE run a
+ *      local-only pin moves to its provider's SDK runtime or is dropped (read
+ *      from the run row, so it applies with or without injected gates); and an
+ *      unavailable guarded model alias is swapped for its fallback
+ *      ({@link usableModelAlias}).
  *   3. Reduce pin + run provider/model through {@link resolveStepSpawnTarget}
  *      — the very function `programmatic/spawnStepRunner.ts` spawns with — and
  *      label the result: a `'pin'` via the Claude alias label or the verbatim
@@ -65,7 +68,8 @@ import {
 } from '../../../shared/types/agents';
 import type { EffectiveAgent } from './agents/effectiveAgents';
 import type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
-import { gateRuntimePin, resolveStepSpawnTarget, usableModelAlias } from './stepSpawnTarget';
+import { gateStepAgentPin, resolveStepSpawnTarget, usableModelAlias } from './stepSpawnTarget';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 
 export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
 
@@ -176,6 +180,21 @@ function resolveEffectiveDefinition(
 }
 
 /**
+ * Whether the run targets a remote environment (`workflow_runs.host_id`). Its own guarded read: a database that
+ * predates the column (or a failed read) is a This Mac run.
+ */
+function readRunIsRemote(db: DatabaseLike, runId: string): boolean {
+  try {
+    const row = db.prepare(`SELECT host_id FROM workflow_runs WHERE id = ?`).get(runId) as
+      | { host_id?: unknown }
+      | undefined;
+    return typeof row?.host_id === 'string' && row.host_id.length > 0 && isRemoteHostId(row.host_id);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Shape the per-step resolution helper is called with — the step's resolved
  * `agentKey` plus the exact triple `resolveStepSpawnTarget` reduces (already
  * gated by {@link gateRuntimePin} / {@link usableModelAlias} when `gates` is
@@ -254,6 +273,13 @@ export function resolveRunStepModels(
   const runModel =
     gates && runProvider === 'claude' ? usableModelAlias(rawRunModel, gates.isModelUsable) : rawRunModel;
 
+  // The pin gates of the spawn seam (resolveStepAgent), so a pin the spawn moves or drops is reported the same way.
+  const pinGate = {
+    isProviderEnabled: (p: AgentProvider): boolean => gates?.isProviderEnabled(p) ?? true,
+    runIsRemote: readRunIsRemote(db, runId),
+    runProvider,
+  };
+
   const effectiveByKey = new Map<string, EffectiveAgent>(
     resolveEffectiveAgents(db, runId).map((a) => [a.agentKey, a] as const),
   );
@@ -273,16 +299,14 @@ export function resolveRunStepModels(
       const skipOuter = agentKey === null || step.human === true;
       if (!skipOuter) {
         const effective = effectiveByKey.get(agentKey);
-        const runtime = gates
-          ? gateRuntimePin(effective?.runtime, gates.isProviderEnabled)
-          : effective?.runtime ?? undefined;
+        const gated = gateStepAgentPin(effective ?? {}, pinGate);
         const claudeModel = effective?.model ?? null;
         const { label, family } = resolveStepModelLabel(
           {
             agentKey,
-            runtime,
+            runtime: gated.runtime,
             model: gates ? usableModelAlias(claudeModel, gates.isModelUsable) : claudeModel,
-            providerModel: effective?.providerModel ?? null,
+            providerModel: gated.providerModel ?? null,
           },
           runProvider,
           runModel,
@@ -312,16 +336,14 @@ export function resolveRunStepModels(
           if (innerAgentKey === null) continue;
 
           const innerEffective = effectiveByKey.get(innerAgentKey);
-          const innerRuntime = gates
-            ? gateRuntimePin(innerEffective?.runtime, gates.isProviderEnabled)
-            : innerEffective?.runtime ?? undefined;
+          const innerGated = gateStepAgentPin(innerEffective ?? {}, pinGate);
           const innerClaudeModel = innerEffective?.model ?? null;
           const innerResolved = resolveStepModelLabel(
             {
               agentKey: innerAgentKey,
-              runtime: innerRuntime,
+              runtime: innerGated.runtime,
               model: gates ? usableModelAlias(innerClaudeModel, gates.isModelUsable) : innerClaudeModel,
-              providerModel: innerEffective?.providerModel ?? null,
+              providerModel: innerGated.providerModel ?? null,
             },
             runProvider,
             runModel,

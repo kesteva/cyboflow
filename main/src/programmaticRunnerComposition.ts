@@ -69,7 +69,7 @@ import {
 import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
-import { gateRuntimePin, providerModelAfterRuntimeDrop } from './orchestrator/stepSpawnTarget';
+import { gateStepAgentPin } from './orchestrator/stepSpawnTarget';
 import type {
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
@@ -84,7 +84,7 @@ import { readRunDigest } from './orchestrator/runDigestReader';
 import { buildStepTransitionEvent } from './orchestrator/stepTransitionBridge';
 import { worktreeProbe } from './orchestrator/programmatic/laneBuildSlotsWiring';
 import { isRemoteHostId } from '../../shared/types/hosts';
-import { isAgentProvider, type AgentProvider, type WorkflowAgentRuntime } from '../../shared/types/agentRuntime';
+import { isAgentProvider, type AgentProvider } from '../../shared/types/agentRuntime';
 import { createRunHostAccess } from './services/hosts/runHostAccess';
 import type { VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import type { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
@@ -93,40 +93,6 @@ import type { ConfigManager } from './services/configManager';
 import type { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import type { RunbookBootstrapStampStore } from './orchestrator/verify/bootstrapStampStore';
 import type { LoggerLike, DatabaseLike } from './orchestrator/types';
-
-// Runtimes that can run against a remote environment (mirrors runLauncher's HostLaunchRuntime).
-const REMOTE_CAPABLE_RUNTIMES: ReadonlySet<string> = new Set(['claude-sdk', 'codex-sdk']);
-
-/** True when a per-agent runtime pin must be dropped because the run is remote and the runtime is local-only. */
-export function shouldDropPinForRemoteRun(runtime: string | undefined, runIsRemote: boolean): boolean {
-  return runIsRemote && runtime !== undefined && !REMOTE_CAPABLE_RUNTIMES.has(runtime);
-}
-
-/** Why a per-agent runtime pin was dropped at spawn time, or null when it is honored (or absent). */
-export type StepPinDrop = 'provider-disabled' | 'remote';
-
-/**
- * The spawn-time gates over a per-agent pin, as ONE reduction: the provider-access gate (a provider switched off in
- * Settings → Integrations), then the remote-launch gate (a local-only runtime on a remote run). A dropped runtime
- * takes the pin's `providerModel` with it unless the step falls back onto the same provider — see
- * {@link providerModelAfterRuntimeDrop}. The Claude `model` alias and the effort are not gated here.
- */
-export function gateStepAgentPin(
-  pin: { runtime?: WorkflowAgentRuntime | null; providerModel?: string | null },
-  ctx: { isProviderEnabled: (provider: AgentProvider) => boolean; runIsRemote: boolean; runProvider: AgentProvider },
-): { runtime: WorkflowAgentRuntime | undefined; providerModel: string | undefined; dropped: StepPinDrop | null } {
-  const pinned = pin.runtime ?? undefined;
-  let runtime = gateRuntimePin(pinned, ctx.isProviderEnabled);
-  let dropped: StepPinDrop | null = pinned !== undefined && runtime === undefined ? 'provider-disabled' : null;
-  if (shouldDropPinForRemoteRun(runtime, ctx.runIsRemote)) {
-    runtime = undefined;
-    dropped = 'remote';
-  }
-  const providerModel = pinned === undefined || dropped === null
-    ? pin.providerModel ?? undefined
-    : providerModelAfterRuntimeDrop(pinned, ctx.runProvider, pin.providerModel);
-  return { runtime, providerModel, dropped };
-}
 
 // Monitor-actuation seam (the 10 confirm-gated steering actions: add/remove/edit
 // task, skip/unskip/steer step, the whole-run rewind, the PER-LANE rewind,
@@ -322,22 +288,23 @@ export function composeProgrammaticRunner(
       // run-level provider, which createRun already resolved onto an ENABLED
       // provider — same fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
       // Shared with the per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
-      // Remote-launch gate for PER-AGENT pins: the launch gate vets only the
-      // run's stamped runtime, and a pi/omp/CLI pin would dispatch to a
-      // local-only manager with the remote worktree path as cwd. Drop it so the
-      // step falls back to the run's own (SDK) runtime.
-      // Either drop takes the pin's provider model with it unless the step stays
-      // on that provider: an OMP model id must not reach a Codex spawn.
+      // Remote-run gate for PER-AGENT pins: a local-only pin moves to its own
+      // provider's SDK runtime (Claude CLI → Claude SDK); a provider with no
+      // runtime on a remote environment (Pi, OMP) is dropped, so the step falls
+      // back to the run's own (SDK) runtime. A DROPPED runtime takes the pin's
+      // provider model with it unless the step stays on that provider: an OMP
+      // model id must not reach a Codex spawn.
       const gated = gateStepAgentPin(a, {
         isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p),
         runIsRemote: readRunRemoteHostId(runId) !== null,
         runProvider: readRunProvider(runId),
       });
-      if (gated.dropped !== null) {
-        const why = gated.dropped === 'remote'
+      if (gated.changed !== null) {
+        const why = gated.changed === 'remote'
           ? 'run targets a remote environment (SDK runtimes only)'
           : 'provider disabled in Settings → Integrations';
-        cyboflowLogger.warn(`[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — ${why}`);
+        const what = gated.runtime ? `moving ${a.runtime} pin to ${gated.runtime}` : `dropping ${a.runtime} pin`;
+        cyboflowLogger.warn(`[resolveStepAgent] ${what} for agent '${agentKey}' — ${why}`);
       }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
