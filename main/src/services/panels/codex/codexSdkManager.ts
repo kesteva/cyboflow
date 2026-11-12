@@ -771,7 +771,7 @@ export class CodexSdkManager extends AbstractCliManager {
       return await this.spawnRemoteTrackedProcess(options, spawnKey, runId, warmEligible, hostId);
     }
 
-    const runtimeConfig = this.requireMcpRuntimeConfig();
+    const runtimeConfig = { ...this.requireMcpRuntimeConfig(), runArtifactsDir: getCyboflowSubdirectory('artifacts', 'runs', runId) };
     const executable = this.getResolvedExecutable();
     // HERMETIC spawn only: the user's own MCP servers, read fresh each spawn so
     // an edit to config.toml is honoured (and busts a parked entry via the
@@ -883,7 +883,7 @@ export class CodexSdkManager extends AbstractCliManager {
     try {
       if (prep.cancelled) return this.abandonCancelledPrep(options, remote.session);
       await this.ensureRemoteArtifactsDir(remote.session, runId);
-      const runtimeConfig = remote.runtimeConfig;
+      const runtimeConfig = { ...remote.runtimeConfig, runArtifactsDir: remote.session.artifactsDir(runId) };
       const executable = { executablePath: remote.command, version: remote.version };
       const { roles: agentRoles, roleModels } = await this.resolveRemoteAgentRoles(runId, options, remote.session);
       const fingerprint = this.computeWarmFingerprint(

@@ -195,6 +195,32 @@ describe('Codex app-server run configuration', () => {
       .not.toHaveProperty('features');
   });
 
+  it('makes the run artifacts folder a writable root of the workspace-write sandbox, on start AND resume', () => {
+    const options = { panelId: 'run-1', sessionId: 'run-1', runId: 'run-1', worktreePath: '/tmp/worktree', prompt: 'go' } as const;
+    const withDir = { ...runtimeConfig, runArtifactsDir: '/data/artifacts/runs/run-1' };
+    const table = { writable_roots: ['/data/artifacts/runs/run-1'] };
+    for (const agentPermissionMode of ['acceptEdits', 'auto'] as const) {
+      const start = buildCodexAppServerThreadStartParams('run-1', { ...options, agentPermissionMode }, withDir);
+      expect(start.sandbox).toBe('workspace-write');
+      expect(start.config?.sandbox_workspace_write).toEqual(table);
+    }
+    const resumed = buildCodexAppServerThreadResumeParams('run-1', 'thread-1', { ...options, agentPermissionMode: 'auto' }, withDir);
+    expect(resumed.config?.sandbox_workspace_write).toEqual(table);
+
+    // Default mode is read-only (every write asks); full access needs no root; a hermetic spawn stays read-only;
+    // no folder ⇒ the configuration is unchanged.
+    const readOnly = buildCodexAppServerThreadStartParams('run-1', options, withDir);
+    expect(readOnly.sandbox).toBe('read-only');
+    expect(readOnly.config).not.toHaveProperty('sandbox_workspace_write');
+    const fullAccess = buildCodexAppServerThreadStartParams('run-1', { ...options, agentPermissionMode: 'dontAsk' }, withDir);
+    expect(fullAccess.sandbox).toBe('danger-full-access');
+    expect(fullAccess.config).not.toHaveProperty('sandbox_workspace_write');
+    const hermetic = buildCodexAppServerThreadStartParams('run-1', { ...options, isolation: 'agent' }, withDir, { disabledMcpServers: [] });
+    expect(hermetic.sandbox).toBe('read-only');
+    expect(hermetic.config).not.toHaveProperty('sandbox_workspace_write');
+    expect(buildCodexAppServerThreadStartParams('run-1', { ...options, agentPermissionMode: 'auto' }, runtimeConfig).config).not.toHaveProperty('sandbox_workspace_write');
+  });
+
   it('keeps workflow turns in normal execution mode while resolving the model', () => {
     const base = {
       panelId: 'run-1',
