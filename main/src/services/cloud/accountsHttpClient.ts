@@ -117,7 +117,8 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function validateDevices(body: unknown): DeviceInfo[] {
+/** The GET /v1/devices body; rows that don't fit are dropped. Shared with the sync client. */
+export function validateDevices(body: unknown): DeviceInfo[] {
   if (!isRecord(body) || !Array.isArray(body.devices)) {
     throw badResponse('response did not match the expected shape');
   }
