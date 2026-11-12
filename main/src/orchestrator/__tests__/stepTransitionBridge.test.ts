@@ -5,7 +5,6 @@
  *   (a) Happy-path emit fires with correct event shape.
  *   (b) DB current_step_id is updated before emit.
  *   (c) Emit happens AFTER the UPDATE (write-then-emit ordering).
- *   (d) Unknown workflow name → resolveInitialStepId returns null; no DB write/emit.
  *   (e) Missing workflow_runs row → logs warn, does NOT throw.
  *   (f) raw_events 'step_transition' persistence (Insights timeline): row written
  *       on valid transitions (shape + payload), no row on rejected/missing, and
@@ -308,47 +307,6 @@ describe('buildStepTransitionEvent — missing row (fail-soft)', () => {
     // logger.warn must have been called.
     expect(logger.warn).toHaveBeenCalledOnce();
     expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('nonexistent-run-id');
-  });
-});
-
-describe('buildStepTransitionEvent — unknown workflow name (no DB write/emit)', () => {
-  afterEach(() => {
-    stepTransitionEvents.removeAllListeners('transition');
-  });
-
-  it('(d) resolveInitialStepId returns null for unknown workflow; caller skips DB write and emit', () => {
-    const db = createTestDbWithCurrentStep();
-
-    // Seed a run with an unknown workflow name.
-    const workflowId = 'wf-unknown';
-    const runId = 'run-unknown-01';
-    db.prepare(
-      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
-    ).run(workflowId, 'unknown-workflow');
-    db.prepare(
-      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status) VALUES (?, ?, 1, '/tmp/test', 'running')`,
-    ).run(runId, workflowId);
-
-    const stepId = resolveInitialStepId('unknown-workflow');
-    expect(stepId).toBeNull();
-
-    // When stepId is null, the caller (RunExecutor's emitStep adapter in index.ts)
-    // does NOT call buildStepTransitionEvent. We verify the DB is untouched.
-    const adapter = dbAdapter(db);
-    const emitSpy = vi.fn();
-    stepTransitionEvents.on('transition', emitSpy);
-
-    // Simulate the caller's guard (as in index.ts stepTransitionEmitter.emit).
-    if (stepId !== null) {
-      buildStepTransitionEvent(runId, stepId, 'running', adapter);
-    }
-
-    expect(emitSpy).not.toHaveBeenCalled();
-
-    const row = db
-      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
-      .get(runId) as { current_step_id: string | null } | undefined;
-    expect(row?.current_step_id).toBeNull();
   });
 });
 

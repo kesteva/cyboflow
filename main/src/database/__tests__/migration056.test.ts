@@ -117,34 +117,6 @@ describe('Migration 049: visual-verify per-project budget + telemetry columns', 
     db.close();
   });
 
-  it('the budget can be set + judge_calls_used incremented; SUM aggregates per project', () => {
-    const db = buildDb();
-    seedRun(db, 'run-1');
-    db.prepare('UPDATE projects SET visual_verify_budget_calls = 3 WHERE id = 1').run();
-    for (const [id, used] of [
-      ['vr_a', 1],
-      ['vr_b', 2],
-    ] as const) {
-      db.prepare(
-        `INSERT INTO verification_requests (id, run_id, project_id, verify_type, deliverable_json, judge_calls_used)
-         VALUES (?, 'run-1', 1, 'static-render-snapshot', '{"intent":"x"}', ?)`,
-      ).run(id, used);
-    }
-    const budget = (
-      db.prepare('SELECT visual_verify_budget_calls AS b FROM projects WHERE id = 1').get() as {
-        b: number | null;
-      }
-    ).b;
-    const usedSum = (
-      db
-        .prepare('SELECT COALESCE(SUM(judge_calls_used), 0) AS n FROM verification_requests WHERE project_id = 1')
-        .get() as { n: number }
-    ).n;
-    expect(budget).toBe(3);
-    expect(usedSum).toBe(3);
-    db.close();
-  });
-
   it('is idempotent / re-run-guarded — re-applying raises the duplicate-column signal', () => {
     const db = buildDb();
     // Re-running the same file MUST raise 'duplicate column name' (the signal

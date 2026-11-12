@@ -22,6 +22,8 @@ export interface OwnedHandles {
   cli: readonly OwnedCliProcess[];
   /** From `RunShellManager.listOwnedShells()`. */
   shells: readonly OwnedRunShell[];
+  /** From `HostTerminalManager.listOwnedShells()` (Environments ssh terminals). */
+  hostShells?: readonly { pid: number }[];
 }
 
 const CLI_TYPE_BY_PROVIDER: Record<OwnedCliProcess['provider'], ProcessType> = {
@@ -43,6 +45,7 @@ export function classifyProcessType(
   const cli = owned.cli.find((h) => h.pid === row.pid);
   if (cli) return CLI_TYPE_BY_PROVIDER[cli.provider];
   if (owned.shells.some((h) => h.pid === row.pid)) return 'shell-pty';
+  if (owned.hostShells?.some((h) => h.pid === row.pid)) return 'shell-pty';
   if (isBrokerProcess(row)) return 'codex-broker';
   return 'unknown';
 }

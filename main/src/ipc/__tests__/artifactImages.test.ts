@@ -78,15 +78,6 @@ afterEach(() => {
 });
 
 describe('registerArtifactImageHandlers — artifacts:load-images', () => {
-  it('registers the channel', () => {
-    const { ipcMain, handlers } = makeHandlerCapture();
-    registerArtifactImageHandlers(
-      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
-      makeServices(),
-    );
-    expect(handlers.has('artifacts:load-images')).toBe(true);
-  });
-
   it('returns base64 data URLs for files in the run image root', async () => {
     const runDir = path.join(tmpRoot, 'artifacts', 'runs', RUN_ID);
     await fs.mkdir(runDir, { recursive: true });

@@ -136,13 +136,10 @@ describe('resolveOmpGateExtensionPath', () => {
     expect(message).toMatch(/does not exist/);
   });
 
-  it('throws when packaged with no resourcesPath at all', () => {
+  it('throws when packaged with no resourcesPath at all, refusing to spawn rather than degrade', () => {
     expect(() => resolveOmpGateExtensionPath({ isPackaged: true })).toThrow(
       /process\.resourcesPath is unavailable/,
     );
-  });
-
-  it('refuses to spawn rather than degrade when packaged', () => {
     expect(() => resolveOmpGateExtensionPath({ isPackaged: true })).toThrow(
       /Refusing to spawn OMP without/i,
     );

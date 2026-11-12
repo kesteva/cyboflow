@@ -23,7 +23,13 @@ import { setWorktreeMonitorProvider } from './orchestrator/trpc/routers/worktree
 import { buildSystemSnapshot, setSystemProvider } from './orchestrator/trpc/routers/system';
 import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap';
 import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvider';
-import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
+import {
+  createSystemSnapshotProvider,
+  defaultIsPidAlive,
+  scanInstanceRecords,
+} from './services/systemSnapshotProvider';
+import { createSiblingInstances } from './services/siblingInstances';
+import { getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { MonitorReapService } from './services/monitor/monitorReapService';
 import { countDescendantPids } from './services/monitor/reapManifest';
@@ -52,6 +58,9 @@ export interface SystemViewCompositionDeps {
   ptyCliManagers: AbstractCliManager[];
   /** Read lazily: the run-shell manager is constructed later in boot. */
   getRunShellManager: () => RunShellManager | null;
+  /** Live remote-environment terminal PTYs (supplied by the hosts composition); none when omitted. They are
+   *  reported under their own `host-terminal` owner kind — no run, no worktree, so no "Open run". */
+  getHostTerminalShells?: () => Array<{ pid: number; terminalId: string; hostId: string }>;
   /** Source of the user's saved watched-port list, read per snapshot. */
   configManager: Pick<ConfigManager, 'getSystemWatchedPorts'>;
   /** Dev build: cyboflow's own dev renderer + CDP ports join the defaults. */
@@ -91,8 +100,20 @@ export function resolveWatchedPorts(
 
 export function composeSystemView(deps: SystemViewCompositionDeps): void {
   const { databaseService, worktreeManager, gitStatusManager, codexBrokerReaper } = deps;
+  // Other data dirs' instances (stable / Dev DMG / pnpm dev / running smoke dirs): their
+  // live worktrees must never read as orphans here, nor their helpers as strays.
+  const siblings = createSiblingInstances({
+    selfDataDir: getCyboflowDirectory(),
+    readInstanceRecords: scanInstanceRecords,
+    isPidAlive: defaultIsPidAlive,
+  });
   const buildWorktreeProvider = () =>
-    createWorktreeMonitorProvider({ database: databaseService, worktreeManager, diskUsage: diskUsageService });
+    createWorktreeMonitorProvider({
+      database: databaseService,
+      worktreeManager,
+      diskUsage: diskUsageService,
+      readSiblingClaims: () => siblings.worktreeClaims(),
+    });
 
   setWorktreeMonitorProvider(buildWorktreeProvider());
   console.log('[Main] worktreeMonitor deps wired');
@@ -103,9 +124,13 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
       runShellManager: {
         listOwnedShells: () => deps.getRunShellManager()?.listOwnedShells() ?? [],
       },
+      hostTerminals: {
+        listOwnedShells: () => deps.getHostTerminalShells?.() ?? [],
+      },
       isBrokerProcess,
     }),
     worktrees: buildWorktreeProvider(),
+    readSiblingMainPids: () => siblings.liveMainPids(),
     orchSocket: deps.orchSocketServer,
     watchedPorts: () => resolveWatchedPorts(deps.configManager.getSystemWatchedPorts(), deps.isDevelopment),
   });
@@ -114,7 +139,12 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
 
   setMonitorReapProvider(
     new MonitorReapService({
-      loadSnapshot: (projectId) => buildSystemSnapshot(systemSnapshotProvider, projectId),
+      // Resolve and execute both re-read sibling ownership: a destructive action never
+      // rides on a cached read from before the user confirmed.
+      loadSnapshot: (projectId) => {
+        siblings.invalidate();
+        return buildSystemSnapshot(systemSnapshotProvider, projectId);
+      },
       manifestDeps: {
         measureFresh: (p) => diskUsageService.measureFresh(p),
         peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),

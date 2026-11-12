@@ -79,7 +79,7 @@ export interface RegisteredTool {
   readonly prepare: (raw: unknown) => PrepareResult;
 }
 
-interface ToolDefinition<T extends McpEnvelopeType | null, S extends z.ZodTypeAny> {
+interface ToolDefinition<T extends McpEnvelopeType | null, S extends z.ZodType> {
   readonly name: string;
   readonly description: string;
   readonly input: S;
@@ -105,7 +105,7 @@ export function compact(params: Record<string, unknown>): Record<string, unknown
   return out;
 }
 
-export function defineTool<T extends McpEnvelopeType | null, S extends z.ZodTypeAny>(
+export function defineTool<T extends McpEnvelopeType | null, S extends z.ZodType>(
   definition: ToolDefinition<T, S>,
 ): RegisteredTool {
   const inputSchema = toInputSchema(definition.input);

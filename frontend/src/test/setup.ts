@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import { afterEach, vi } from 'vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 
 import { startOrphanWatchdog } from '../../../vitestOrphanWatchdog';
 
@@ -9,6 +9,10 @@ import { startOrphanWatchdog } from '../../../vitestOrphanWatchdog';
 startOrphanWatchdog();
 
 afterEach(() => { cleanup(); });
+
+// Windows runners stall renders past testing-library's 1 s findBy/waitFor default
+// under full-suite load (see the matching win32 timeouts in vitest.config.ts).
+if (process.platform === 'win32') configure({ asyncUtilTimeout: 5_000 });
 
 if (typeof globalThis.ResizeObserver === 'undefined') {
   globalThis.ResizeObserver = class ResizeObserver {

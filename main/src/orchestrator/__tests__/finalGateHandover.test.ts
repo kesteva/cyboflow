@@ -419,19 +419,6 @@ describe('createFinalGateHandover — frozen-spec detection (Fix 2)', () => {
 // ---------------------------------------------------------------------------
 
 describe('createFinalGateHandover — reviewItemId capture (Fix 1)', () => {
-  it('captures the pending final gate review_items.id for parked-at-final-gate', async () => {
-    const db = makeDb();
-    const { runId } = seedProgrammaticRun(db);
-    const gateId = seedGateItem(db, runId, 'gate:human-step:step-b');
-    const { deps, handover } = makeHarness(db);
-
-    await createFinalGateHandover(deps).attempt(runId, 'x');
-
-    const [, , ctx] = handover.mock.calls[0];
-    expect(ctx.reviewItemId).toBe(gateId);
-    db.close();
-  });
-
   it('omits reviewItemId for drained-rest (no open gate row to re-validate)', async () => {
     const db = makeDb();
     const { runId } = seedProgrammaticRun(db);

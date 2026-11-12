@@ -15,7 +15,7 @@
  *     M5-based harness injects instead, so the mock is defensive, not load-bearing.)
  *
  *  2. Reset every process-wide singleton in `afterEach`. Tier-3 runs under
- *     `poolOptions.forks.singleFork` (these singletons force serialization), so a
+ *     `maxWorkers: 1` (these singletons force serialization), so a
  *     missed reset would bleed state across scenario files. Enumerated from a
  *     `grep _resetForTesting` over main/src.
  */

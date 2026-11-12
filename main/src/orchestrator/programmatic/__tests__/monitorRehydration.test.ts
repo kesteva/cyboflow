@@ -10,7 +10,7 @@
  * throwing both degrade to an undefined injectEvent + a logged warning, never a
  * failed rehydration).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { createMonitorRehydrator } from '../monitorRehydration';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from '../monitor';
 import type { DatabaseLike, PreparedStatement, LoggerLike } from '../../types';
@@ -41,10 +41,10 @@ function fakeSession(): MonitorSession {
 }
 
 function fakeLogger(): LoggerLike & {
-  info: ReturnType<typeof vi.fn>;
-  warn: ReturnType<typeof vi.fn>;
-  error: ReturnType<typeof vi.fn>;
-  debug: ReturnType<typeof vi.fn>;
+  info: Mock;
+  warn: Mock;
+  error: Mock;
+  debug: Mock;
 } {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }

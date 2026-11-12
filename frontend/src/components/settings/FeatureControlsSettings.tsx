@@ -43,6 +43,12 @@ export interface FeatureControlsSettingsProps {
   onAgentsEnabledChange?: (enabled: boolean) => void;
   /** CYBOFLOW_DISABLE_PERSISTENT_AGENTS is set: show why it stays off. */
   agentsKillSwitch?: boolean;
+  /** Environments (SSH machines) checkbox; shown inside the Agents & Environments section when main reports it available. */
+  environmentsAvailable?: boolean;
+  environmentsEnabled?: boolean;
+  onEnvironmentsEnabledChange?: (enabled: boolean) => void;
+  /** CYBOFLOW_DISABLE_REMOTE_HOSTS is set. */
+  environmentsKillSwitch?: boolean;
 }
 
 export function FeatureControlsSettings({
@@ -72,6 +78,10 @@ export function FeatureControlsSettings({
   agentsEnabled = false,
   onAgentsEnabledChange,
   agentsKillSwitch = false,
+  environmentsAvailable = false,
+  environmentsEnabled = false,
+  onEnvironmentsEnabledChange,
+  environmentsKillSwitch = false,
 }: FeatureControlsSettingsProps): React.JSX.Element {
   return (
     <section data-testid="settings-feature-controls">
@@ -321,6 +331,25 @@ export function FeatureControlsSettings({
               <p className="text-xs text-status-warning mt-1">
                 Turned off on this computer by CYBOFLOW_DISABLE_PERSISTENT_AGENTS.
               </p>
+            )}
+            {environmentsAvailable && (
+              <div className="mt-3">
+                <Checkbox
+                  data-testid="settings-environments-toggle"
+                  label="Environments (SSH machines)"
+                  checked={environmentsEnabled}
+                  onChange={(e) => onEnvironmentsEnabledChange?.(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1">
+                  Adds the Environments tab, where you connect other computers over SSH and run sessions on them.
+                  Off by default. Turning it off keeps your saved environments.
+                </p>
+                {environmentsKillSwitch && (
+                  <p className="text-xs text-status-warning mt-1">
+                    Turned off on this computer by CYBOFLOW_DISABLE_REMOTE_HOSTS.
+                  </p>
+                )}
+              </div>
             )}
           </SettingsSection>
         )}

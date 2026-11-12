@@ -31,6 +31,7 @@ import { experimentDisplayName } from '../utils/experimentDisplay';
 import { ExperimentCancelDialog } from './cyboflow/ExperimentCancelDialog';
 import { groupIdeaSessions } from '../utils/ideaSessionGrouping';
 import { useOcclusion } from '../hooks/useOcclusion';
+import { EnvironmentMarker } from './agentsEnv/EnvironmentMarker';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -162,7 +163,12 @@ function childRunsEqual(a: ActiveRunRow[], b: ActiveRunRow[]): boolean {
   if (a === b) return true;
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].status !== b[i].status || a[i].variant_label !== b[i].variant_label) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].status !== b[i].status ||
+      a[i].variant_label !== b[i].variant_label ||
+      a[i].host_id !== b[i].host_id
+    ) {
       return false;
     }
   }
@@ -393,6 +399,7 @@ export const SessionRow = memo(function SessionRow({
             {session.name || session.id.slice(0, 8)}
           </span>
         )}
+        <EnvironmentMarker hostId={session.hostId} />
         {!isEditingName && (
           <button
             type="button"
@@ -461,6 +468,7 @@ export const SessionRow = memo(function SessionRow({
                       {run.variant_label}
                     </span>
                   )}
+                  <EnvironmentMarker hostId={run.host_id} />
                   <span className="text-xs text-text-tertiary truncate ml-auto">
                     {run.status}
                   </span>
@@ -1767,6 +1775,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                                   {run.variant_label}
                                 </span>
                               )}
+                              <EnvironmentMarker hostId={run.host_id} />
                               <span className="text-xs text-text-tertiary truncate ml-auto">
                                 {run.status}
                               </span>

@@ -118,10 +118,4 @@ describe('thoroughnessToTuningLevel', () => {
     expect(thoroughnessToTuningLevel('v1')).toBe('standard');
     expect(thoroughnessToTuningLevel('production')).toBe('thorough');
   });
-
-  it('is total — every level has an answer', () => {
-    for (const level of SOLUTION_THOROUGHNESS_LEVELS) {
-      expect(['efficient', 'standard', 'thorough']).toContain(thoroughnessToTuningLevel(level));
-    }
-  });
 });

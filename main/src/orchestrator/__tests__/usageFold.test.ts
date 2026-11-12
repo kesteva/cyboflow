@@ -5,7 +5,7 @@
  * DB-level cases (mixed Claude+Codex run == Σ daily buckets, older
  * accounting_version) live in insightsQueries.test.ts.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import {
   ACCOUNTING_VERSION,
   foldRunUsage,
@@ -88,7 +88,7 @@ function result(
   return payload;
 }
 
-function logger(): { warn: ReturnType<typeof vi.fn>; events: () => string[] } {
+function logger(): { warn: Mock; events: () => string[] } {
   const warn = vi.fn();
   return {
     warn,

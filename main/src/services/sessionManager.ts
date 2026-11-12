@@ -183,6 +183,7 @@ export class SessionManager extends EventEmitter {
       // Idea-session home/lineage (migrations 111/112). Unlike design_idea_id
       // (deliberately not mapped here), these back the idea-home concept and are
       // read by the runtime, so they're allowlisted.
+      hostId: dbSession.host_id ?? null,
       homeIdeaId: dbSession.home_idea_id ?? null,
       originIdeaId: dbSession.origin_idea_id ?? null
     };

@@ -24,6 +24,10 @@ vi.mock('../../utils/claudeBinaryDetection', () => ({
     version: '1.2.3',
   })),
 }));
+// The CLI login cross-check would exec the real bundled `claude auth status`.
+vi.mock('../claudeAuth', () => ({
+  probeClaudeLoginStatus: vi.fn(async () => ({ loggedIn: true, email: 'claude@example.com', subscriptionType: 'max' })),
+}));
 // The omp probe now really shells out to findExecutableInPath('omp') (see
 // ompAvailability.ts) — pin it to "not found" so this suite is deterministic
 // regardless of whether the machine running it happens to have omp on PATH.

@@ -78,7 +78,7 @@ describe('ProposalCardList', () => {
   });
 
   it('shows a proposal that resolves while mounted, then expires it after the TTL elapses', () => {
-    const { rerender } = render(<ProposalCardList proposals={[makeProposal('p1', 'proposed')]} />);
+    const { rerender, container } = render(<ProposalCardList proposals={[makeProposal('p1', 'proposed')]} />);
     expect(screen.getAllByTestId('proposal-card-stub')).toHaveLength(1);
 
     rerender(<ProposalCardList proposals={[makeProposal('p1', 'executed')]} />);
@@ -95,6 +95,7 @@ describe('ProposalCardList', () => {
     });
     rerender(<ProposalCardList proposals={[makeProposal('p1', 'executed')]} />);
     expect(screen.queryByTestId('proposal-card-stub')).not.toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('treats a dismissed transition the same as any other resolution', () => {
@@ -108,17 +109,5 @@ describe('ProposalCardList', () => {
     });
     rerender(<ProposalCardList proposals={[makeProposal('p1', 'dismissed')]} />);
     expect(screen.queryByTestId('proposal-card-stub')).not.toBeInTheDocument();
-  });
-
-  it('renders null once every proposal has expired or was filtered out', () => {
-    const { rerender, container } = render(<ProposalCardList proposals={[makeProposal('p1', 'proposed')]} />);
-
-    rerender(<ProposalCardList proposals={[makeProposal('p1', 'executed')]} />);
-    act(() => {
-      vi.advanceTimersByTime(RESOLVED_PROPOSAL_TTL_MS * 1.5);
-    });
-    rerender(<ProposalCardList proposals={[makeProposal('p1', 'executed')]} />);
-
-    expect(container).toBeEmptyDOMElement();
   });
 });

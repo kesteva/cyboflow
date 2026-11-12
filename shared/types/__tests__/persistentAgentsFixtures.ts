@@ -62,7 +62,7 @@ export const BRIDGE_FIXTURE_DEFINITION: ConnectorDefinition = {
   id: 'bridge',
   kind: 'bridge',
   version: 1,
-  vendors: ['openai-dots', 'meta-muse', 'other'],
+  vendors: ['anthropic-duet', 'openai-dots', 'meta-muse', 'other'],
   displayName: 'cyboflow Bridge',
   connectsVia: 'bridge',
   capabilities: BRIDGE_DESCRIPTOR,

@@ -16,8 +16,10 @@
  * lazy `import('playwright')`, never 'electron' or 'better-sqlite3'.
  */
 import { createDefaultDriverDeps, runDriverCommand } from './driverCore';
+import { installBrotliFetchGuard } from '../../../utils/brotliFetchGuard';
 
 export async function main(): Promise<void> {
+  installBrotliFetchGuard();
   const deps = createDefaultDriverDeps();
   const exitCode = await runDriverCommand(process.argv.slice(2), process.env, deps);
   process.exit(exitCode);

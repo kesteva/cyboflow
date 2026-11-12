@@ -164,56 +164,55 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     expect(service.ensureGlobalThread).toHaveBeenCalledTimes(1);
   });
 
-  it('sendMessage forwards to the service and returns { ok: true }', async () => {
+  it.each([
+    {
+      label: 'plain text',
+      input: { threadId: 'thread-1', text: 'hi' },
+      expectedArgs: ['thread-1', 'hi', undefined, undefined],
+    },
+    {
+      label: 'an optional contextHint',
+      input: { threadId: 'thread-1', text: 'hi', contextHint: 'ctx' },
+      expectedArgs: ['thread-1', 'hi', 'ctx', undefined],
+    },
+    {
+      label: 'image attachments',
+      input: {
+        threadId: 'thread-1',
+        text: '',
+        images: [{ name: 'shot.png', mediaType: 'image/png' as const, base64: 'iVBORw0KGgo=' }],
+      },
+      expectedArgs: [
+        'thread-1',
+        '',
+        undefined,
+        [{ name: 'shot.png', mediaType: 'image/png', base64: 'iVBORw0KGgo=' }],
+      ],
+    },
+  ])('sendMessage forwards $label to the service and returns { ok: true }', async ({ input, expectedArgs }) => {
     const service = makeService();
     const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
+    const result = await caller.cyboflow.agentThread.sendMessage(input);
     expect(result).toEqual({ ok: true });
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined, undefined);
+    expect(service.sendMessage).toHaveBeenCalledWith(...expectedArgs);
   });
 
-  it('interruptTurn forwards to the service and returns its result', async () => {
+  it.each([true, false])('interruptTurn forwards to the service and returns { interrupted: %s }', async (interrupted) => {
     const service = makeService();
-    service.interruptTurn.mockResolvedValueOnce({ interrupted: true });
+    service.interruptTurn.mockResolvedValueOnce({ interrupted });
     const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
     const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
-    expect(result).toEqual({ interrupted: true });
+    expect(result).toEqual({ interrupted });
     expect(service.interruptTurn).toHaveBeenCalledWith('thread-1');
   });
 
-  it('interruptTurn is a no-op ({ interrupted: false }) when the thread is idle', async () => {
+  it.each([true, false])('turnState reports the service\'s in-flight state ({ inFlight: %s })', async (inFlight) => {
     const service = makeService();
-    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
-    expect(result).toEqual({ interrupted: false });
-  });
-
-  it('turnState reports the service\'s in-flight state', async () => {
-    const service = makeService();
-    service.isTurnInFlight.mockReturnValueOnce(true);
+    service.isTurnInFlight.mockReturnValueOnce(inFlight);
     const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
     const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
-    expect(result).toEqual({ inFlight: true });
+    expect(result).toEqual({ inFlight });
     expect(service.isTurnInFlight).toHaveBeenCalledWith('thread-1');
-  });
-
-  it('turnState reports idle ({ inFlight: false }) when nothing is in flight', async () => {
-    const service = makeService();
-    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
-    expect(result).toEqual({ inFlight: false });
-  });
-
-  it('sendMessage forwards an optional contextHint to the service', async () => {
-    const service = makeService();
-    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const result = await caller.cyboflow.agentThread.sendMessage({
-      threadId: 'thread-1',
-      text: 'hi',
-      contextHint: 'ctx',
-    });
-    expect(result).toEqual({ ok: true });
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', 'ctx', undefined);
   });
 
   // -------------------------------------------------------------------------
@@ -222,16 +221,6 @@ describe('cyboflow.agentThread read/simple procedures', () => {
   // -------------------------------------------------------------------------
 
   const PNG_B64 = 'iVBORw0KGgo=';
-
-  it('sendMessage forwards image attachments to the service', async () => {
-    const service = makeService();
-    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const images = [{ name: 'shot.png', mediaType: 'image/png' as const, base64: PNG_B64 }];
-
-    await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: '', images });
-
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', '', undefined, images);
-  });
 
   it('sendMessage rejects more than four images', async () => {
     const service = makeService();

@@ -82,6 +82,22 @@ describe('ProcessSnapshotService', () => {
     expect(byPid.get(14)).toMatchObject({ processType: 'unknown', worktreePath: null, owner: null });
   });
 
+  it('tags an Environments host terminal with its own owner kind: no run, no worktree', async () => {
+    const service = new ProcessSnapshotService({
+      listProcesses: async () => [row(30, 'ssh -tt -- box'), row(12, '-zsh')],
+      cliManager: [],
+      runShellManager: { listOwnedShells: () => [{ pid: 12, runId: 'r1', terminalId: 't1', worktreePath: '/wt/c' }] },
+      hostTerminals: { listOwnedShells: () => [{ pid: 30, terminalId: 'host::h1::t1', hostId: 'h1' }] },
+    });
+    const byPid = new Map((await service.snapshot()).map((p) => [p.pid, p]));
+    expect(byPid.get(30)).toMatchObject({
+      processType: 'shell-pty',
+      worktreePath: null,
+      owner: { kind: 'host-terminal', hostId: 'h1', terminalId: 'host::h1::t1' },
+    });
+    expect(byPid.get(12)?.owner).toEqual({ kind: 'run-shell', runId: 'r1', terminalId: 't1' });
+  });
+
   it('accepts a single cliManager (non-array)', async () => {
     const service = new ProcessSnapshotService({
       listProcesses: async () => [row(10, 'claude')],

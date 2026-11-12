@@ -79,7 +79,8 @@ const termMock = {
 let lastTerminalOptions: Record<string, unknown> | undefined;
 
 vi.mock('@xterm/xterm', () => ({
-  Terminal: vi.fn((opts: Record<string, unknown>) => {
+  // `function`, not an arrow: vitest 4 mocks invoked with `new` require a constructable impl.
+  Terminal: vi.fn(function (opts: Record<string, unknown>) {
     lastTerminalOptions = opts;
     termMock.options = { ...opts };
     return termMock;
@@ -87,10 +88,12 @@ vi.mock('@xterm/xterm', () => ({
 }));
 
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: vi.fn(() => ({
-    fit: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  FitAddon: vi.fn(function () {
+    return {
+      fit: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -398,6 +401,10 @@ describe('InteractiveTerminalView', () => {
     expect(unsubscribeSpy).not.toHaveBeenCalled();
     expect(termMock.dispose).not.toHaveBeenCalled();
     expect(onDataDispose).not.toHaveBeenCalled();
+
+    // The real teardown (after the unmount) disposes the onData binding.
+    disposeInteractiveTerminal('run-cleanup');
+    expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 
   it('keep-alive: re-mounting the same runId reuses the cached terminal (no new Terminal, scrollback preserved)', () => {
@@ -528,15 +535,6 @@ describe('InteractiveTerminalView — TASK-816 warn guardrail', () => {
 // ---------------------------------------------------------------------------
 
 describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => {
-  it('onData is INERT before "Interact anyway" — no relay on keystroke (the warn gate holds)', () => {
-    render(<InteractiveTerminalView runId="run-relay-off" />);
-
-    expect(typeof onDataHandler).toBe('function');
-    // Simulate a keystroke before the flag is flipped.
-    onDataHandler?.('a');
-    expect(relayInputMutate).not.toHaveBeenCalled();
-  });
-
   it('relays raw keystrokes VERBATIM (no appended newline) ONLY after "Interact anyway" flips the flag', () => {
     render(<InteractiveTerminalView runId="run-relay-on" />);
 
@@ -606,16 +604,6 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('keeps the onData binding alive across a switch (unmount), disposing it only on real end-of-life', () => {
-    const { unmount } = render(<InteractiveTerminalView runId="run-relay-dispose" />);
-    // A switch-away (unmount) must NOT dispose the relay — the PTY persists.
-    unmount();
-    expect(onDataDispose).not.toHaveBeenCalled();
-    // The real teardown disposes it.
-    disposeInteractiveTerminal('run-relay-dispose');
-    expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 });
 

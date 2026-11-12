@@ -118,7 +118,7 @@ describe('sessionRowPropsEqual (SessionRow memo comparator)', () => {
     expect(sessionRowPropsEqual(props, rebuilt)).toBe(true);
   });
 
-  it('is false when a childRun\'s status (or id, or variant_label) actually changes', () => {
+  it('is false when a childRun\'s status (or id, variant_label, or host_id) actually changes', () => {
     const run = makeRun({ status: 'running' });
     const props = makeProps({ childRuns: [run] });
     expect(
@@ -129,6 +129,9 @@ describe('sessionRowPropsEqual (SessionRow memo comparator)', () => {
     ).toBe(false);
     expect(
       sessionRowPropsEqual(props, { ...props, childRuns: [{ ...run, variant_label: 'Variant B' }] }),
+    ).toBe(false);
+    expect(
+      sessionRowPropsEqual(props, { ...props, childRuns: [{ ...run, host_id: 'h2' }] }),
     ).toBe(false);
   });
 

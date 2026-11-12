@@ -33,7 +33,8 @@ interface WorktreeRegistryEntryBase {
 
 export type WorktreeMonitorRegistryEntry =
   | (WorktreeRegistryEntryBase & { tag: 'in_place' | 'is_main_repo'; prunable: false })
-  | (WorktreeRegistryEntryBase & { tag: 'session-owned' | 'run-owned' | 'orphan'; prunable: true });
+  | (WorktreeRegistryEntryBase & { tag: 'session-owned' | 'run-owned' | 'orphan'; prunable: true })
+  | (WorktreeRegistryEntryBase & { tag: 'other-instance'; prunable: false; claimedBy: string; claimVerified: boolean });
 
 /** Structural mirror of services/diskUsageService.ts `DiskUsageEntry` — `bytes` exists only when measured. */
 export type WorktreeMonitorDiskUsage =

@@ -62,49 +62,103 @@ export interface JsonSchemaObject extends JsonSchemaNode {
  * so the declaration stays rich while validation stays loose, and the pairing
  * lives at the field rather than in a second hand-maintained table.
  */
-const declaredSchemas = new WeakMap<z.ZodTypeAny, JsonSchemaNode>();
+const declaredSchemas = new WeakMap<z.ZodType, JsonSchemaNode>();
 
 /**
  * Advertise `json` for `schema` instead of deriving it. Use ONLY where the
  * handler re-narrows the value — see {@link declaredSchemas}.
  */
-export function declareAs<S extends z.ZodTypeAny>(schema: S, json: JsonSchemaNode): S {
+export function declareAs<S extends z.ZodType>(schema: S, json: JsonSchemaNode): S {
   declaredSchemas.set(schema, json);
   return schema;
 }
 
-/** Strip the wrappers that do not change the advertised shape. */
-function unwrap(schema: z.ZodTypeAny): { inner: z.ZodTypeAny; optional: boolean; nullable: boolean } {
+/**
+ * Strip the wrappers that do not change the advertised shape.
+ *
+ * zod 4 has no effects wrapper to look through: `.refine()` / `.superRefine()`
+ * append a check to the SAME schema class (a refined ZodString is still a
+ * ZodString, and it inherits the base's `.describe()` text), so only the
+ * optional / nullable / default wrappers remain.
+ *
+ * `description` is the OUTERMOST `.describe()` text along the way. zod 3 copied
+ * a schema's description onto every wrapper built over it; zod 4 keeps it on
+ * the one instance it was set on, so `z.string().nullable().describe(...)
+ * .optional()` carries it on the middle (nullable) node only.
+ */
+function unwrap(schema: z.ZodType): {
+  inner: z.ZodType;
+  optional: boolean;
+  nullable: boolean;
+  description: string | undefined;
+} {
   let inner = schema;
   let optional = false;
   let nullable = false;
+  let description: string | undefined;
   for (;;) {
+    description ??= inner.description;
     if (inner instanceof z.ZodOptional) {
       optional = true;
-      inner = inner.unwrap() as z.ZodTypeAny;
+      inner = inner.unwrap() as z.ZodType;
     } else if (inner instanceof z.ZodNullable) {
       nullable = true;
-      inner = inner.unwrap() as z.ZodTypeAny;
+      inner = inner.unwrap() as z.ZodType;
     } else if (inner instanceof z.ZodDefault) {
       optional = true;
-      inner = inner.removeDefault() as z.ZodTypeAny;
-    } else if (inner instanceof z.ZodEffects) {
-      inner = inner.innerType() as z.ZodTypeAny;
+      inner = inner.unwrap() as z.ZodType;
     } else {
-      return { inner, optional, nullable };
+      return { inner, optional, nullable, description };
     }
   }
 }
 
 function isIntegerSchema(schema: z.ZodNumber): boolean {
-  return schema._def.checks.some((check) => check.kind === 'int');
+  return schema.isInt;
 }
 
-function nodeFor(schema: z.ZodTypeAny, path: string): JsonSchemaNode {
+/** The checks attached to a schema — zod 4 keeps them on the public `_zod.def`. */
+function checkDefs(schema: z.ZodType): readonly z.core.$ZodCheckDef[] {
+  return (schema._zod.def.checks ?? []).map((check) => check._zod.def);
+}
+
+/**
+ * The floor set by an explicit `.min()` / `.gte()` / `.gt()`, or null.
+ *
+ * NOT `ZodNumber.minValue`: under zod 4 `.int()` is the `safeint` format, which
+ * reports `Number.MIN_SAFE_INTEGER` as its floor, so a bare `.int()` would
+ * render as `integer >= -9007199254740991` instead of `integer`.
+ */
+function explicitMinimum(schema: z.ZodNumber): number | null {
+  let min: number | null = null;
+  for (const def of checkDefs(schema)) {
+    if (def.check !== 'greater_than') continue;
+    const value = Number((def as z.core.$ZodCheckGreaterThanDef).value);
+    if (min === null || value > min) min = value;
+  }
+  return min;
+}
+
+/** An array's `minItems` / `maxItems`, read off its length checks. */
+function arrayBounds(schema: z.ZodArray<z.ZodType>): { min?: number; max?: number } {
+  const bounds: { min?: number; max?: number } = {};
+  for (const def of checkDefs(schema)) {
+    if (def.check === 'min_length') bounds.min = (def as z.core.$ZodCheckMinLengthDef).minimum;
+    else if (def.check === 'max_length') bounds.max = (def as z.core.$ZodCheckMaxLengthDef).maximum;
+    else if (def.check === 'length_equals') {
+      const length = (def as z.core.$ZodCheckLengthEqualsDef).length;
+      bounds.min = length;
+      bounds.max = length;
+    }
+  }
+  return bounds;
+}
+
+function nodeFor(schema: z.ZodType, path: string): JsonSchemaNode {
   const declared = declaredSchemas.get(schema);
   if (declared !== undefined) return { ...declared };
 
-  const { inner, nullable } = unwrap(schema);
+  const { inner, nullable, description } = unwrap(schema);
   const declaredInner = declaredSchemas.get(inner);
   const node: JsonSchemaNode = declaredInner !== undefined ? { ...declaredInner } : baseNodeFor(inner, path);
 
@@ -116,12 +170,11 @@ function nodeFor(schema: z.ZodTypeAny, path: string): JsonSchemaNode {
     if (node.enum !== undefined) node.enum = [...node.enum, null];
   }
 
-  const description = schema.description ?? inner.description;
   if (description !== undefined) node.description = description;
   return node;
 }
 
-function baseNodeFor(inner: z.ZodTypeAny, path: string): JsonSchemaNode {
+function baseNodeFor(inner: z.ZodType, path: string): JsonSchemaNode {
   if (inner instanceof z.ZodString) return { type: 'string' };
   if (inner instanceof z.ZodBoolean) return { type: 'boolean' };
   if (inner instanceof z.ZodNumber) return { type: isIntegerSchema(inner) ? 'integer' : 'number' };
@@ -133,11 +186,10 @@ function baseNodeFor(inner: z.ZodTypeAny, path: string): JsonSchemaNode {
   }
   if (inner instanceof z.ZodArray) {
     const node: JsonSchemaNode = { type: 'array' };
-    const min = inner._def.minLength?.value;
-    const max = inner._def.maxLength?.value;
+    const { min, max } = arrayBounds(inner as z.ZodArray<z.ZodType>);
     if (min !== undefined) node.minItems = min;
     if (max !== undefined) node.maxItems = max;
-    node.items = nodeFor(inner.element as z.ZodTypeAny, `${path}[]`);
+    node.items = nodeFor(inner.element as z.ZodType, `${path}[]`);
     return node;
   }
   if (inner instanceof z.ZodObject) return objectNode(inner as z.ZodObject<z.ZodRawShape>, path, false);
@@ -149,7 +201,7 @@ function objectNode(schema: z.ZodObject<z.ZodRawShape>, path: string, topLevel: 
   const properties: Record<string, JsonSchemaNode> = {};
   const required: string[] = [];
   for (const [key, field] of Object.entries(schema.shape)) {
-    const fieldSchema = field as z.ZodTypeAny;
+    const fieldSchema = field as z.ZodType;
     properties[key] = nodeFor(fieldSchema, path ? `${path}.${key}` : key);
     if (!unwrap(fieldSchema).optional) required.push(key);
   }
@@ -161,7 +213,7 @@ function objectNode(schema: z.ZodObject<z.ZodRawShape>, path: string, topLevel: 
 }
 
 /** Derive the MCP `inputSchema` a tool advertises from its zod schema. */
-export function toInputSchema(schema: z.ZodTypeAny): JsonSchemaObject {
+export function toInputSchema(schema: z.ZodType): JsonSchemaObject {
   const { inner } = unwrap(schema);
   if (!(inner instanceof z.ZodObject)) throw new Error('toInputSchema: tool input must be a zod object');
   return objectNode(inner as z.ZodObject<z.ZodRawShape>, '', true);
@@ -182,44 +234,44 @@ export function toInputSchema(schema: z.ZodTypeAny): JsonSchemaObject {
  * a cross-field rule, or a hint like `intent: string (or task.summary)` —
  * overrides it via the entry's `expected` map instead.
  */
-function renderType(schema: z.ZodTypeAny): string {
+function renderType(schema: z.ZodType): string {
   const { inner, nullable } = unwrap(schema);
   const base = ((): string => {
     if (inner instanceof z.ZodString) return 'string';
     if (inner instanceof z.ZodBoolean) return 'boolean';
     if (inner instanceof z.ZodNumber) {
       if (!isIntegerSchema(inner)) return 'number';
-      const min = inner.minValue;
+      const min = explicitMinimum(inner);
       return min === null ? 'integer' : `integer >= ${min}`;
     }
     if (inner instanceof z.ZodEnum) return (inner.options as string[]).map((v) => `'${v}'`).join(' | ');
     if (inner instanceof z.ZodLiteral) return `'${String(inner.value)}'`;
-    if (inner instanceof z.ZodArray) return `${renderType(inner.element as z.ZodTypeAny)}[]`;
+    if (inner instanceof z.ZodArray) return `${renderType(inner.element as z.ZodType)}[]`;
     return 'object';
   })();
   return nullable ? `${base} | null` : base;
 }
 
 /** The field at `path` within `schema`, or undefined when the path is unknown. */
-function fieldAt(schema: z.ZodTypeAny, path: PropertyKey[]): z.ZodTypeAny | undefined {
+function fieldAt(schema: z.ZodType, path: PropertyKey[]): z.ZodType | undefined {
   let current = unwrap(schema).inner;
   for (const segment of path) {
     if (typeof segment === 'number') {
       if (!(current instanceof z.ZodArray)) return undefined;
-      current = unwrap(current.element as z.ZodTypeAny).inner;
+      current = unwrap(current.element as z.ZodType).inner;
       continue;
     }
     if (!(current instanceof z.ZodObject)) return undefined;
     const next = (current.shape as z.ZodRawShape)[String(segment)];
     if (next === undefined) return undefined;
-    current = unwrap(next as z.ZodTypeAny).inner;
+    current = unwrap(next as z.ZodType).inner;
   }
   return current;
 }
 
 /** Build the `expected` string for the first issue in a failed parse. */
-export function describeIssue(schema: z.ZodTypeAny, issue: z.ZodIssue): string {
-  if (issue.code === z.ZodIssueCode.custom) return issue.message;
+export function describeIssue(schema: z.ZodType, issue: z.ZodIssue): string {
+  if (issue.code === 'custom') return issue.message;
   if (issue.path.length === 0) return issue.message;
 
   const name = issue.path.map((segment) => String(segment)).join('.');
@@ -228,7 +280,7 @@ export function describeIssue(schema: z.ZodTypeAny, issue: z.ZodIssue): string {
   const parent = parentPath.length === 0 ? unwrap(schema).inner : fieldAt(schema, parentPath);
   const last = issue.path[issue.path.length - 1];
   const declared = parent instanceof z.ZodObject
-    ? ((parent.shape as z.ZodRawShape)[String(last)] as z.ZodTypeAny | undefined)
+    ? ((parent.shape as z.ZodRawShape)[String(last)] as z.ZodType | undefined)
     : undefined;
   if (declared === undefined) return `${name}: ${issue.message}`;
 

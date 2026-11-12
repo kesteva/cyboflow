@@ -119,13 +119,6 @@ function seedExperiments(db: Database.Database): void {
 const MIGRATION = '058_rotation_experiments.sql';
 
 describe('Migration 058: rotation experiments', () => {
-  it('(a) applies cleanly through the production transaction wrapper', () => {
-    const db = buildDb();
-    seedExperiments(db);
-    expect(() => runMigrationViaProductionPath(db, readMigration(MIGRATION))).not.toThrow();
-    db.close();
-  });
-
   it('(b) preserves pre-existing rows with every column value identical', () => {
     const db = buildDb();
     seedExperiments(db);

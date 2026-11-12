@@ -75,20 +75,20 @@ function extractTemplateTokens(leaf: string): string[] {
 // Leaf schemas
 // ---------------------------------------------------------------------------
 
-export const scalarSchema: z.ZodType<Scalar> = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+export const scalarSchema: z.ZodType<Scalar, Scalar> = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
-export const settingRefSchema: z.ZodType<SettingRef> = z.object({
+export const settingRefSchema: z.ZodType<SettingRef, SettingRef> = z.object({
   setting: z.string().min(1, 'setting reference must name a non-empty setting'),
 });
 
-export const sourceParamSchema: z.ZodType<SourceParam> = z.union([
+export const sourceParamSchema: z.ZodType<SourceParam, SourceParam> = z.union([
   z.object({ literal: scalarSchema }),
   settingRefSchema,
   z.object({ context: z.union([z.literal('projectId'), z.literal('nowIso'), z.literal('todayIso')]) }),
 ]);
 
-const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema)])
+const jsonValueSchema: z.ZodType<JsonValue, JsonValue> = z.lazy(() =>
+  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)])
 );
 
 const sqlTextSchema = z.string().min(1, 'sql must not be empty').refine((sql) => utf8ByteLength(sql) <= WIDGET_LIMITS.maxSqlBytes, {
@@ -101,16 +101,16 @@ const htmlTextSchema = z
     message: `html must be at most ${WIDGET_LIMITS.maxHtmlBytes} bytes (UTF-8)`,
   });
 
-export const widgetSourceSchema: z.ZodType<WidgetSource> = z.union([
+export const widgetSourceSchema: z.ZodType<WidgetSource, WidgetSource> = z.union([
   z.object({
     type: z.literal('sql'),
     sql: sqlTextSchema,
-    params: z.record(sourceParamSchema).optional(),
+    params: z.record(z.string(), sourceParamSchema).optional(),
   }),
   z.object({
     type: z.literal('query'),
     name: z.enum(QUERY_SOURCE_NAMES),
-    input: z.record(sourceParamSchema),
+    input: z.record(z.string(), sourceParamSchema),
   }),
 ]);
 
@@ -136,7 +136,7 @@ const filterCmpSchema = z.union([
   z.literal('contains'),
 ]);
 
-export const transformStepSchema: z.ZodType<TransformStep> = z.union([
+export const transformStepSchema: z.ZodType<TransformStep, TransformStep> = z.union([
   z.object({
     op: z.literal('filter'),
     field: z.string().min(1),
@@ -176,7 +176,7 @@ export const transformStepSchema: z.ZodType<TransformStep> = z.union([
   }),
 ]);
 
-const widgetValueFormatSchema: z.ZodType<WidgetValueFormat> = z.union([
+const widgetValueFormatSchema: z.ZodType<WidgetValueFormat, WidgetValueFormat> = z.union([
   z.literal('number'),
   z.literal('tokens'),
   z.literal('usd'),
@@ -184,7 +184,7 @@ const widgetValueFormatSchema: z.ZodType<WidgetValueFormat> = z.union([
   z.literal('duration'),
 ]);
 
-export const widgetRenderSchema: z.ZodType<WidgetRender> = z.union([
+export const widgetRenderSchema: z.ZodType<WidgetRender, WidgetRender> = z.union([
   z.object({
     type: z.literal('shape'),
     shape: z.literal('stat'),
@@ -246,7 +246,7 @@ const navigationTargetSchema = z.union([
   z.object({ target: z.literal('project-overview'), projectId: z.number().optional() }),
 ]);
 
-export const widgetActionSchema: z.ZodType<WidgetAction> = z.object({
+export const widgetActionSchema: z.ZodType<WidgetAction, WidgetAction> = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   kind: z.union([z.enum(AGENT_PROPOSAL_KINDS), z.literal('navigate')]),
@@ -257,7 +257,7 @@ export const widgetActionSchema: z.ZodType<WidgetAction> = z.object({
   navigation: navigationTargetSchema.optional(),
 });
 
-export const widgetSettingFieldSchema: z.ZodType<WidgetSettingField> = z.object({
+export const widgetSettingFieldSchema: z.ZodType<WidgetSettingField, WidgetSettingField> = z.object({
   name: z.string().min(1),
   label: z.string().min(1),
   kind: z.union([z.literal('select'), z.literal('number'), z.literal('project'), z.literal('boolean'), z.literal('text')]),
@@ -274,11 +274,11 @@ export const widgetSettingFieldSchema: z.ZodType<WidgetSettingField> = z.object(
 
 const widgetSpecShapeSchema = z.object({
   version: z.literal(1),
-  sources: z.record(widgetSourceSchema).refine((sources) => {
+  sources: z.record(z.string(), widgetSourceSchema).refine((sources) => {
     const count = Object.keys(sources).length;
     return count >= 1 && count <= WIDGET_LIMITS.maxSources;
   }, { message: `sources must have between 1 and ${WIDGET_LIMITS.maxSources} entries` }),
-  transforms: z.record(z.array(transformStepSchema)).optional(),
+  transforms: z.record(z.string(), z.array(transformStepSchema)).optional(),
   render: widgetRenderSchema,
   actions: z.array(widgetActionSchema).max(WIDGET_LIMITS.maxActions, `actions must have at most ${WIDGET_LIMITS.maxActions} entries`).optional(),
   settings: z.array(widgetSettingFieldSchema).optional(),
@@ -383,7 +383,7 @@ export const widgetSpecSchema = widgetSpecShapeSchema.superRefine((spec, ctx) =>
       }
     });
   });
-}) satisfies z.ZodType<WidgetSpec>;
+}) satisfies z.ZodType<WidgetSpec, WidgetSpec>;
 
 // ---------------------------------------------------------------------------
 // Layout / view
@@ -394,10 +394,10 @@ const widgetRefSchema = z.union([
   z.object({ type: z.literal('custom'), widgetId: z.string().min(1) }),
 ]);
 
-export const layoutItemSchema: z.ZodType<LayoutItem> = z.object({
+export const layoutItemSchema: z.ZodType<LayoutItem, LayoutItem> = z.object({
   instanceId: z.string().min(1),
   widget: widgetRefSchema,
-  settings: z.record(scalarSchema),
+  settings: z.record(z.string(), scalarSchema),
   title: z.string().optional(),
   refreshSec: z.number().int().min(WIDGET_LIMITS.minRefreshSec).max(WIDGET_LIMITS.maxRefreshSec).optional(),
   hidden: z.boolean().optional(),
@@ -432,7 +432,7 @@ export const viewLayoutSchema = z
         seenCatalogIds.set(item.widget.catalogId, index);
       }
     });
-  }) satisfies z.ZodType<ViewLayout>;
+  }) satisfies z.ZodType<ViewLayout, ViewLayout>;
 
 export const customViewNameSchema = z.string().trim().min(1, 'name must not be empty').max(60, 'name must be at most 60 characters');
 

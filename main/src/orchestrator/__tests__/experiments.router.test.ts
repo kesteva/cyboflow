@@ -2246,42 +2246,27 @@ describe('experiments router orchestration (slice B)', () => {
     // purely off run ids (winnerRunId === run_a_id / run_b_id) — it never looks a
     // quick sentinel up as a variant — so these lock in that the winner path
     // doesn't blow up when the winning arm (or both arms) is __quick__.
-    it('decideExperiment reaches decided when the WINNER is a quick arm (quick-vs-variant)', async () => {
-      const h = makeHarness();
-      const res = await startQuickVsVariantExperiment(h);
-      setRunStatus(h.db, res.armA.runId, 'completed');
-      setRunStatus(h.db, res.armB.runId, 'completed');
-      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
-      expect(dec.status).toBe('decided');
-      expect(dec.winnerRunId).toBe(res.armA.runId);
-    });
-
-    it('decideExperiment reaches decided for quick-vs-quick (both arms are __quick__)', async () => {
+    it.each([
+      ['quick-vs-variant, winner = the quick arm', 'vA', 'vB', QUICK_ARM_SENTINEL, null, 'A'],
+      ['quick-vs-quick (both arms are __quick__)', 'vA', 'vB', QUICK_ARM_SENTINEL, QUICK_ARM_SENTINEL, 'A'],
+      ['quick-vs-baseline, winner = the quick arm', '__baseline__', 'vB', null, QUICK_ARM_SENTINEL, 'B'],
+    ] as const)('decideExperiment reaches decided for %s', async (_label, startA, startB, relabelA, relabelB, winnerArm) => {
       const h = makeHarness();
       const res = await startExperiment(h.deps, {
-        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB',
+        projectId: 1, workflowId: 'wf', variantAId: startA, variantBId: startB,
       });
-      h.db
-        .prepare('UPDATE experiments SET variant_a_id = ?, variant_b_id = ? WHERE id = ?')
-        .run(QUICK_ARM_SENTINEL, QUICK_ARM_SENTINEL, res.experimentId);
+      if (relabelA !== null) {
+        h.db.prepare('UPDATE experiments SET variant_a_id = ? WHERE id = ?').run(relabelA, res.experimentId);
+      }
+      if (relabelB !== null) {
+        h.db.prepare('UPDATE experiments SET variant_b_id = ? WHERE id = ?').run(relabelB, res.experimentId);
+      }
       setRunStatus(h.db, res.armA.runId, 'completed');
       setRunStatus(h.db, res.armB.runId, 'completed');
-      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      const winnerRunId = winnerArm === 'A' ? res.armA.runId : res.armB.runId;
+      const dec = await decideExperiment(h.deps, res.experimentId, winnerRunId);
       expect(dec.status).toBe('decided');
-      expect(dec.winnerRunId).toBe(res.armA.runId);
-    });
-
-    it('decideExperiment reaches decided for quick-vs-baseline, winner = the quick arm', async () => {
-      const h = makeHarness();
-      const res = await startExperiment(h.deps, {
-        projectId: 1, workflowId: 'wf', variantAId: '__baseline__', variantBId: 'vB',
-      });
-      h.db.prepare('UPDATE experiments SET variant_b_id = ? WHERE id = ?').run(QUICK_ARM_SENTINEL, res.experimentId);
-      setRunStatus(h.db, res.armA.runId, 'completed');
-      setRunStatus(h.db, res.armB.runId, 'completed');
-      const dec = await decideExperiment(h.deps, res.experimentId, res.armB.runId);
-      expect(dec.status).toBe('decided');
-      expect(dec.winnerRunId).toBe(res.armB.runId);
+      expect(dec.winnerRunId).toBe(winnerRunId);
     });
   });
 });

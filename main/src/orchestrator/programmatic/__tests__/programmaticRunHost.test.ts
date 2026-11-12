@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
 import {
   ProgrammaticRunHost,
   ESCALATION_REVIEW_KILL_SWITCH_ENV,
@@ -37,10 +37,10 @@ function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
 }
 const ctx: ControllerStepContext = { runId: 'r', phaseId: 'p', stepIndex: 0, attempt: 1 };
 
-function makeReporter(): StepReporter & { report: ReturnType<typeof vi.fn> } {
+function makeReporter(): StepReporter & { report: Mock } {
   return { report: vi.fn() };
 }
-function makeGate(decision: 'approve' | 'reject' | 'revise'): HumanGateResolver & { resolve: ReturnType<typeof vi.fn> } {
+function makeGate(decision: 'approve' | 'reject' | 'revise'): HumanGateResolver & { resolve: Mock } {
   return { resolve: vi.fn().mockResolvedValue(decision) };
 }
 
@@ -49,7 +49,7 @@ function makeMonitor(
   decision: 'retry' | 'escalate' | 'fail',
   rationale = 'because',
   guidance?: string,
-): MonitorSession & { triage: ReturnType<typeof vi.fn> } {
+): MonitorSession & { triage: Mock } {
   return {
     triage: vi.fn().mockResolvedValue({ decision, rationale, ...(guidance ? { guidance } : {}) }),
     answer: vi.fn().mockResolvedValue(''),
@@ -658,7 +658,7 @@ describe('ProgrammaticRunHost', () => {
     /** A monitor whose triageLane returns a canned verdict. */
     function makeLaneMonitor(
       decision: LaneTriageDecision,
-    ): MonitorSession & { triageLane: ReturnType<typeof vi.fn> } {
+    ): MonitorSession & { triageLane: Mock } {
       return {
         triage: vi.fn(),
         answer: vi.fn().mockResolvedValue(''),
@@ -1407,7 +1407,7 @@ describe('ProgrammaticRunHost', () => {
     /** A monitor whose adviseReviewLoop returns a canned verdict. */
     function makeLoopMonitor(
       decision: ReviewLoopDecision | undefined,
-    ): MonitorSession & { adviseReviewLoop: ReturnType<typeof vi.fn> } {
+    ): MonitorSession & { adviseReviewLoop: Mock } {
       return {
         triage: vi.fn(),
         answer: vi.fn().mockResolvedValue(''),
@@ -1658,7 +1658,7 @@ describe('ProgrammaticRunHost', () => {
 /** A monitor whose `reviewGateEscalation` returns a canned decision. */
 function makeGateMonitor(
   decision: GateEscalationDecision,
-): MonitorSession & { reviewGateEscalation: ReturnType<typeof vi.fn> } {
+): MonitorSession & { reviewGateEscalation: Mock } {
   return {
     triage: vi.fn(),
     answer: vi.fn().mockResolvedValue(''),
@@ -1924,7 +1924,7 @@ function blockingItem(p: Partial<PendingBlockingItem> = {}): PendingBlockingItem
 function makeBlockingGate(
   items: PendingBlockingItem[],
   trace: string[] = [],
-): BlockingItemsResolver & { items: PendingBlockingItem[]; trace: string[]; awaitClear: ReturnType<typeof vi.fn> } {
+): BlockingItemsResolver & { items: PendingBlockingItem[]; trace: string[]; awaitClear: Mock } {
   const gate = {
     items: [...items],
     trace,
@@ -1943,7 +1943,7 @@ function makeBlockingGate(
 /** A monitor whose blocking-items consult returns canned per-item verdicts. */
 function makeBlockingMonitor(
   decisions: BlockingItemDecision[],
-): MonitorSession & { reviewBlockingItems: ReturnType<typeof vi.fn> } {
+): MonitorSession & { reviewBlockingItems: Mock } {
   return {
     triage: vi.fn(),
     answer: vi.fn().mockResolvedValue(''),
@@ -2280,7 +2280,7 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
     blockingGate.items = [blockingItem(), blockingItem({ id: 'rvw_f2', title: 'second' })];
     await host.awaitBlockingReviewItems('r');
 
-    const second = (monitor.reviewBlockingItems as ReturnType<typeof vi.fn>).mock
+    const second = (monitor.reviewBlockingItems as Mock).mock
       .calls[1][0] as BlockingItemsEscalationRequest;
     expect(second.items.map((i) => i.id)).toEqual(['rvw_f2']);
   });

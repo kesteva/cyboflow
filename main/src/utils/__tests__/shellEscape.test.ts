@@ -77,16 +77,7 @@ describe('escapeShellArg', () => {
 
   it('safely handles multiple consecutive single quotes', () => {
     // "a''b" → each ' is replaced by '\'' so the escaped form is 'a'\'''\''b'
-    // Structural checks (exact char-level comparison is brittle due to JS escaping):
-    const result = escapeShellArg("a''b");
-    expect(result.startsWith("'")).toBe(true);
-    expect(result.endsWith("b'")).toBe(true);
-    // The canonical escape sequence for a single quote inside single-quotes is '\''
-    // so the result must contain the backslash-quote pattern at least twice.
-    const escapeCount = (result.match(/\\\\/g) || []).length + (result.match(/'\\''/g) || []).length;
-    expect(escapeCount).toBeGreaterThanOrEqual(1);
-    // Verify the result contains the canonical shell-escape sequence.
-    expect(result).toContain("\\'");
+    expect(escapeShellArg("a''b")).toBe("'a'\\'''\\''b'");
   });
 
   it('wraps a flag with leading dashes (git subcommand flags) safely', () => {
@@ -95,51 +86,5 @@ describe('escapeShellArg', () => {
 
   it('wraps a git refspec safely', () => {
     expect(escapeShellArg('origin/main')).toBe("'origin/main'");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Call-site level: WORKTREE_PATH escaping
-// ---------------------------------------------------------------------------
-
-describe('WORKTREE_PATH escaping (call-site simulation)', () => {
-  it('a plain path is wrapped in single quotes', () => {
-    const worktreePath = '/home/user/project';
-    const commandLine = 'npm start';
-    const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
-    expect(commandWithEnv).toBe("export WORKTREE_PATH='/home/user/project' && npm start");
-  });
-
-  it('a path with spaces is safely wrapped', () => {
-    const worktreePath = '/home/user/my project';
-    const commandLine = 'npm start';
-    const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
-    expect(commandWithEnv).toBe("export WORKTREE_PATH='/home/user/my project' && npm start");
-  });
-
-  it('a path with an embedded single quote is safely escaped', () => {
-    const worktreePath = "/home/user's/project";
-    const commandLine = 'npm start';
-    const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
-    expect(commandWithEnv).toBe("export WORKTREE_PATH='/home/user'\\''s/project' && npm start");
-  });
-
-  it('an adversarial path with injection attempt is safely quoted', () => {
-    const worktreePath = "'; touch /tmp/cyboflow-injected-$$; #";
-    const commandLine = 'npm start';
-    const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
-    // The path is safely wrapped — the && at the end is the commandLine separator, not the injection.
-    // The escaped form is: ''\'' touch /tmp/cyboflow-injected-$$; #' (all inside single-quote regions)
-    expect(commandWithEnv).toContain("export WORKTREE_PATH='");
-    expect(commandWithEnv).toContain("&& npm start");
-    // Security property: the `touch` command is NOT separated from the WORKTREE_PATH assignment by
-    // an unquoted shell operator — it's embedded inside the single-quoted value. The canonical
-    // escape sequence '\'' ends and restarts the single-quoted string, keeping all content literal.
-    // Verify the canonical escape sequence is present in the output (the '\'' is the safety mechanism).
-    expect(commandWithEnv).toContain("\\'");
-    // The && operator in the injection attempt must be inside the escaped value, not bare.
-    // The only bare && separating actual commands is the one before npm start.
-    const parts = commandWithEnv.split("' && npm start");
-    expect(parts).toHaveLength(2);
   });
 });

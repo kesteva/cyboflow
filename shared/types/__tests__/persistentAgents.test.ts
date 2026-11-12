@@ -11,7 +11,6 @@ import {
   PERSISTENT_AGENT_MAX_MESSAGE_BYTES,
   PERSISTENT_AGENT_PAIRING_TTL_MS,
   PERSISTENT_AGENT_VENDORS,
-  REVOKE_SURFACE_AFTER,
   type BridgeTransport,
   type ConnectionState,
   type ConnectorAvailability,
@@ -65,10 +64,6 @@ describe('relay protocol alignment', () => {
 
   it('RelayTransport equals BridgeTransport', () => {
     expectTypeOf<RelayTransport>().toEqualTypeOf<BridgeTransport>();
-  });
-
-  it('REVOKE_SURFACE_AFTER is 3', () => {
-    expect(REVOKE_SURFACE_AFTER).toBe(3);
   });
 });
 

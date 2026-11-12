@@ -95,12 +95,8 @@ describe('transitionToRunning', () => {
   ])('throws TransitionRejectedError when source status is "%s"', (status) => {
     const runId = randomUUID();
     seedRun(db, runId, status);
-    // assertTransitionAllowed checks first, so either IllegalTransitionError
-    // or TransitionRejectedError may be thrown depending on status.
-    // The plan only requires TransitionRejectedError for 'queued'. For other
-    // illegal sources, IllegalTransitionError (from assertTransitionAllowed)
-    // is thrown — still an Error subtype, still correctly rejected.
-    expect(() => transitionToRunning(db, { runId })).toThrow();
+    expect(() => transitionToRunning(db, { runId })).toThrow(TransitionRejectedError);
+    expect(getStatus(db, runId)).toBe(status);
   });
 });
 

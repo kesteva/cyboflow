@@ -152,6 +152,7 @@ describe('RunBottomPane', () => {
 
     const agentTab = screen.getByRole('tab', { name: 'Agent' });
     expect(agentTab).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
 
     fireEvent.click(agentTab);
     expect(screen.getByTestId('interactive-terminal-mock')).toHaveTextContent('run-pty');
@@ -172,14 +173,6 @@ describe('RunBottomPane', () => {
     // The primary terminal's id is the run id.
     expect(mock).toHaveAttribute('data-terminal-id', 'run-xyz');
     expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
-  });
-
-  it('an interactive run shows both Agent and Terminal tabs', () => {
-    seedRun('run-pty', 'interactive');
-    setActiveRun('run-pty');
-    render(<RunBottomPane />);
-    expect(screen.getByRole('tab', { name: 'Agent' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
   });
 
   it('＋terminal adds a closeable second terminal (distinct id), then close removes it', () => {
@@ -242,22 +235,6 @@ describe('RunBottomPane', () => {
     expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
 
-  it('clicking Data Stream tab mounts RunView and hides the chat', () => {
-    setActiveRun('run-xyz');
-    render(<RunBottomPane />);
-
-    // Default: RunChatView is visible
-    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
-
-    // Click Data Stream tab
-    fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
-
-    // RunView renders the runId text
-    expect(screen.getByText('run-xyz')).toBeInTheDocument();
-    // Chat content gone
-    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
-  });
-
   it('clicking Chat tab after switching away restores RunChatView', () => {
     setActiveRun('run-xyz');
     render(<RunBottomPane />);
@@ -307,13 +284,5 @@ describe('RunBottomPane', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
     expect(onActiveTabKindChange).toHaveBeenLastCalledWith('terminal');
-  });
-
-  it('works stand-alone when onActiveTabKindChange is omitted (optional prop)', () => {
-    seedRun('run-xyz', 'sdk');
-    setActiveRun('run-xyz');
-    // No callback threaded — must not throw and still renders the Chat tab.
-    expect(() => render(<RunBottomPane />)).not.toThrow();
-    expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument();
   });
 });

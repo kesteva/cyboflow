@@ -16,7 +16,7 @@ describe('projectClaudeModelRows', () => {
       { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus' },
       { value: 'claude-opus-5-5', displayName: 'Opus 5.5 (concrete)' },
       { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet' },
-      { value: 'fable', resolvedModel: 'claude-fable-5-1', displayName: 'Fable' },
+      { value: 'fable', resolvedModel: 'claude-fable-5-2', displayName: 'Fable' },
       { value: 'haiku', resolvedModel: 'claude-haiku-4-5', displayName: 'Haiku' },
       { value: 'auto', displayName: 'Auto' },
       { value: 'default', displayName: 'Default' },

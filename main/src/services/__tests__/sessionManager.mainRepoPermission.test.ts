@@ -96,29 +96,21 @@ describe('SessionManager.getOrCreateMainRepoSession — permissionMode defaults'
     vi.clearAllMocks();
   });
 
-  it('resolves permission_mode to "approve" when project.default_permission_mode is null', async () => {
-    // Arrange: project has null default_permission_mode (common for legacy rows before migration 008)
-    const project = makeProject({ default_permission_mode: undefined }); // undefined ≈ NULL from DB
+  it.each([
+    ['undefined', (): Project => makeProject({ default_permission_mode: undefined })], // undefined ≈ NULL from DB
+    [
+      'deleted',
+      (): Project => {
+        const p = makeProject();
+        delete (p as Partial<Project>).default_permission_mode;
+        return p;
+      },
+    ],
+    ['null', (): Project => makeProject({ default_permission_mode: null as unknown as undefined })],
+  ])('resolves permission_mode to "approve" when project.default_permission_mode is %s', async (_label, build) => {
+    // Arrange: legacy rows before migration 008 have no usable default_permission_mode
+    const project = build();
     const db = makeDbMock(project, 'approve');
-    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
-
-    // Act
-    const session = await mgr.getOrCreateMainRepoSession(1);
-
-    // Assert: createSession was called with permission_mode 'approve'
-    expect(db.createSession).toHaveBeenCalledOnce();
-    const callArg = db.createSession.mock.calls[0][0] as { permission_mode?: string };
-    expect(callArg.permission_mode).toBe('approve');
-
-    // Assert: the returned session surface also reflects 'approve'
-    expect(session.permissionMode).toBe('approve');
-  });
-
-  it('resolves permission_mode to "approve" when project.default_permission_mode is explicitly undefined', async () => {
-    // Arrange: project has no default_permission_mode field at all
-    const projectWithoutField = makeProject();
-    delete (projectWithoutField as Partial<Project>).default_permission_mode;
-    const db = makeDbMock(projectWithoutField, 'approve');
     const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
 
     // Act

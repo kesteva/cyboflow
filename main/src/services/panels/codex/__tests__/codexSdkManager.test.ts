@@ -855,7 +855,7 @@ describe('CodexSdkManager app-server runtime', () => {
       });
       // Idle — never spawned. Must not throw, and must not touch any client.
       await expect(manager.abortInFlightTurn('nobody-home')).resolves.toBeUndefined();
-      expect(getClient).toBeDefined();
+      expect(() => getClient()).toThrow('client not created');
     } finally {
       db.close();
     }

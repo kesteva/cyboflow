@@ -41,6 +41,7 @@ import { monitorReapRouter } from './routers/monitorReap';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
 import { persistentAgentsRouter } from './routers/persistentAgents';
+import { hostsRouter } from './routers/hosts';
 import { variantsRouter } from './routers/variants';
 import { experimentsRouter } from './routers/experiments';
 import { verificationRequestsRouter } from './routers/verificationRequests';
@@ -69,6 +70,7 @@ export const appRouter = router({
     files: filesRouter,
     gitPrerequisite: gitPrerequisiteRouter,
     health: healthRouter,
+    hosts: hostsRouter,
     ideaComponents: ideaComponentsRouter,
     insights: insightsRouter,
     mcps: mcpsRouter,

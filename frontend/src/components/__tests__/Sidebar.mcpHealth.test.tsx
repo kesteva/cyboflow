@@ -118,11 +118,7 @@ describe('Sidebar — MCP indicator removed (TASK-626)', () => {
 
   it('still renders the project tree section', () => {
     renderSidebar();
-    expect(screen.getByTestId('project-tree')).toBeInTheDocument();
-  });
-
-  it('still renders the sidebar root element', () => {
-    renderSidebar();
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    expect(screen.getByTestId('project-tree')).toBeInTheDocument();
   });
 });

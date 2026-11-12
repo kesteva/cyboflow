@@ -126,6 +126,9 @@ describe('makeEvalJudgeQuery', () => {
   });
 
   it('aborts and throws a timeout error on a custom timeoutMs deadline', async () => {
+    // The blockUntilAbort generator RESOLVES (no throw) once aborted; the didTimeOut
+    // post-loop guard must still convert that clean drain into a timeout throw — the
+    // paid-Claude "no silent empty on a hung binary" contract.
     install(makeBlockUntilAbortQuery());
     const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out after 5ms/);
@@ -187,15 +190,6 @@ describe('makeEvalJudgeQuery', () => {
     await expect(p).rejects.toThrow(/turn budget/);
   });
 
-  it('surfaces the timeout message even when the timed-out generator resolves without throwing', async () => {
-    // The blockUntilAbort generator RESOLVES (no throw) once aborted; the didTimeOut
-    // post-loop guard must still convert that clean drain into a timeout throw — the
-    // paid-Claude "no silent empty on a hung binary" contract.
-    install(makeBlockUntilAbortQuery());
-    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
-    await expect(fn({ prompt: 'p', schema: {} })).rejects.toThrow(/timed out/);
-  });
-
   it('bridges the caller AbortSignal onto the SDK abortController', async () => {
     let observedAbort = false;
     install(makeBlockUntilAbortQuery(() => {
@@ -234,7 +228,22 @@ describe('makeEvalJudgeQuery', () => {
     expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
-  it('exports the default per-sample deadline as 300_000ms', () => {
+  it('exports the default per-sample deadline as 600_000ms', () => {
     expect(EVAL_JUDGE_TIMEOUT_MS).toBe(600_000);
+  });
+
+  it('the factory applies the default deadline when no timeoutMs is passed', async () => {
+    vi.useFakeTimers();
+    try {
+      install(makeBlockUntilAbortQuery());
+      const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+      const p = fn({ prompt: 'p', schema: {} }).catch((err) => err as Error);
+      await vi.advanceTimersByTimeAsync(EVAL_JUDGE_TIMEOUT_MS + 1);
+      const err = await p;
+      expect(err).toBeInstanceOf(EvalJudgeTimeoutError);
+      expect((err as Error).message).toMatch(/timed out after 600000ms/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

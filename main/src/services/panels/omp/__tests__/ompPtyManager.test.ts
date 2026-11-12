@@ -67,38 +67,19 @@ describe('ompApprovalModeForMode', () => {
 });
 
 describe('OmpPtyManager.buildCommandArgs', () => {
-  it('always emits --approval-mode, --no-extensions, --no-skills for default mode', () => {
-    const manager = new TestableOmpPtyManager(makeSessionManager('default'));
+  it.each(['default', 'acceptEdits', 'auto'])(
+    'always emits --approval-mode always-ask, --no-extensions, --no-skills for %s mode (never write)',
+    (mode) => {
+      const manager = new TestableOmpPtyManager(makeSessionManager(mode));
 
-    expect(manager.callBuildCommandArgs({})).toEqual([
-      '--approval-mode',
-      'always-ask',
-      '--no-extensions',
-      '--no-skills',
-    ]);
-  });
-
-  it('maps acceptEdits to always-ask (never write)', () => {
-    const manager = new TestableOmpPtyManager(makeSessionManager('acceptEdits'));
-
-    expect(manager.callBuildCommandArgs({})).toEqual([
-      '--approval-mode',
-      'always-ask',
-      '--no-extensions',
-      '--no-skills',
-    ]);
-  });
-
-  it('maps auto to always-ask (never write)', () => {
-    const manager = new TestableOmpPtyManager(makeSessionManager('auto'));
-
-    expect(manager.callBuildCommandArgs({})).toEqual([
-      '--approval-mode',
-      'always-ask',
-      '--no-extensions',
-      '--no-skills',
-    ]);
-  });
+      expect(manager.callBuildCommandArgs({})).toEqual([
+        '--approval-mode',
+        'always-ask',
+        '--no-extensions',
+        '--no-skills',
+      ]);
+    },
+  );
 
   it('maps dontAsk to yolo', () => {
     const manager = new TestableOmpPtyManager(makeSessionManager('dontAsk'));

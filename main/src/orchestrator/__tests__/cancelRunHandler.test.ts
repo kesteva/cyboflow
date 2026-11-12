@@ -16,7 +16,7 @@
  * Style mirrors cancelAndRestart.test.ts: real in-memory better-sqlite3 DB +
  * injected vi.fn() fakes, no tRPC wiring.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { rollupRunUsage } from '../runUsageRollup';
 
 // The fold is covered by runUsageRollup.test.ts; here only WHEN cancel asks for it.
@@ -35,10 +35,10 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 
 interface OrderSpy {
   calls: string[];
-  clearPendingApprovalsForRun: ReturnType<typeof vi.fn>;
-  clearPendingQuestionsForRun: ReturnType<typeof vi.fn>;
-  stopLiveRun: ReturnType<typeof vi.fn>;
-  emitRunStatusChanged: ReturnType<typeof vi.fn>;
+  clearPendingApprovalsForRun: Mock;
+  clearPendingQuestionsForRun: Mock;
+  stopLiveRun: Mock;
+  emitRunStatusChanged: Mock;
 }
 
 function makeOrderSpy(): OrderSpy {
@@ -355,34 +355,21 @@ describe('cancelRunHandler (git-neutral run Cancel — Phase 4a)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // GIT-NEUTRAL invariant — the deps bag has NO git collaborator at all.
+  // GIT-NEUTRAL invariant — cancel never touches the run's worktree row.
   // -------------------------------------------------------------------------
 
-  it('GIT-NEUTRAL: the CancelRunDeps bag exposes no worktree/branch/merge collaborator', async () => {
+  it('GIT-NEUTRAL: cancel leaves worktree_path untouched', async () => {
     const { runId } = seedRun(db, { status: 'running' });
     const deps = makeDeps(db, spy, runQueues);
 
     await cancelRunHandler(runId, deps);
 
-    // Structural assertion: none of the close-out (git-touching) collaborator
-    // keys exist on the cancel deps bag — cancel can NEVER reach git.
-    const keys = Object.keys(deps);
-    for (const forbidden of [
-      'worktreeManager',
-      'removeWorktreeByPath',
-      'deleteBranch',
-      'squashAndMergeWorktreeToMain',
-      'mergeWorktreeToMain',
-      'gitPush',
-      'taskStageDeriver',
-      'assertNotSessionHosted',
-    ]) {
-      expect(keys).not.toContain(forbidden);
-    }
     // The worktree row itself is untouched by cancel.
-    const wt = db.prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?').get(runId) as {
+    const wt = db.prepare('SELECT status, worktree_path FROM workflow_runs WHERE id = ?').get(runId) as {
+      status: string;
       worktree_path: string;
     };
+    expect(wt.status).toBe('canceled');
     expect(wt.worktree_path).toBe('/tmp/test');
   });
 });

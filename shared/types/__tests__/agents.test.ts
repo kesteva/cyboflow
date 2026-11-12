@@ -83,7 +83,7 @@ describe('concrete Claude model ids', () => {
   it('claudeModelFamily buckets aliases and concrete ids by substring, null otherwise', () => {
     expect(claudeModelFamily('opus')).toBe('opus');
     expect(claudeModelFamily('claude-opus-4-8[1m]')).toBe('opus');
-    expect(claudeModelFamily('claude-fable-5-1')).toBe('fable');
+    expect(claudeModelFamily('claude-fable-5-2')).toBe('fable');
     expect(claudeModelFamily('gpt-5.6-sol')).toBeNull();
     expect(claudeModelFamily(null)).toBeNull();
   });

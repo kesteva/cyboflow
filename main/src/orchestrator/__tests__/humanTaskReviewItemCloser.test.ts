@@ -7,7 +7,7 @@
  *    write nothing;
  *  - the unsubscribe detaches the listener.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
 import { attachHumanTaskReviewItemCloser, humanTaskReviewSource } from '../humanTaskReviewItemCloser';
@@ -38,8 +38,8 @@ function makeEvent(
 describe('attachHumanTaskReviewItemCloser', () => {
   let events: EventEmitter;
   let db: Database.Database;
-  let applyReviewItem: ReturnType<typeof vi.fn>;
-  let findPendingBySource: ReturnType<typeof vi.fn>;
+  let applyReviewItem: Mock;
+  let findPendingBySource: Mock;
   let detach: () => void;
 
   beforeEach(() => {

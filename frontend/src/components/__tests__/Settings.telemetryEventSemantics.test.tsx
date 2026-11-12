@@ -131,9 +131,10 @@ describe('Settings — telemetry_opt_out_changed event semantics', () => {
     const errorsCheckbox = screen.getByLabelText('Send anonymized crash & error reports');
     fireEvent.click(errorsCheckbox);
 
-    // Close without ever clicking Save.
-    onClose();
+    // Close via the real Cancel button, never clicking Save.
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
 
+    expect(onClose).toHaveBeenCalledTimes(1);
     expect(configUpdate).not.toHaveBeenCalled();
     expect(trackEvent).not.toHaveBeenCalledWith('telemetry_opt_out_changed', expect.anything());
   });

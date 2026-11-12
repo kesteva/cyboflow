@@ -144,11 +144,4 @@ describe('C6 — every preload-invoked IPC channel has a handler (drift guard)',
     // here and forces KNOWN_ORPHANS to be updated in the same change.
     expect(orphaned).toEqual([...KNOWN_ORPHANS].sort());
   });
-
-  it('the known orphans are genuinely absent from the handler set (regression pins)', () => {
-    const handled = collectHandledChannels();
-    for (const orphan of KNOWN_ORPHANS) {
-      expect(handled.has(orphan)).toBe(false);
-    }
-  });
 });

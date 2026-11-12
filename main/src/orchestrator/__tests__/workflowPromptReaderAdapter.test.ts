@@ -55,22 +55,6 @@ const VALID_CUSTOM_SPEC = JSON.stringify({
 });
 
 describe('readWorkflowPromptForRow — built-in / edited built-in (non-null workflow_path)', () => {
-  it('reads the .md body and appends step-reporting for a built-in name', async () => {
-    await withTempDir('wpra-test-', (tmpDir) => {
-      const mdPath = join(tmpDir, 'sprint.md');
-      writeFileSync(mdPath, '---\nsystem_prompt_append: "Be terse."\n---\nDo the sprint.');
-      // name='sprint' is a built-in, so resolveWorkflowDefinition yields the
-      // built-in def → step-reporting append is non-empty and concatenated.
-      const result = readWorkflowPromptForRow(
-        makeWorkflowRow({ name: 'sprint', workflow_path: mdPath, spec_json: '{}' }),
-      );
-      expect(result.prompt).toBe('Do the sprint.');
-      expect(result.systemPromptAppend.startsWith('Be terse.')).toBe(true);
-      // step-reporting append references cyboflow_report_step
-      expect(result.systemPromptAppend).toContain('cyboflow_report_step');
-    });
-  });
-
   it('appends BOTH the step-reporting and the fan-out execution block for sprint (has a fanOut step)', async () => {
     await withTempDir('wpra-test-', (tmpDir) => {
       const mdPath = join(tmpDir, 'sprint.md');
@@ -78,6 +62,7 @@ describe('readWorkflowPromptForRow — built-in / edited built-in (non-null work
       const result = readWorkflowPromptForRow(
         makeWorkflowRow({ name: 'sprint', workflow_path: mdPath, spec_json: '{}' }),
       );
+      expect(result.prompt).toBe('Do the sprint.');
       // Frontmatter first, then step-reporting, then the derived fan-out block.
       expect(result.systemPromptAppend.startsWith('Be terse.')).toBe(true);
       expect(result.systemPromptAppend).toContain('cyboflow_report_step');

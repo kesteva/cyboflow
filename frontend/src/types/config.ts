@@ -2,6 +2,7 @@ import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/ag
 import type { AssistantContextRetention, AssistantRuntime } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { AgentsConfig } from '../../../shared/types/persistentAgents';
+import type { HostsConfig } from '../../../shared/types/hosts';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
@@ -162,6 +163,8 @@ export interface AppConfig {
   // Agents & Environments (dev builds only; see shared/types/persistentAgents.ts AgentsConfig). The main
   // side gates it on isDevBuild() and rejects the write in release builds.
   agents?: AgentsConfig;
+  // Environments (SSH machines; dev builds only; see shared/types/hosts.ts HostsConfig).
+  environments?: HostsConfig;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: NotificationPreferences;
   devMode?: boolean;

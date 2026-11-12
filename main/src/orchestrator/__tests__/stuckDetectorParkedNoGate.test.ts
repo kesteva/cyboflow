@@ -132,7 +132,7 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
 
   it('does NOT fire when a pending question is open', async () => {
     const db = buildReviewInboxDb();
-    seedInboxRun(db, 'run-asked', 'awaiting_input');
+    seedInboxRun(db, 'run-asked', 'running');
     seedRawEvent(db, 'run-asked', STALE_AGO);
     db.prepare(
       `INSERT INTO questions (id, run_id, tool_use_id, questions_json, status, created_at)
@@ -152,12 +152,9 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
 
     await detector.scan();
 
-    // Not 'running' in the first place (awaiting_input), so the rung's own
-    // status filter already excludes it — belt-and-suspenders with the
-    // questions NOT EXISTS clause for a run that WAS running with a pending
-    // question is covered implicitly (status would be awaiting_input, never
-    // running, while a question is pending — see questionRouter.ts).
-    expect(runStatus(db, 'run-asked')).toBe('awaiting_input');
+    // Seeded 'running' so the status filter does not exclude it: only the
+    // questions NOT EXISTS clause keeps the run out of this rung.
+    expect(runStatus(db, 'run-asked')).toBe('running');
     expect(events).toHaveLength(0);
   });
 

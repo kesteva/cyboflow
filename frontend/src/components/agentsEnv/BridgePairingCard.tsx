@@ -69,7 +69,9 @@ export function BridgePairingCard(props: BridgePairingCardProps): React.JSX.Elem
           <p>
             {vendor === 'openai-dots'
               ? 'In ChatGPT, add a custom connector (Developer mode) and paste this URL. When ChatGPT asks you to sign in, enter the pairing code and approve.'
-              : 'Add this URL to your agent as a remote MCP server. When it asks you to authorize, enter the pairing code and approve.'}
+              : vendor === 'anthropic-duet'
+                ? 'In Claude, open Settings → Connectors, add a custom connector, and paste this URL. Duet uses the connectors on your Claude account. When Claude asks you to sign in, enter the pairing code and approve.'
+                : 'Add this URL to your agent as a remote MCP server. When it asks you to authorize, enter the pairing code and approve.'}
           </p>
           {url !== null && (
             <div className="flex flex-wrap items-center gap-2">

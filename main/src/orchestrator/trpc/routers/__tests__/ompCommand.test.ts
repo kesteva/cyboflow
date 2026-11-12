@@ -92,6 +92,6 @@ describe('cyboflow.ompCommand authorization', () => {
     const caller = callerWith({ principal: SUPERVISE, ompCommand: new OmpCommandStub(), auditOmp: () => {} });
     await expect(
       caller.cyboflow.ompCommand.spawn({ model: 'm', task: 't', idempotencyKey: 'forged\nop=evil' }),
-    ).rejects.toBeDefined();
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   });
 });

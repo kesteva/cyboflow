@@ -18,8 +18,8 @@ describe('seedKindForWorkflow', () => {
   });
 
   it('a custom flow whose definition keeps a built-in id (a clone) takes that id\'s kind', () => {
-    // `dash` — a custom sprint clone whose definition.id is still 'sprint'.
-    expect(seedKindForWorkflow(WORKFLOW_DEFINITIONS.sprint)).toBe('tasks');
+    // A clone whose shape disagrees with its kept built-in id still takes the id's kind.
+    expect(seedKindForWorkflow(cloneAs('sprint', WORKFLOW_DEFINITIONS.planner))).toBe('tasks');
   });
 
   it('reads a custom sprint-shaped flow (task fan-out, custom id) structurally', () => {

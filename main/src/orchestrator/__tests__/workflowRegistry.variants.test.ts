@@ -203,10 +203,11 @@ describe('WorkflowRegistry variants', () => {
   it('listVariants returns a workflow variants newest-first', () => {
     const a = registry.createVariantFromCurrent(WF_PLANNER, 'a');
     const b = registry.createVariantFromCurrent(WF_PLANNER, 'b');
+    // created_at is second-resolution and ids are random, so pin distinct timestamps.
+    db.prepare("UPDATE workflow_variants SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(a.id);
+    db.prepare("UPDATE workflow_variants SET created_at = '2026-01-02 00:00:00' WHERE id = ?").run(b.id);
     const ids = registry.listVariants(WF_PLANNER).map((r) => r.id);
-    expect(ids).toContain(a.id);
-    expect(ids).toContain(b.id);
-    expect(ids).toHaveLength(2);
+    expect(ids).toEqual([b.id, a.id]);
   });
 
   // -- Archive (migration 116) ------------------------------------------------

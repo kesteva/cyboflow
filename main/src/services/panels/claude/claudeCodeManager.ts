@@ -1971,7 +1971,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Local latch avoids a DB hit on every subsequent event (the guarded UPDATE
     // is itself idempotent via `claude_session_id IS NULL`).
     let runClaudeSessionCaptured = false;
-    // Per-attempt SDK options so a mid-call model-unavailability (Fable 5.1 pulled)
+    // Per-attempt SDK options so a mid-call model-unavailability (Fable 5.2 pulled)
     // can retry the turn ONCE on the fallback family (Opus) instead of surfacing a
     // hard Session Error. `attempt` caps the retry at one; only the FIRST attempt
     // is eligible so an Opus error can never loop.
@@ -2354,7 +2354,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // A thrown SDK error (auth / network / spawn failure) is terminal too.
         terminalError = errMsg;
         // Reactive availability detection: if the failure names the pinned MODEL
-        // (not found / no access), and that model is one we guard (Fable 5.1), record
+        // (not found / no access), and that model is one we guard (Fable 5.2), record
         // it so every later spawn falls back to Opus and the pickers grey it out.
         // `activeOptions.model` is exactly what was sent this attempt — undefined/
         // 'auto'/Opus (a prior fallback) never match a guarded id, so this only
@@ -2956,7 +2956,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /**
    * When an SDK query fails, check whether the failure was the pinned MODEL being
-   * unavailable and — if it was a guarded model (Fable 5.1) — record it on the
+   * unavailable and — if it was a guarded model (Fable 5.2) — record it on the
    * ModelAvailabilityService so subsequent spawns fall back to Opus and the pickers
    * grey it out. Best-effort and fail-soft: a non-guarded model, a non-model error,
    * or an uninitialized service are all no-ops. Returns true iff it marked a guarded
@@ -2975,7 +2975,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /**
    * Mid-call graceful fallback. The Claude Code CLI reports an unusable `--model`
-   * (Fable 5.1 pulled from release) as an `is_error` RESULT event — NOT a thrown
+   * (Fable 5.2 pulled from release) as an `is_error` RESULT event — NOT a thrown
    * error — so it arrives inside the runSdkQuery iterator, never its catch. When
    * such a result names a guarded model, mark it unavailable (greys the pickers
    * and pre-falls-back later spawns) and return the fallback family's SDK
@@ -3116,7 +3116,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // the bare id + the context-1m beta, and the 250k variants emit neither.
     const requestedModel = resolveAgentModelAlias('claude', options.model);
     // Graceful fallback: if the pinned model is a guarded model the availability
-    // guard reports unavailable (e.g. Fable 5.1 pulled from release), swap it for its
+    // guard reports unavailable (e.g. Fable 5.2 pulled from release), swap it for its
     // fallback family (Opus) BEFORE the SDK spawn so the turn runs instead of
     // hard-failing. A no-op for every other model.
     const resolvedModel = applyModelAvailabilityFallback(requestedModel, isModelUsable);
@@ -3144,7 +3144,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Classifier-availability guard for native auto-mode. With no explicit model
     // pin (a NULL/'auto' run model → sdkOptions.model unset above) the bundled CLI
     // uses its own default, which the auto classifier shares; when that default is
-    // a guarded model the availability guard reports unavailable (Fable 5.1 pulled),
+    // a guarded model the availability guard reports unavailable (Fable 5.2 pulled),
     // the classifier can't run and denies every non-first-party tool. Pin the
     // guarded model's fallback family so the classifier has a working,
     // classifier-capable model. Explicit pins are already swapped above via

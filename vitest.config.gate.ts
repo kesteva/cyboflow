@@ -15,6 +15,11 @@
 import { defineConfig } from 'vitest/config';
 import path from 'path';
 
+import { titleVitestRoot } from './vitestForkCap';
+
+// vitest 4 no longer titles its root; the orphan reaper/gate counter key on it.
+titleVitestRoot();
+
 // __dirname = directory of this config file = repo root
 // (e.g., /Users/raimundoesteva/Developer/cyboflow)
 const repoRoot = __dirname;

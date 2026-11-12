@@ -28,6 +28,8 @@ vi.mock('../../../stores/navigationStore', () => ({
 
 import {
   SystemGroupedBody,
+  PRUNE_BLOCKED_REASON,
+  pruneBlockedReason,
   sortWorktrees,
   sortProcesses,
   sortTypeGroups,
@@ -240,19 +242,40 @@ describe('trust tiers', () => {
     render(<SystemGroupedBody snapshot={snap([wt('/wt/a')], [proc(1)])} projectId={7} groupBy="worktree" sortBy="cpu" />);
     expect(screen.queryByTestId('kill-tree-1')).toBeNull();
     expect(screen.queryByTestId('wt-prune')).toBeNull();
+    expect(screen.queryByTestId('wt-kill-all')).toBeNull();
   });
 
-  it('disables Prune on a non-prunable worktree', () => {
-    render(
-      <SystemGroupedBody
-        snapshot={snap([wt('/wt/main', { tag: 'is_main_repo', prunable: false })], [])}
-        projectId={7}
-        groupBy="worktree"
-        sortBy="cpu"
-        {...handlers}
-      />,
-    );
+  it("disables Prune on a worktree live in another instance and says where", () => {
+    const theirs = wt('/wt/theirs', {
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/Users/me/.cyboflow_dev_dmg',
+      claimVerified: true,
+    } as Partial<SystemWorktree>);
+    render(<SystemGroupedBody snapshot={snap([theirs], [])} projectId={7} groupBy="worktree" sortBy="cpu" {...handlers} />);
     expect(screen.getByTestId('wt-prune')).toBeDisabled();
+    expect(screen.getByTestId('wt-prune-reason')).toHaveTextContent(
+      'Live in another cyboflow instance (/Users/me/.cyboflow_dev_dmg) — prune it there',
+    );
+  });
+});
+
+describe('pruneBlockedReason', () => {
+  it('is undefined for a prunable worktree and the checkout reason for in_place / is_main_repo', () => {
+    expect(pruneBlockedReason(wt('/wt/a'))).toBeUndefined();
+    expect(pruneBlockedReason(wt('/wt/m', { tag: 'in_place', prunable: false }))).toBe(PRUNE_BLOCKED_REASON);
+  });
+
+  it('names the unreadable sibling when the guard failed closed', () => {
+    const unverified = wt('/wt/x', {
+      tag: 'other-instance',
+      prunable: false,
+      claimedBy: '/Users/me/.cyboflow',
+      claimVerified: false,
+    } as Partial<SystemWorktree>);
+    expect(pruneBlockedReason(unverified)).toBe(
+      "Couldn't read /Users/me/.cyboflow's database — not pruned in case it's live there",
+    );
   });
 });
 
@@ -282,6 +305,23 @@ describe('Open session / Open run', () => {
     calls.length = 0;
     fireEvent.click(screen.getByTestId('open-run-proc-2'));
     expect(calls).toEqual(['setActiveRun(run-2)', 'setActiveProjectId(7)', 'goToSession()']);
+  });
+
+  it('a host-terminal row (Environments ssh) offers no Open run / Open session', () => {
+    const s = snap(
+      [wt('/wt/a')],
+      [proc(5, {
+        owner: { kind: 'host-terminal', hostId: 'h1', terminalId: 'host::h1::t1' },
+        processType: 'shell-pty',
+        command: 'ssh -tt -- box',
+        worktreePath: null,
+      })],
+    );
+    render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy="cpu" {...handlers} />);
+    const row = screen.getByTestId('proc-row');
+    expect(within(row).getByTestId('proc-owning-worktree')).toHaveTextContent('none');
+    expect(screen.queryByTestId('open-run-proc-5')).toBeNull();
+    expect(screen.queryByTestId('open-session-proc-5')).toBeNull();
   });
 });
 

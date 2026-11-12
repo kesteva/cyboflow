@@ -361,15 +361,6 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
     expect(res).toEqual({ behavior: 'deny', message: 'nope' });
   });
 
-  it('without matchedAskRule the allowlist short-circuit is unchanged', async () => {
-    vi.mocked(loadMergedPermissionRules).mockReturnValueOnce({ allow: ['Bash(git status:*)'], deny: [], ask: [] });
-    const opts = await autoOpts('run-no-ask-rule', 'sess-no-ask-rule');
-
-    await callCanUseTool(opts, 'Bash', { command: 'git status -s' });
-
-    expect(requestApproval).not.toHaveBeenCalled();
-  });
-
   // REGRESSION (live-smoke 2026-06-30): every allow PermissionResult canUseTool can
   // emit MUST carry `updatedInput` as a record. The native CLI Zod-validates the
   // can_use_tool control-response; its allow branch requires `updatedInput`, so a

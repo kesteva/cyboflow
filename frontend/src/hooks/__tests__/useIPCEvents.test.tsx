@@ -95,11 +95,6 @@ describe('useIPCEvents — panel:updated → updatePanelState', () => {
     };
   });
 
-  it('subscribes to panel:updated on mount', () => {
-    renderHook(() => useIPCEvents());
-    expect(panelUpdatedCb).toBeTypeOf('function');
-  });
-
   it('forwards a panel:updated event to usePanelStore.updatePanelState', () => {
     renderHook(() => useIPCEvents());
     panelUpdatedCb?.(PANEL);

@@ -5,7 +5,7 @@
  * zustand store, no trpc — since the function itself is a plain synchronous
  * orchestration with no I/O of its own.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import { startAuthoring } from '../../authoring/startAuthoring';
 import type {
   StartAuthoringAgentThreadStore,
@@ -13,18 +13,18 @@ import type {
   StartAuthoringLayoutStore,
 } from '../../authoring/startAuthoring';
 
-function fakeCustomViews(sessionId: string): StartAuthoringCustomViewsStore & { openAuthoring: ReturnType<typeof vi.fn> } {
+function fakeCustomViews(sessionId: string): StartAuthoringCustomViewsStore & { openAuthoring: Mock } {
   return { openAuthoring: vi.fn(() => sessionId) };
 }
 
 function fakeAgentThread(): StartAuthoringAgentThreadStore & {
-  setComposerDraft: ReturnType<typeof vi.fn>;
-  setPendingContextHint: ReturnType<typeof vi.fn>;
+  setComposerDraft: Mock;
+  setPendingContextHint: Mock;
 } {
   return { setComposerDraft: vi.fn(), setPendingContextHint: vi.fn() };
 }
 
-function fakeLayout(collapsed: boolean): StartAuthoringLayoutStore & { toggleAgentRail: ReturnType<typeof vi.fn> } {
+function fakeLayout(collapsed: boolean): StartAuthoringLayoutStore & { toggleAgentRail: Mock } {
   return { agentRailCollapsed: collapsed, toggleAgentRail: vi.fn() };
 }
 

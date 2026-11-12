@@ -25,10 +25,6 @@ function reset(): void {
 describe('navigationStore — experimentComparisonId', () => {
   beforeEach(reset);
 
-  it('defaults to null', () => {
-    expect(useNavigationStore.getState().experimentComparisonId).toBeNull();
-  });
-
   it('openExperimentComparison sets the id and forces the home view', () => {
     useNavigationStore.getState().goToSession();
     useNavigationStore.getState().openExperimentComparison('exp_1');

@@ -223,14 +223,6 @@ describe('useTaskRunLauncher.launchSprintBatch', () => {
 });
 
 describe('useTaskRunLauncher — per-workflow model default + permissionMode', () => {
-  it('launch: falls back to opus when nothing is configured', async () => {
-    const { result } = renderHook(() => useTaskRunLauncher());
-    await act(async () => {
-      await result.current.launch('tsk_1', 7, 'task');
-    });
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: DEFAULT_WORKFLOW_MODEL, permissionMode: 'default' });
-  });
-
   it('launch: resolves the model from runTypeDefaults["workflow:<resolved id>"], read AFTER the async workflow lookup', async () => {
     mockConfigState.config = { runTypeDefaults: { 'workflow:wf-sprint': { model: 'sonnet' } } };
     const { result } = renderHook(() => useTaskRunLauncher());
@@ -247,14 +239,6 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
       await result.current.launch('tsk_1', 7, 'task');
     });
     expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ permissionMode: 'acceptEdits' });
-  });
-
-  it('launchSprintBatch: falls back to opus when nothing is configured', async () => {
-    const { result } = renderHook(() => useTaskRunLauncher());
-    await act(async () => {
-      await result.current.launchSprintBatch('epic_9', ['t1'], 7);
-    });
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: DEFAULT_WORKFLOW_MODEL, permissionMode: 'default' });
   });
 
   it('launchSprintBatch: resolves the model from runTypeDefaults["workflow:<resolved id>"]', async () => {

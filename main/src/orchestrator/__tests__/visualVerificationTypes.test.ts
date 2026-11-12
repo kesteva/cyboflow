@@ -17,9 +17,6 @@ import {
   isVerificationType,
   isVerificationModality,
   resolveTaskModality,
-  type VerifyProbeId,
-  type VerifyConfigFile,
-  type VerificationRequestRow,
 } from '../../../../shared/types/visualVerification';
 
 describe('visualVerification shared seam', () => {
@@ -56,39 +53,6 @@ describe('visualVerification shared seam', () => {
     });
   });
 
-  describe('the request-row + verify.json shapes compose only existing union members', () => {
-    it('type-checks a verify.json document and a request row', () => {
-      const config: VerifyConfigFile = {
-        enabled: true,
-        defaultType: 'interactive-web-behavior',
-      };
-      const row: VerificationRequestRow = {
-        id: 'r1',
-        run_id: 'run1',
-        project_id: 1,
-        status: 'queued',
-        verify_type: 'static-render-snapshot',
-        deliverable_json: '{}',
-        chain_json: '[]',
-        current_backend: null,
-        attempt: 0,
-        verdict_json: null,
-        error_message: null,
-        enqueued_at: '2026-01-01T00:00:00.000Z',
-        leased_at: null,
-        ended_at: null,
-        task_json: null,
-        report_json: null,
-        delivery_state: null,
-        snapshot_sha: null,
-        enqueue_key: null,
-      };
-
-      expect(isVerificationType(config.defaultType)).toBe(true);
-      expect(isVerificationType(row.verify_type)).toBe(true);
-    });
-  });
-
   describe('the mobile modality widening (iOS Simulator — xcodebuild + simctl)', () => {
   it('keeps the four-member modality roster and its guard in step', () => {
     expect([...VERIFICATION_MODALITIES]).toEqual(['web', 'cdp-app', 'native-screen', 'mobile']);
@@ -106,16 +70,6 @@ describe('visualVerification shared seam', () => {
     ).toBe('mobile');
     // The VerificationType taxonomy is untouched by the modality widening.
     expect(new Set(VERIFICATION_TYPES).size).toBe(5);
-  });
-
-  it('adds the mobile-simulator probe row to VerifyProbeId', () => {
-    const rows: VerifyProbeId[] = [
-      'browser-driving',
-      'screen-recording',
-      'accessibility',
-      'mobile-simulator',
-    ];
-    expect(rows).toHaveLength(4);
   });
 
   it('floors the mobile config members without disturbing the existing defaults', () => {

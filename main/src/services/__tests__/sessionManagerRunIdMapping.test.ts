@@ -94,24 +94,6 @@ interface SessionManagerWithPrivate {
 // ------------------------------------------------------------------
 
 describe('convertDbSessionToSession — run_id → runId mapping', () => {
-  it('notifies panel transcript consumers after persisted panel output changes', () => {
-    const dbSession = makeDbSession({ agent_runtime: 'codex-sdk' });
-    const db = makeDbMock(dbSession);
-    db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
-    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
-    const notices: Array<{ sessionId: string; panelId: string }> = [];
-    mgr.on('session-output-available', (notice) => notices.push(notice));
-
-    mgr.addPanelOutput('panel-1', {
-      type: 'stdout',
-      data: 'persisted Codex output',
-      timestamp: new Date('2026-07-10T12:00:00.000Z'),
-    });
-
-    expect(db.addPanelOutput).toHaveBeenCalledOnce();
-    expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
-  });
-
   // The signal is resolved by LANE, not by a `agent_runtime === 'codex-sdk'`
   // test: every STRUCTURED non-Claude lane projects its provider's events
   // straight into panel output and needs the persisted-transcript refresh, so a

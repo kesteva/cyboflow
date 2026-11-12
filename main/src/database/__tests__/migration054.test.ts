@@ -36,12 +36,6 @@ function buildDb(): Database.Database {
 }
 
 describe('Migration 054: workflows baseline rotation columns', () => {
-  it('applies cleanly', () => {
-    const db = buildDb();
-    expect(() => runMigrationViaProductionPath(db, readMigration('054_baseline_rotation.sql'))).not.toThrow();
-    db.close();
-  });
-
   it('adds both baseline columns to workflows (PRAGMA table_info)', () => {
     const db = buildDb();
     runMigrationViaProductionPath(db, readMigration('054_baseline_rotation.sql'));
@@ -60,19 +54,6 @@ describe('Migration 054: workflows baseline rotation columns', () => {
       .get('wf-1') as { inR: number; w: number };
     expect(row.inR).toBe(1);
     expect(row.w).toBe(1);
-    db.close();
-  });
-
-  it('the columns are writable to 1 / a custom weight', () => {
-    const db = buildDb();
-    db.prepare("INSERT INTO workflows (id, project_id, name) VALUES ('wf-1', 1, 'planner')").run();
-    runMigrationViaProductionPath(db, readMigration('054_baseline_rotation.sql'));
-    db.prepare('UPDATE workflows SET baseline_in_rotation = 1, baseline_rotation_weight = 3 WHERE id = ?').run('wf-1');
-    const row = db
-      .prepare('SELECT baseline_in_rotation AS inR, baseline_rotation_weight AS w FROM workflows WHERE id = ?')
-      .get('wf-1') as { inR: number; w: number };
-    expect(row.inR).toBe(1);
-    expect(row.w).toBe(3);
     db.close();
   });
 });

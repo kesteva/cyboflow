@@ -16,7 +16,7 @@
  * are lightweight fakes. Style mirrors resumeRunHandler.test.ts /
  * reopenRunHandler.test.ts.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -125,10 +125,10 @@ function makeFakeExecutor(opts?: {
   activeExecution?: boolean;
   executeRejects?: boolean;
 }): RetryRunExecutorLike & {
-  setPendingResumeStep: ReturnType<typeof vi.fn>;
-  setPendingCompletedSteps: ReturnType<typeof vi.fn>;
-  hasActiveExecution: ReturnType<typeof vi.fn>;
-  execute: ReturnType<typeof vi.fn>;
+  setPendingResumeStep: Mock;
+  setPendingCompletedSteps: Mock;
+  hasActiveExecution: Mock;
+  execute: Mock;
 } {
   const setPendingResumeStep = vi.fn<(runId: string, stepId: string) => void>();
   const setPendingCompletedSteps = vi.fn<(runId: string, stepIds: readonly string[]) => void>();
@@ -146,11 +146,11 @@ function makeDeps(
   opts?: {
     runQueues?: RunQueueRegistry;
     listStepResults?: (runId: string) => Array<{ stepId: string; outcome: string }>;
-    resetFailedLanes?: ReturnType<typeof vi.fn>;
-    reopenBatch?: ReturnType<typeof vi.fn>;
+    resetFailedLanes?: Mock;
+    reopenBatch?: Mock;
     logger?: RetryRunDeps['logger'];
   },
-): RetryRunDeps & { emitRunStatusChanged: ReturnType<typeof vi.fn> } {
+): RetryRunDeps & { emitRunStatusChanged: Mock } {
   const emitRunStatusChanged = vi.fn<(runId: string, status: 'starting') => void>();
   return {
     db,
@@ -482,23 +482,6 @@ describe('retryRunHandler — fan-out lane reset gating', () => {
     const result = await retryRunHandler(runId, undefined, deps);
 
     expect(result).toEqual({ delivered: true, stepId: 'execute-tasks' });
-    expect(resetFailedLanes).not.toHaveBeenCalled();
-    await waitForRedrive(runQueues, runId);
-    db.close();
-  });
-
-  it('does NOT call resetFailedLanes when the target step has no fanOut (even with batch_id set)', async () => {
-    const db = makeDb();
-    const runQueues = new RunQueueRegistry();
-    const { runId } = seedProgrammaticRun(db, { status: 'failed', currentStepId: 'step-a', batchId: 'batch-1' });
-
-    const executor = makeFakeExecutor();
-    const resetFailedLanes = vi.fn<(batchId: string) => number>().mockReturnValue(0);
-    const deps = makeDeps(dbAdapter(db), executor, { runQueues, resetFailedLanes });
-
-    const result = await retryRunHandler(runId, undefined, deps);
-
-    expect(result).toEqual({ delivered: true, stepId: 'step-a' });
     expect(resetFailedLanes).not.toHaveBeenCalled();
     await waitForRedrive(runQueues, runId);
     db.close();

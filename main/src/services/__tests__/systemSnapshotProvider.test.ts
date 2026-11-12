@@ -94,6 +94,31 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
       etimeSeconds: 3,
     });
     expect(entry).toMatchObject({ bucket: 'orphan', sweepEligible: true, pid: 1 });
+
+    const common = {
+      process: base,
+      processType: 'unknown' as const,
+      command: 'x',
+      worktreePath: null,
+      pcpu: 1,
+      pmem: 2,
+      etimeSeconds: 3,
+    };
+    const owned = toSystemProcessEntry({ ...common, bucket: 'owned', owner: null, instanceId: 'live' });
+    const suspected = toSystemProcessEntry({ ...common, bucket: 'suspected' });
+    const foreign = toSystemProcessEntry({
+      bucket: 'foreign',
+      readOnly: true,
+      processType: 'unknown',
+      command: 'x',
+      worktreePath: null,
+      pidLabel: '1',
+      display: { cpu: null, mem: null, elapsed: null },
+      foreignInstanceId: null,
+    });
+    for (const other of [owned, suspected, foreign]) {
+      expect(other).not.toHaveProperty('sweepEligible');
+    }
   });
 });
 

@@ -35,8 +35,6 @@ import {
   DesignFeedbackOutbox,
   DESIGN_OUTBOX_BLOCKED_REASONS,
   makeDefaultGuards,
-  setDesignBatchNotifier,
-  getDesignBatchNotifier,
   _resetDesignBatchNotifierForTesting,
   type DesignOutboxGuards,
 } from '../designFeedbackOutbox';
@@ -614,19 +612,5 @@ describe('makeDefaultGuards', () => {
        VALUES ('art_live', 'run-2', 'ui-prototype', 'Prototype', 'canvas', '{"fileName":"prototype/index.html"}')`,
     ).run();
     expect(guards.hasPrototypeArtifact('run-2')).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Notifier registry
-// ---------------------------------------------------------------------------
-
-describe('design batch notifier registry', () => {
-  it('is null until wired, and returns the registered poke afterwards', () => {
-    expect(getDesignBatchNotifier()).toBeNull();
-    const seen: string[] = [];
-    setDesignBatchNotifier((id) => seen.push(id));
-    getDesignBatchNotifier()?.('fbb_1');
-    expect(seen).toEqual(['fbb_1']);
   });
 });

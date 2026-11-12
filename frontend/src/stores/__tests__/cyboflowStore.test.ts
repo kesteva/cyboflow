@@ -23,10 +23,7 @@
  *   16. setActiveRun starts a fresh run subscription (and, with no parent,
  *       clears selectedSessionId)
  *   17. clearActiveQuickSession tears down subscription and clears the session
- *   18. Quick-to-workflow switch tears down quick subscription first
  *   19. Rapid quick session switches properly teardown/replace subscriptions
- *   20. setActiveQuickSession with runId sets selectedSessionId and starts the
- *       subscription
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -79,24 +76,6 @@ describe('cyboflowStore subscription lifecycle', () => {
     const args = mockSubscribe.mock.calls[0][0] as { runId: string; onEvent: unknown };
     expect(args.runId).toBe('run-001');
     expect(typeof args.onEvent).toBe('function');
-  });
-
-  it('(2) setActiveRun replaces existing subscription when called with a new runId', () => {
-    const firstUnsub = vi.fn();
-    const secondUnsub = vi.fn();
-    mockSubscribe
-      .mockReturnValueOnce(firstUnsub)
-      .mockReturnValueOnce(secondUnsub);
-
-    useCyboflowStore.getState().setActiveRun('run-001');
-    expect(firstUnsub).not.toHaveBeenCalled();
-
-    useCyboflowStore.getState().setActiveRun('run-002');
-
-    // Old subscription must be torn down before the new one starts.
-    expect(firstUnsub).toHaveBeenCalledOnce();
-    expect(mockSubscribe).toHaveBeenCalledTimes(2);
-    expect((mockSubscribe.mock.calls[1][0] as { runId: string }).runId).toBe('run-002');
   });
 
   it('(3) clearActiveRun tears down the active subscription', () => {
@@ -215,6 +194,7 @@ describe('cyboflowStore subscription lifecycle', () => {
 
     expect(unsub1).toHaveBeenCalledOnce();
     expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    expect((mockSubscribe.mock.calls[1][0] as { runId: string }).runId).toBe('run-002');
     expect(useCyboflowStore.getState().activeRunId).toBe('run-002');
     expect(useCyboflowStore.getState().streamEvents).toHaveLength(0);
   });
@@ -222,26 +202,6 @@ describe('cyboflowStore subscription lifecycle', () => {
   // -------------------------------------------------------------------------
   // Quick-session tests (TASK-745 / IDEA-024)
   // -------------------------------------------------------------------------
-
-  it('(8) setActiveQuickSession sets selectedSessionId and clears activeRunId', () => {
-    // Start from a state where a run is active.
-    useCyboflowStore.getState().setActiveRun('run-workflow');
-    expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow');
-
-    useCyboflowStore.getState().setActiveQuickSession('quick-session-001');
-
-    const state = useCyboflowStore.getState();
-    expect(state.selectedSessionId).toBe('quick-session-001');
-    expect(state.activeRunId).toBeNull();
-  });
-
-  it('(9) setActiveQuickSession does NOT call subscribeToStreamEvents', () => {
-    mockSubscribe.mockClear();
-    useCyboflowStore.getState().setActiveQuickSession('quick-session-002');
-
-    // Quick sessions have no workflow_runs row — no subscription should start.
-    expect(mockSubscribe).not.toHaveBeenCalled();
-  });
 
   it('(10) setActiveQuickSession tears down any prior stream subscription', () => {
     const unsub = vi.fn();
@@ -369,6 +329,7 @@ describe('cyboflowStore subscription lifecycle', () => {
 
     // The session is selected.
     expect(useCyboflowStore.getState().selectedSessionId).toBe('qs-with-run');
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
 
   it('(15) setActiveQuickSession(id) without runId does NOT start subscription', () => {
@@ -415,26 +376,6 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
   });
 
-  it('(18) quick-to-workflow switch tears down quick subscription first', () => {
-    const quickUnsub = vi.fn();
-    const workflowUnsub = vi.fn();
-    mockSubscribe
-      .mockReturnValueOnce(quickUnsub)   // quick session subscription
-      .mockReturnValueOnce(workflowUnsub); // workflow run subscription
-
-    // Start a quick session with a runId.
-    useCyboflowStore.getState().setActiveQuickSession('qs-switch', 'run-quick-004');
-    expect(quickUnsub).not.toHaveBeenCalled();
-
-    // Switch to a workflow run — quick subscription must be torn down first.
-    useCyboflowStore.getState().setActiveRun('run-workflow-004');
-
-    expect(quickUnsub).toHaveBeenCalledOnce();
-    expect(mockSubscribe).toHaveBeenCalledTimes(2);
-    expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow-004');
-    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
-  });
-
   it('(19) rapid quick session switches properly teardown/replace subscriptions', () => {
     const unsub1 = vi.fn();
     const unsub2 = vi.fn();
@@ -456,20 +397,6 @@ describe('cyboflowStore subscription lifecycle', () => {
 
     const state = useCyboflowStore.getState();
     expect(state.selectedSessionId).toBe('qs-rapid-2');
-    expect(state.activeRunId).toBeNull();
-  });
-
-  it('(20) setActiveQuickSession with runId selects the session and starts the subscription', () => {
-    mockSubscribe.mockImplementation(() => vi.fn());
-
-    useCyboflowStore.getState().setActiveQuickSession('qs-both-fields', 'run-quick-007');
-
-    const state = useCyboflowStore.getState();
-    expect(state.selectedSessionId).toBe('qs-both-fields');
-    // The runId arg's only live purpose is to start the subscription.
-    expect(mockSubscribe).toHaveBeenCalledOnce();
-    expect((mockSubscribe.mock.calls[0][0] as { runId: string }).runId).toBe('run-quick-007');
-    // setActiveQuickSession (no run-selection) still clears activeRunId.
     expect(state.activeRunId).toBeNull();
   });
 

@@ -99,7 +99,7 @@ describe('forkPoolOptions', () => {
   it('pins the fork pool when an explicit cap is set', () => {
     expect(forkPoolOptions({ CYBOFLOW_TEST_MAX_FORKS: '4' }, oneGate)).toEqual({
       pool: 'forks',
-      poolOptions: { forks: { maxForks: 4, minForks: 1 } },
+      maxWorkers: 4,
     });
   });
 
@@ -110,7 +110,7 @@ describe('forkPoolOptions', () => {
       psDump(...[0, 1, 2, 3, 4].flatMap((i) => healthyGate(1000 + i * 100, 1))),
     );
     expect(result).toMatchObject({ pool: 'forks' });
-    const { maxForks } = (result as { poolOptions: { forks: { maxForks: number } } }).poolOptions.forks;
+    const { maxWorkers: maxForks } = result as { maxWorkers: number };
     expect(maxForks).toBe(Math.max(2, Math.min(cores - 1, Math.floor(cores / 5))));
     // The whole point: five concurrent gates must not each take the full box.
     expect(maxForks).toBeLessThanOrEqual(Math.max(2, cores - 1));
@@ -119,7 +119,7 @@ describe('forkPoolOptions', () => {
   it('gives a lone managed gate the same width as an unmanaged one', () => {
     const cores = availableParallelism();
     const result = forkPoolOptions({ CYBOFLOW_MANAGED_TEST_CONCURRENCY: '1' }, oneGate);
-    const { maxForks } = (result as { poolOptions: { forks: { maxForks: number } } }).poolOptions.forks;
+    const { maxWorkers: maxForks } = result as { maxWorkers: number };
     expect(maxForks).toBe(Math.max(2, cores - 1));
   });
 
@@ -173,13 +173,13 @@ describe('forkPoolOptions', () => {
         throw new Error('EPERM');
       },
     );
-    const { maxForks } = (result as { poolOptions: { forks: { maxForks: number } } }).poolOptions.forks;
+    const { maxWorkers: maxForks } = result as { maxWorkers: number };
     const effective = Math.max(1, cores - orphans);
     expect(maxForks).toBe(Math.max(2, Math.min(Math.max(1, effective - 1), Math.floor(effective / 1))));
     // And it must be strictly tighter than the same gate on an orphan-free box,
     // whenever the box is big enough for the floor not to swallow the difference.
     const clean = forkPoolOptions({ CYBOFLOW_MANAGED_TEST_CONCURRENCY: '1' }, psDump(...healthyGate(1000, 1)));
-    const cleanForks = (clean as { poolOptions: { forks: { maxForks: number } } }).poolOptions.forks.maxForks;
+    const cleanForks = (clean as { maxWorkers: number }).maxWorkers;
     if (cleanForks > 2) expect(maxForks).toBeLessThan(cleanForks);
   });
 

@@ -196,6 +196,7 @@ export function RunCenterPane({
         runLabel={activeRunId}
         folderPath={activeRun?.worktree_path}
         branchName={activeRun?.branch_name}
+        hostId={activeRun?.host_id}
         isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
         paused={activeRun?.status === 'paused'}
         status={activeRun?.status}

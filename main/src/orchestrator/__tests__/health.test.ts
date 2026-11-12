@@ -41,35 +41,20 @@ function makeLifecycleStub(
 // ---------------------------------------------------------------------------
 
 describe('OrchestratorHealth.getMcpServerStatus()', () => {
-  it('returns the status from the lifecycle getStatus()', () => {
-    const lifecycle = makeLifecycleStub('running');
-    const health = new OrchestratorHealth(
-      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
-    );
+  it.each(['running', 'starting', 'failed'] as const)(
+    'returns the status from the lifecycle getStatus() (%s)',
+    (status) => {
+      const lifecycle = makeLifecycleStub(status);
+      const health = new OrchestratorHealth(
+        lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
+      );
 
-    const result = health.getMcpServerStatus();
+      const result = health.getMcpServerStatus();
 
-    expect(result.status).toBe('running');
-    expect(lifecycle.getStatus).toHaveBeenCalledOnce();
-  });
-
-  it('returns status: starting when lifecycle status is starting', () => {
-    const lifecycle = makeLifecycleStub('starting');
-    const health = new OrchestratorHealth(
-      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
-    );
-
-    expect(health.getMcpServerStatus().status).toBe('starting');
-  });
-
-  it('returns status: failed when lifecycle status is failed', () => {
-    const lifecycle = makeLifecycleStub('failed');
-    const health = new OrchestratorHealth(
-      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
-    );
-
-    expect(health.getMcpServerStatus().status).toBe('failed');
-  });
+      expect(result.status).toBe(status);
+      expect(lifecycle.getStatus).toHaveBeenCalledOnce();
+    },
+  );
 
   it('returns restartAttempts from the lifecycle getRestartAttempts()', () => {
     const lifecycle = makeLifecycleStub('running', 2);

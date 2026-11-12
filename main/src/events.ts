@@ -56,7 +56,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     databaseService
   } = services;
 
-  // Guarded-model availability (Fable 5.1): forward status flips to the renderer so
+  // Guarded-model availability (Fable 5.2): forward status flips to the renderer so
   // the model pickers can grey out a pulled model live (no reload needed). The
   // service is initialized before this runs (see main/src/index.ts).
   ModelAvailabilityService.tryGetInstance()?.on('changed', (map: ModelAvailabilityMap) => {
@@ -551,7 +551,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
   });
 
-  // Guarded-model mid-call fallback (Fable 5.1 pulled): a run's turn discovered its
+  // Guarded-model mid-call fallback (Fable 5.2 pulled): a run's turn discovered its
   // pinned model was unavailable and transparently retried on Opus. Forward to the
   // renderer so the quick-session composer swaps its model pill + shows a toast.
   claudeCodeManager.on('model-fallback', (payload: ModelFallbackNotice) => {

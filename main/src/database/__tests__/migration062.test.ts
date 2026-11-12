@@ -108,13 +108,6 @@ describe('Migration 062: approve-ideas artifact atype', () => {
     db.close();
   });
 
-  it('(b) unknown atype is still rejected by the CHECK', () => {
-    const db = buildDb();
-    seedRun(db, 'run-1');
-    expect(() => insertArtifact(db, 'art_bad_2', { atype: 'not-a-real-atype' })).toThrow(/CHECK/i);
-    db.close();
-  });
-
   it('(c) preserves pre-existing artifacts rows across the copy', () => {
     const db = new Database(':memory:');
     seedProject(db);

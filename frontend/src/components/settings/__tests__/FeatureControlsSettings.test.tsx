@@ -196,3 +196,29 @@ describe('FeatureControlsSettings — Agents & Environments', () => {
     expect(screen.queryByText(/CYBOFLOW_DISABLE_PERSISTENT_AGENTS/)).not.toBeInTheDocument();
   });
 });
+
+describe('FeatureControlsSettings — Environments toggle', () => {
+  it('is absent unless environments are available', () => {
+    renderGroup({ agentsAvailable: true });
+    expect(screen.queryByTestId('settings-environments-toggle')).not.toBeInTheDocument();
+  });
+
+  it('shows state and fires the change callback', () => {
+    const onChange = vi.fn();
+    renderGroup({
+      agentsAvailable: true,
+      environmentsAvailable: true,
+      environmentsEnabled: false,
+      onEnvironmentsEnabledChange: onChange,
+    });
+    const toggle = screen.getByTestId('settings-environments-toggle');
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalledWith(true);
+  });
+
+  it('shows the kill-switch note only on its flag', () => {
+    renderGroup({ agentsAvailable: true, environmentsAvailable: true, environmentsKillSwitch: true });
+    expect(screen.getByText('Turned off on this computer by CYBOFLOW_DISABLE_REMOTE_HOSTS.')).toBeInTheDocument();
+  });
+});

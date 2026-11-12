@@ -540,7 +540,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     rawDb.close();
   });
 
-  it('scan() ignores an UN-AWAITED stale approval entirely', () => {
+  it('scan() ignores an UN-AWAITED stale approval entirely', async () => {
     const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
@@ -548,6 +548,8 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
 
     seedRun(rawDb, 'run-detached', 'awaiting_review');
     seedApproval(rawDb, { id: 'approval-detached', runId: 'run-detached', toolName: 'Bash', createdAt: ageMsToIso(STALE_AGE_MS), awaited: false });
+    const stuckEvents: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
     const detector = new StuckDetector({
       db,
@@ -556,12 +558,14 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
       logger,
     });
 
-    void detector.scan();
+    await detector.scan();
 
     const after = rawDb
-      .prepare("SELECT status FROM workflow_runs WHERE id = 'run-detached'")
-      .get() as { status: string };
+      .prepare("SELECT status, stuck_reason FROM workflow_runs WHERE id = 'run-detached'")
+      .get() as { status: string; stuck_reason: string | null };
     expect(after.status).toBe('awaiting_review');
+    expect(after.stuck_reason).toBeNull();
+    expect(stuckEvents).toHaveLength(0);
 
     rawDb.close();
   });

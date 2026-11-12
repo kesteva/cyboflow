@@ -189,13 +189,6 @@ describe('useAddClaudeShortcut — opts.enabled', () => {
     act(() => { pressMacShortcut(); });
     expect(cb).toHaveBeenCalledTimes(1);
   });
-
-  it('invokes the callback when opts is omitted (default enabled)', () => {
-    const cb = vi.fn();
-    renderHook(() => useAddClaudeShortcut(cb));
-    act(() => { pressMacShortcut(); });
-    expect(cb).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe('useAddClaudeShortcut — cleanup on unmount', () => {

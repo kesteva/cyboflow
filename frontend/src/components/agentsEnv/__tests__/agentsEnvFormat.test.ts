@@ -26,12 +26,16 @@ describe('formatClock', () => {
   });
 
   it('parses the unzoned SQLite shape as UTC', () => {
-    const now = new Date('2026-10-06T23:00:00Z');
-    const out = formatClock('2026-10-06 17:44:00', new Date('2026-10-06T17:50:00Z'));
-    const expected = formatClock('2026-10-06T17:44:00Z', new Date('2026-10-06T17:50:00Z'));
+    const ref = new Date('2026-10-06T17:50:00Z');
+    const out = formatClock('2026-10-06 17:44:00', ref);
+    const expected = formatClock('2026-10-06T17:44:00Z', ref);
     expect(out).toBe(expected);
     expect(out).not.toBe('');
-    expect(now).toBeInstanceOf(Date);
+    // TZ-independent: a local-time parse would differ whenever the zone is not UTC.
+    const asLocal = new Date(2026, 9, 6, 17, 44);
+    if (asLocal.getTimezoneOffset() !== 0) {
+      expect(out).not.toBe(formatClock(asLocal.toISOString(), ref));
+    }
   });
 
   it('returns an empty string for invalid input', () => {

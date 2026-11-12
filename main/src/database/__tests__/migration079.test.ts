@@ -36,12 +36,6 @@ function buildDb(): Database.Database {
 }
 
 describe('Migration 079: workflows.archived_at soft-archive stamp', () => {
-  it('applies cleanly on a fresh DB', () => {
-    const db = buildDb();
-    expect(() => runMigrationViaProductionPath(db, readMigration('079_workflow_archived_at.sql'))).not.toThrow();
-    db.close();
-  });
-
   it('adds a nullable archived_at column to workflows (PRAGMA table_info)', () => {
     const db = buildDb();
     runMigrationViaProductionPath(db, readMigration('079_workflow_archived_at.sql'));

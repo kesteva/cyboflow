@@ -23,12 +23,6 @@ describe('parseTimestamp', () => {
     expect(parseTimestamp('2026-08-24 19:12:52').getTime()).toBe(UTC_INSTANT);
   });
 
-  it('passes an ISO string with Z through unchanged', () => {
-    // What strftime('%Y-%m-%dT%H:%M:%SZ', …) and Date.toISOString() emit —
-    // including anything serialized across the IPC boundary.
-    expect(parseTimestamp('2026-08-24T19:12:52Z').getTime()).toBe(UTC_INSTANT);
-  });
-
   it('passes an ISO string with milliseconds through unchanged', () => {
     expect(parseTimestamp('2026-08-24T19:12:52.000Z').getTime()).toBe(UTC_INSTANT);
   });
@@ -77,11 +71,5 @@ describe('parseTimestamp shape matrix', () => {
     const parsed = parseTimestamp(input);
     expect(Number.isNaN(parsed.getTime())).toBe(false);
     expect(parsed.toISOString()).toBe(expectedIso);
-  });
-
-  it('never produces Invalid Date for any shape the repo emits', () => {
-    for (const [, input] of SHAPES) {
-      expect(Number.isNaN(parseTimestamp(input).getTime())).toBe(false);
-    }
   });
 });

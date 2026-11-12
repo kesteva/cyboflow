@@ -24,12 +24,14 @@ interface UnifiedChatViewStubProps {
   liveTail?: ReactNode;
   bottomSlot?: ReactNode;
   transcriptStartSlot?: ReactNode;
+  transcriptEndSlot?: ReactNode;
 }
 
 vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
-  UnifiedChatView: ({ mode, running, liveTail, bottomSlot, transcriptStartSlot }: UnifiedChatViewStubProps) => (
+  UnifiedChatView: ({ mode, running, liveTail, bottomSlot, transcriptStartSlot, transcriptEndSlot }: UnifiedChatViewStubProps) => (
     <div data-testid="unified-chat-view-stub" data-mode={mode} data-running={String(running)}>
       <div data-testid="transcript-start-slot">{transcriptStartSlot}</div>
+      <div data-testid="transcript-end-slot">{transcriptEndSlot}</div>
       <div data-testid="live-tail-slot">{liveTail}</div>
       {bottomSlot}
     </div>
@@ -61,6 +63,14 @@ vi.mock('./ProposalCardList', () => ({
   ),
 }));
 
+// -- ClaudeSignInCard stub: exposes its callbacks as buttons so the
+//    prompt-restore wiring is testable without the tRPC-driven dialog. --
+vi.mock('../session/ClaudeSignInCard', () => ({
+  ClaudeSignInCard: ({ onSignedIn }: { onSignedIn?: () => void }) => (
+    <button type="button" data-testid="claude-sign-in-card-stub" onClick={() => onSignedIn?.()} />
+  ),
+}));
+
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
@@ -69,6 +79,7 @@ const mockInterrupt = vi.fn().mockResolvedValue(undefined);
 const mockQueueTurn = vi.fn();
 const mockCancelQueuedTurn = vi.fn();
 const mockInterruptAndSend = vi.fn().mockResolvedValue(undefined);
+const mockSetComposerDraft = vi.fn();
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
@@ -86,6 +97,7 @@ interface FakeAgentThreadState {
   queueTurn: typeof mockQueueTurn;
   cancelQueuedTurn: typeof mockCancelQueuedTurn;
   interruptAndSend: typeof mockInterruptAndSend;
+  setComposerDraft: typeof mockSetComposerDraft;
 }
 
 vi.mock('../../stores/agentThreadStore', () => ({
@@ -101,6 +113,7 @@ vi.mock('../../stores/agentThreadStore', () => ({
       queueTurn: mockQueueTurn,
       cancelQueuedTurn: mockCancelQueuedTurn,
       interruptAndSend: mockInterruptAndSend,
+      setComposerDraft: mockSetComposerDraft,
     }),
 }));
 
@@ -139,6 +152,7 @@ beforeEach(() => {
   mockQueueTurn.mockClear();
   mockCancelQueuedTurn.mockClear();
   mockInterruptAndSend.mockClear();
+  mockSetComposerDraft.mockClear();
   mockThread = null;
   mockSending = false;
   mockProposals = [];
@@ -413,5 +427,49 @@ describe('AgentThreadView — windowed history', () => {
     const AgentThreadView = await loadAgentThreadView();
     render(<AgentThreadView />);
     expect(screen.getByTestId('agent-thread-load-earlier')).toBeDisabled();
+  });
+});
+
+describe('AgentThreadView — Claude sign-in card', () => {
+  const userTurn = (text: string): UnifiedMessage => ({
+    id: `u-${text}`,
+    role: 'user',
+    timestamp: '2026-10-08T00:00:00.000Z',
+    segments: [{ type: 'text', content: text }],
+  });
+  const loginError: UnifiedMessage = {
+    id: 'err-1',
+    role: 'system',
+    timestamp: '2026-10-08T00:00:01.000Z',
+    segments: [{ type: 'text', content: 'Not logged in · Please run /login' }],
+    metadata: { systemSubtype: 'error' },
+  };
+
+  it('shows the sign-in card when the last turn failed for want of a login, and restores the prompt', async () => {
+    mockThread = makeThread();
+    mockMessages = [userTurn('plan my week'), loginError];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.click(screen.getByTestId('claude-sign-in-card-stub'));
+    expect(mockSetComposerDraft).toHaveBeenCalledWith('plan my week');
+  });
+
+  it('shows no card once a newer turn was sent after the failure', async () => {
+    mockThread = makeThread();
+    mockMessages = [userTurn('first'), loginError, userTurn('second')];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    expect(screen.queryByTestId('claude-sign-in-card-stub')).not.toBeInTheDocument();
+  });
+
+  it('shows no card when the assistant runs on Codex', async () => {
+    mockThread = makeThread();
+    mockMessages = [userTurn('plan my week'), loginError];
+    const AgentThreadView = await loadAgentThreadView();
+    const { useConfigStore } = await import('../../stores/configStore');
+    useConfigStore.setState({ config: { assistantRuntime: 'codex-sdk' } as never });
+    render(<AgentThreadView />);
+    expect(screen.queryByTestId('claude-sign-in-card-stub')).not.toBeInTheDocument();
   });
 });

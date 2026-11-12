@@ -36,12 +36,24 @@ import type { StepStatus } from './WorkflowStepCard';
 import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useHostLookup } from '../../stores/hostsStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
 import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+function HostSpan({ hostId }: { hostId: string }): React.JSX.Element {
+  const host = useHostLookup(hostId);
+  const label = host?.label ?? 'Remote';
+  return (
+    <span data-testid="workflow-canvas-host" title={`Runs on ${label}`}>
+      host{' '}
+      <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>{label}</b>
+    </span>
+  );
+}
 
 export interface WorkflowCanvasProps {
   definition: WorkflowDefinition;
@@ -52,6 +64,8 @@ export interface WorkflowCanvasProps {
   folderPath?: string | null;
   /** Branch name of the run; rendered as a "branch" chip in the meta row. */
   branchName?: string | null;
+  /** Execution host stamp of the run (workflow_runs.host_id); a non-local value renders the host label. */
+  hostId?: string | null;
   elapsed?: string;
   tokenCount?: string;
   isRunning?: boolean;
@@ -220,6 +234,7 @@ export function WorkflowCanvas({
   workflowTitle,
   folderPath,
   branchName,
+  hostId,
   elapsed,
   tokenCount,
   isRunning = false,
@@ -390,6 +405,7 @@ export function WorkflowCanvas({
             </b>
           </span>
         )}
+        {hostId && hostId !== 'local' && <HostSpan hostId={hostId} />}
         {branchName && (
           <span data-testid="workflow-canvas-branch" title={branchName}>
             branch{' '}

@@ -99,12 +99,7 @@ describe('buildReapManifest', () => {
     // suspected (13), owned (14), foreign, session/run-owned, in_place and main are all absent.
     expect(paths(m)).toEqual(['p:11', 'p:12', 'w:/wt/orphan-a', 'w:/wt/orphan-b']);
     expect(m.kind).toBe('reap-all-stale');
-  });
-
-  it('reap-all-stale never includes a suspected/foreign target even when they share a worktree', async () => {
-    const m = await buildReapManifest('reap-all-stale', {}, snapshot, makeDeps());
-    const pids = m.targets.filter((t) => t.kind === 'process').map((t) => (t.kind === 'process' ? t.bucket : ''));
-    expect(pids.every((b) => b === 'orphan')).toBe(true);
+    expect(m.targets.filter((t) => t.kind === 'process').every((t) => t.kind === 'process' && t.bucket === 'orphan')).toBe(true);
   });
 
   it('row: selects the named worktrees and pids', async () => {
@@ -397,6 +392,13 @@ describe('reapIdentityFingerprint owner identity', () => {
     const b = fp({ kind: 'run-shell', runId: 'a', terminalId: 'b:c' });
     expect(a[0].key).not.toBe(b[0].key);
     expect(reapFingerprintsMatch(a, b)).toBe(false);
+  });
+
+  it('a host-terminal owner is its own identity, distinct from a run-shell with the same ids', () => {
+    const host = fp({ kind: 'host-terminal', hostId: 'h1', terminalId: 't1' });
+    const shell = fp({ kind: 'run-shell', runId: 'h1', terminalId: 't1' });
+    expect(reapFingerprintsMatch(host, shell)).toBe(false);
+    expect(reapFingerprintsMatch(host, fp({ kind: 'host-terminal', hostId: 'h1', terminalId: 't1' }))).toBe(true);
   });
 
   it('identical owners still match (negative control for the two cases above)', () => {

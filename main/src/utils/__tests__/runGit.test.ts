@@ -7,7 +7,7 @@
  * 3. Adversarial arg: $(touch ...) is treated as a literal arg, not executed by a shell.
  * 4. Error path: non-zero exit propagates with an error containing stderr.
  * 5. cwd option: rev-parse --show-toplevel returns the expected directory.
- * 6. env option: passing custom env does not crash git --version.
+ * 6. env option: a custom env reaches the git child (git var GIT_AUTHOR_IDENT echoes it).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
@@ -146,12 +146,8 @@ describe('error propagation', () => {
       caughtError = err as Error;
     }
     expect(caughtError).toBeDefined();
-    // execFileSync puts stderr in the error message or error.stderr
     const errAny = caughtError as NodeJS.ErrnoException & { stderr?: Buffer | string };
-    const hasGitContent = (caughtError?.message ?? '').includes('git') ||
-      (caughtError?.message ?? '').length > 0 ||
-      (errAny?.stderr !== undefined);
-    expect(hasGitContent).toBe(true);
+    expect(String(errAny.stderr)).toContain('nonexistent-subcommand-xyz');
   });
 });
 
@@ -215,16 +211,16 @@ describe('cwd option', () => {
 
 describe('env option', () => {
   it('runGit accepts a custom env without crashing', () => {
-    const result = runGit(process.cwd(), ['--version'], {
-      env: { ...process.env, GIT_AUTHOR_NAME: 'TestAuthor' },
+    const result = runGit(process.cwd(), ['var', 'GIT_AUTHOR_IDENT'], {
+      env: { ...process.env, GIT_AUTHOR_NAME: 'TestAuthor', GIT_AUTHOR_EMAIL: 't@cyboflow.test' },
     });
-    expect(result).toMatch(/^git version/);
+    expect(result).toMatch(/^TestAuthor <t@cyboflow\.test>/);
   });
 
   it('runGitAsync accepts a custom env without crashing', async () => {
-    const result = await runGitAsync(process.cwd(), ['--version'], {
-      env: { ...process.env, GIT_AUTHOR_NAME: 'TestAuthor' },
+    const result = await runGitAsync(process.cwd(), ['var', 'GIT_AUTHOR_IDENT'], {
+      env: { ...process.env, GIT_AUTHOR_NAME: 'TestAuthor', GIT_AUTHOR_EMAIL: 't@cyboflow.test' },
     });
-    expect(result).toMatch(/^git version/);
+    expect(result).toMatch(/^TestAuthor <t@cyboflow\.test>/);
   });
 });

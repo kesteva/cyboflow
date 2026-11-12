@@ -180,13 +180,6 @@ describe('useAddTerminalShortcut — opts.enabled', () => {
     act(() => { pressMacShortcut(); });
     expect(cb).toHaveBeenCalledTimes(1);
   });
-
-  it('invokes the callback when opts is omitted (default enabled)', () => {
-    const cb = vi.fn();
-    renderHook(() => useAddTerminalShortcut(cb));
-    act(() => { pressMacShortcut(); });
-    expect(cb).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe('useAddTerminalShortcut — cleanup on unmount', () => {

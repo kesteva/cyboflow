@@ -1,5 +1,6 @@
 const js = require('@eslint/js');
 const typescript = require('typescript-eslint');
+const executionFsExemptions = require('./eslint/executionFsExemptions.json');
 
 module.exports = [
   js.configs.recommended,
@@ -68,6 +69,34 @@ module.exports = [
     ],
     rules: {
       '@typescript-eslint/no-restricted-imports': 'off'
+    }
+  },
+  {
+    // fs / child_process ratchet: execution paths must reach the machine through
+    // ExecutionHost so remote environments work. Files that already import these
+    // modules are frozen in eslint/executionFsExemptions.json (may shrink, never
+    // grow); src/__tests__/executionFsRatchet.test.ts also catches require().
+    files: [
+      'src/orchestrator/**/*.ts',
+      'src/services/panels/**/*.ts',
+      'src/services/worktreeManager.ts',
+      'src/services/taskQueue.ts'
+    ],
+    ignores: [
+      '**/*.test.ts',
+      '**/*.itest.ts',
+      '**/__tests__/**',
+      '**/__test_fixtures__/**',
+      ...executionFsExemptions
+    ],
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: ['fs', 'node:fs', 'fs/promises', 'node:fs/promises', 'child_process', 'node:child_process'].map(name => ({
+          name,
+          message:
+            'Execution paths must not touch the local machine directly: go through ExecutionHost (MachineFs / GitExecutor / exec) so remote environments work. See the fs ratchet (main/src/__tests__/executionFsRatchet.test.ts).'
+        }))
+      }]
     }
   },
   {

@@ -33,6 +33,8 @@ vi.mock('../../../trpc/client', () => ({
 
 let mockWorkflowStats: WorkflowRunStats[] = [];
 let mockProjectFilter: number | null = null;
+// When set, replaces the default variantsStore fixture (active variant-a + paused variant-b).
+let mockVariantsOverride: Array<{ id: string; workflow_id: string; label: string; spec_json: string; agent_overrides_json: null; model: null; execution_model: null; agent_provider: null; agent_runtime: null; weight: number; status: string; created_at: string; updated_at: string }> | null = null;
 
 vi.mock('../../../stores/insightsStore', () => ({
   useInsightsStore: (selector: (s: { workflowStats: WorkflowRunStats[]; projectFilter: number | null }) => unknown) =>
@@ -41,7 +43,7 @@ vi.mock('../../../stores/insightsStore', () => ({
 
 vi.mock('../../../stores/variantsStore', () => ({
   useWorkflowVariants: () => ({
-    variants: [
+    variants: mockVariantsOverride ?? [
       { id: 'wfv_a', workflow_id: 'wf-1', label: 'variant-a', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 3, status: 'active', created_at: '', updated_at: '' },
       { id: 'wfv_b', workflow_id: 'wf-1', label: 'variant-b', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 1, status: 'paused', created_at: '', updated_at: '' },
     ],
@@ -139,6 +141,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockWorkflowStats = [];
   mockProjectFilter = null;
+  mockVariantsOverride = null;
   listRotationsForDashboardQuery.mockResolvedValue([]);
 });
 
@@ -179,6 +182,22 @@ describe('ExperimentsSection', () => {
     const line = await screen.findByTestId('experiments-rotation-status-wf-1');
     expect(line).toHaveTextContent('variant-a (3)');
     expect(line).not.toHaveTextContent('variant-b');
+  });
+
+  it('omits the rotation status line when no variant is active with weight > 0', async () => {
+    mockWorkflowStats = [makeWorkflowStatsRow()];
+    mockVariantsOverride = [
+      { id: 'wfv_a', workflow_id: 'wf-1', label: 'variant-a', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 0, status: 'active', created_at: '', updated_at: '' },
+      { id: 'wfv_b', workflow_id: 'wf-1', label: 'variant-b', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 2, status: 'paused', created_at: '', updated_at: '' },
+    ];
+    variantStatsQuery.mockResolvedValue([makeVariantStats()]);
+    listForDashboardQuery.mockResolvedValue([]);
+
+    render(<ExperimentsSection />);
+    // The workflow block has rendered (its variant row is present) ...
+    await screen.findByTestId('experiments-variant-row-wfv_a');
+    // ... but neither the weight-0 active variant nor the paused one earns a status line.
+    expect(screen.queryByTestId('experiments-rotation-status-wf-1')).not.toBeInTheDocument();
   });
 
   it('does not render a table for a workflow with zero variants', async () => {

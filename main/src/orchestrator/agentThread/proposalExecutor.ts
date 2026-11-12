@@ -467,8 +467,8 @@ function launchNameHint(payload: LaunchRunProposalPayload, proposalId: string): 
 }
 
 /** Format zod issues as one prose line each (`path: message`) for a loopback turn. */
-function formatZodIssues(issues: readonly { path: readonly (string | number)[]; message: string }[]): string[] {
-  return issues.map((issue) => `${issue.path.length > 0 ? issue.path.join('.') : '(root)'}: ${issue.message}`);
+function formatZodIssues(issues: readonly { path: readonly PropertyKey[]; message: string }[]): string[] {
+  return issues.map((issue) => `${issue.path.length > 0 ? issue.path.map(String).join('.') : '(root)'}: ${issue.message}`);
 }
 
 /** Safely pull a string runId off an orphan proposal's parsed result_json. */

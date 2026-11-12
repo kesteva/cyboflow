@@ -43,11 +43,16 @@ function createCanonicalDb(): Database.Database {
     'src/database/migrations/124_workflow_tuning_level.sql',
     // 127 adds runtime_mix to BOTH workflows and workflow_runs.
     'src/database/migrations/128_workflow_runtime_mix.sql',
+    // 152 adds host_id / merge_back_state / merge_back_sha to workflow_runs. It also
+    // ALTERs projects + sessions, which this canonical DB lacks, so stub them below.
+    'src/database/migrations/152_hosts.sql',
   ];
   const sql = readFileSync(schemaPath, 'utf8');
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(sql);
+  // Migration 152 ALTERs these two tables; the raw orchestrator schema has neither.
+  db.exec('CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE sessions (id TEXT PRIMARY KEY);');
   for (const rel of laterMigrations) {
     db.exec(readFileSync(join(process.cwd(), rel), 'utf8'));
   }
@@ -67,13 +72,6 @@ function columnSet(db: Database.Database, tableName: string): Set<string> {
 // ---------------------------------------------------------------------------
 
 describe('createTestDb', () => {
-  it('returns a fresh in-memory Database with FK enforcement ON', () => {
-    const db = createTestDb();
-    // FK pragma should return 1.
-    const result = db.pragma('foreign_keys', { simple: true });
-    expect(result).toBe(1);
-  });
-
   it('creates workflows, workflow_runs, approvals, raw_events tables', () => {
     const db = createTestDb();
     const tables = (

@@ -4,6 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ProviderDetectionResult } from '../../../../../shared/types/onboarding';
 import { ConnectStep } from './ConnectStep';
 
+// The real flow drives `claude auth login` over tRPC; the step only owns when
+// it is mounted and what happens on success.
+vi.mock('../../session/ClaudeSignInCard', () => ({
+  ClaudeSignInFlow: ({ onSignedIn, onClose }: { onSignedIn: () => void; onClose: () => void }) => (
+    <div data-testid="claude-sign-in-flow-stub">
+      <button type="button" onClick={onSignedIn}>stub-succeed</button>
+      <button type="button" onClick={onClose}>stub-cancel</button>
+    </div>
+  ),
+}));
+
 const CLAUDE_DETECTED: ProviderDetectionResult<'claude'> = {
   credentials: { found: true, source: 'keychain', account: 'claude@example.com' },
   binary: { found: true, path: '/usr/bin/claude', version: '1.2.3' },
@@ -42,6 +53,13 @@ const baseProps = {
   onRecheck: vi.fn(),
   onLocate: vi.fn(),
   onInstall: vi.fn(),
+  onClaudeSignedIn: vi.fn(),
+};
+
+const CLAUDE_MISSING: ProviderDetectionResult<'claude'> = {
+  credentials: { found: false, source: null, account: null },
+  binary: { found: false, path: null, version: null },
+  state: 'missing',
 };
 
 describe('ConnectStep', () => {
@@ -97,5 +115,38 @@ describe('ConnectStep', () => {
     expect(screen.getByRole('switch', { name: 'Use Claude Code in Cyboflow' })).toBeDisabled();
     expect(screen.getByRole('switch', { name: 'Use Codex in Cyboflow' })).toBeEnabled();
     expect(screen.getByText(/Ready · choose the runtime/)).toBeInTheDocument();
+  });
+
+  it('offers an in-app sign-in (not an install) when Claude has no login and no CLI', () => {
+    render(<ConnectStep {...baseProps} claudeDetection={CLAUDE_MISSING} />);
+    expect(screen.getByText('Sign in required')).toBeInTheDocument();
+    expect(screen.getByText(/nothing to install/)).toBeInTheDocument();
+    expect(screen.queryByTestId('claude-sign-in-flow-stub')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('onboarding-claude-sign-in-start'));
+    expect(screen.getByTestId('claude-sign-in-flow-stub')).toBeInTheDocument();
+  });
+
+  it('closes the flow and reports success so the gate can re-probe', () => {
+    const onClaudeSignedIn = vi.fn();
+    render(<ConnectStep {...baseProps} claudeDetection={CLAUDE_MISSING} onClaudeSignedIn={onClaudeSignedIn} />);
+    fireEvent.click(screen.getByTestId('onboarding-claude-sign-in-start'));
+    fireEvent.click(screen.getByText('stub-succeed'));
+    expect(onClaudeSignedIn).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('claude-sign-in-flow-stub')).not.toBeInTheDocument();
+  });
+
+  it('cancelling returns to the sign-in button without reporting success', () => {
+    const onClaudeSignedIn = vi.fn();
+    render(<ConnectStep {...baseProps} claudeDetection={CLAUDE_MISSING} onClaudeSignedIn={onClaudeSignedIn} />);
+    fireEvent.click(screen.getByTestId('onboarding-claude-sign-in-start'));
+    fireEvent.click(screen.getByText('stub-cancel'));
+    expect(onClaudeSignedIn).not.toHaveBeenCalled();
+    expect(screen.getByTestId('onboarding-claude-sign-in-start')).toBeInTheDocument();
+  });
+
+  it('shows no Claude sign-in when Claude is detected', () => {
+    render(<ConnectStep {...baseProps} codexDetection={{ ...CODEX_DETECTED, state: 'loggedOut' }} />);
+    expect(screen.queryByTestId('onboarding-claude-sign-in')).not.toBeInTheDocument();
   });
 });

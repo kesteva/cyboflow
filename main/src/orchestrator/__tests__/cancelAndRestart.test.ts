@@ -13,18 +13,17 @@
  *
  * AC5: Deny replies are sent BEFORE PTY kill — asserted via spy call-order.
  *
- * AC7: Worktree is PRESERVED — worktreeManager.remove is never called.
+ * AC7: Worktree is PRESERVED — the new run keeps the old worktree_path (AC4d).
  *
  * Test strategy:
  *   - Real in-memory better-sqlite3 DB with migrations 006 + 007 applied.
  *   - Mocked ApprovalRouter (clearPendingForRun is a no-op spy).
  *   - Mocked managerStop (a vi.fn() that resolves immediately).
- *   - Mocked worktreeManager.remove (vi.fn() asserted never-called).
  *   - The mutation body is exercised via the cancelAndRestartHandler()
  *     extracted helper (tested directly, without the tRPC wrapper, to avoid
  *     wiring the full tRPC context).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
@@ -66,11 +65,10 @@ function seedWorkflowAndRun(
 
 interface OrderSpy {
   calls: string[];
-  clearPendingForRun: ReturnType<typeof vi.fn>;       // approvalRouter
-  clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
-  managerStop: ReturnType<typeof vi.fn>;
-  worktreeRemove: ReturnType<typeof vi.fn>;
-  deletePendingDraftsForRun: ReturnType<typeof vi.fn>; // F5 sweep
+  clearPendingForRun: Mock;       // approvalRouter
+  clearQuestionsForRun: Mock;     // questionRouter
+  managerStop: Mock;
+  deletePendingDraftsForRun: Mock; // F5 sweep
 }
 
 function makeOrderSpy(): OrderSpy {
@@ -88,15 +86,11 @@ function makeOrderSpy(): OrderSpy {
     calls.push('managerStop');
   });
 
-  const worktreeRemove = vi.fn(async (_path: string) => {
-    calls.push('worktreeRemove');
-  });
-
   const deletePendingDraftsForRun = vi.fn(async (_runId: string) => {
     calls.push('deletePendingDraftsForRun');
   });
 
-  return { calls, clearPendingForRun, clearQuestionsForRun, managerStop, worktreeRemove, deletePendingDraftsForRun };
+  return { calls, clearPendingForRun, clearQuestionsForRun, managerStop, deletePendingDraftsForRun };
 }
 
 // ---------------------------------------------------------------------------
@@ -151,16 +145,6 @@ describe('cancelAndRestartHandler', () => {
   // -------------------------------------------------------------------------
   // AC5: deny BEFORE PTY kill
   // -------------------------------------------------------------------------
-
-  it('calls clearPendingForRun BEFORE managerStop (AC5: deny before kill)', async () => {
-    const runId = randomUUID();
-    seedWorkflowAndRun(db, runId, 'stuck');
-
-    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
-
-    expect(spy.calls[0]).toBe('clearPendingForRun');
-    expect(spy.calls.indexOf('managerStop')).toBeGreaterThan(spy.calls.indexOf('clearPendingForRun'));
-  });
 
   it('calls approvalRouter.clearPendingForRun → questionRouter.clearPendingForRun → managerStop in that order', async () => {
     const runId = randomUUID();
@@ -368,6 +352,23 @@ describe('cancelAndRestartHandler', () => {
     });
   });
 
+  it('copies the immutable host_id stamp onto the restarted run (NULL stays NULL)', async () => {
+    const stamped = randomUUID();
+    seedWorkflowAndRun(db, stamped, 'stuck', '/tmp/wt-host');
+    db.prepare(`UPDATE workflow_runs SET host_id = 'host-1' WHERE id = ?`).run(stamped);
+    const r1 = await cancelAndRestartHandler(stamped, makeDeps(db, spy, runQueues));
+    if ('noOp' in r1) throw new Error('Expected a real result, got noOp');
+    const row1 = db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(r1.newRunId) as { host_id: string | null };
+    expect(row1.host_id).toBe('host-1');
+
+    const local = randomUUID();
+    seedWorkflowAndRun(db, local, 'stuck', '/tmp/wt-nohost');
+    const r2 = await cancelAndRestartHandler(local, makeDeps(db, spy, runQueues));
+    if ('noOp' in r2) throw new Error('Expected a real result, got noOp');
+    const row2 = db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(r2.newRunId) as { host_id: string | null };
+    expect(row2.host_id).toBeNull();
+  });
+
   it('leaves the replacement mix NULL for a run that carried none (never defaulted to claude)', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-nomix');
@@ -422,19 +423,6 @@ describe('cancelAndRestartHandler', () => {
 
     expect(typeof result.newRunId).toBe('string');
     expect(result.newRunId).not.toBe(runId);
-  });
-
-  // -------------------------------------------------------------------------
-  // AC7: worktree preserved — worktreeManager.remove never called
-  // -------------------------------------------------------------------------
-
-  it('does NOT call worktreeManager.remove (AC7: worktree preserved)', async () => {
-    const runId = randomUUID();
-    seedWorkflowAndRun(db, runId, 'stuck');
-
-    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
-
-    expect(spy.worktreeRemove).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------

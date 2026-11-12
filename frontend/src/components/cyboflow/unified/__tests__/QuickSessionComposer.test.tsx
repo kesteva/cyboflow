@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { useRef, useState } from 'react';
 
 // Mock the panel-model fetch + the interactive send transport + the
@@ -116,14 +116,14 @@ function makeSession(over: Partial<Session> = {}): Session {
 function Harness(props: {
   session: Session;
   interactive: boolean;
-  handleSendInput?: ReturnType<typeof vi.fn>;
-  handleContinueConversation?: ReturnType<typeof vi.fn>;
+  handleSendInput?: Mock;
+  handleContinueConversation?: Mock;
   onPermissionApplied?: (message: string) => void;
   onModelFallback?: (message: string) => void;
   onFastModeDeclined?: (message: string) => void;
   activeQuestion?: Question | null;
   working?: boolean;
-  handleStopSession?: ReturnType<typeof vi.fn>;
+  handleStopSession?: Mock;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -197,12 +197,13 @@ beforeEach(() => {
 
 describe('QuickSessionComposer — SDK', () => {
   it('routes ⌘↵ to handleContinueConversation when not waiting', async () => {
-    const cont = vi.fn();
+    const cont = vi.fn().mockResolvedValue({ success: true });
     render(<Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />);
     const textarea = screen.getByRole('textbox');
     fireEvent.change(textarea, { target: { value: 'continue this' } });
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
+    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 
   it('routes ⌘↵ to handleSendInput when status is waiting', async () => {
@@ -239,7 +240,7 @@ describe('QuickSessionComposer — SDK', () => {
 
     fireEvent.click(await screen.findByText('GPT-5.4'));
     expect(await screen.findByText('GPT-5.6 Sol')).toBeInTheDocument();
-    expect(screen.queryByText(/Fable 5.1/)).toBeNull();
+    expect(screen.queryByText(/Fable 5.2/)).toBeNull();
   });
 });
 
@@ -522,7 +523,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
         panelId: 'panel-1',
         sessionId: 's1',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });
@@ -531,7 +532,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('panel-1', 'opus'));
     // …and raised a human toast naming the swap.
     expect(onModelFallback).toHaveBeenCalledTimes(1);
-    expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5.1 is unavailable');
+    expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5.2 is unavailable');
     expect(onModelFallback.mock.calls[0][0]).toContain('Opus 5.5');
   });
 
@@ -549,7 +550,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
         panelId: 'someone-else',
         sessionId: 's9',
         unavailableAlias: 'fable',
-        unavailableLabel: 'Fable 5.1',
+        unavailableLabel: 'Fable 5.2',
         fallbackAlias: 'opus',
       });
     });
@@ -560,7 +561,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
 });
 
 describe('QuickSessionComposer — declined fast-mode toast', () => {
-  async function pushNotice(onFastModeDeclined: ReturnType<typeof vi.fn>, notice: unknown) {
+  async function pushNotice(onFastModeDeclined: Mock, notice: unknown) {
     render(
       <Harness
         session={makeSession({ status: 'stopped' })}
@@ -859,19 +860,6 @@ describe('QuickSessionComposer — pending-send (optimistic echo)', () => {
       const list = usePendingSendStore.getState().byHost[HOST] ?? [];
       expect(list.some((e) => e.status === 'failed' && e.text === 'will not queue')).toBe(true);
     });
-  });
-
-  it('uses the CONTINUE path (not the queue) when the session is IDLE', async () => {
-    const cont = vi.fn().mockResolvedValue({ success: true });
-    render(
-      <Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />,
-    );
-    const textarea = screen.getByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'idle send' } });
-    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-
-    await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
-    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 
   it('repopulates the composer from a staged draft request (reopen)', async () => {

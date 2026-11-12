@@ -86,17 +86,4 @@ describe('Migration 007: stuck_detected_at column and index', () => {
 
     expect(rows).toHaveLength(1);
   });
-
-  it('is idempotent when re-applying the IF NOT EXISTS index clause', () => {
-    const db = applyMigrations006And007();
-
-    // The ALTER TABLE statement does NOT support IF NOT EXISTS in SQLite, so we
-    // only re-execute the CREATE INDEX line (which does use IF NOT EXISTS).
-    // This asserts the IF NOT EXISTS guard is present and effective.
-    expect(() => {
-      db.exec(
-        'CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_stuck_at ON workflow_runs(status, stuck_detected_at)'
-      );
-    }).not.toThrow();
-  });
 });

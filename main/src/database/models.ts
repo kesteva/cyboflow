@@ -141,6 +141,8 @@ export interface Session {
    */
   design_idea_id?: string | null;
   /** Idea this session is the persistent home for (migration 113; idea sessions feature). NO FK. */
+  /** Execution host (migration 152). NULL = This Mac (legacy). Nothing stamps it in M1. */
+  host_id?: string | null;
   home_idea_id?: string | null;
   /** Idea whose launch minted this session (migration 114; sidebar nesting lineage). NO FK. */
   origin_idea_id?: string | null;

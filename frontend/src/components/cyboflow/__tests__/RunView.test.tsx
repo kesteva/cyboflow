@@ -296,23 +296,19 @@ describe('RunView', () => {
   // Additional edge-case tests
   // -------------------------------------------------------------------------
 
-  it('routes a retired api_retry payload to UnknownEventRow — Unrecognized event', async () => {
-    const event: StreamEvent = {
-      type: 'unknown',
-      payload: { type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 5, retry_delay_ms: 1000 },
-      timestamp: '2026-05-20T00:00:10Z',
-    };
-    renderWithEvents([event]);
-    expect(await screen.findByText(/Unrecognized event/)).toBeInTheDocument();
-    expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);
-  });
-
-  it('routes a retired compact payload to UnknownEventRow — Unrecognized event', async () => {
-    const event: StreamEvent = {
-      type: 'unknown',
-      payload: { type: 'system', subtype: 'compact', summary: 'Context compacted after 50k tokens.' },
-      timestamp: '2026-05-20T00:00:11Z',
-    };
+  it.each([
+    [
+      'api_retry',
+      { type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 5, retry_delay_ms: 1000 },
+      '2026-05-20T00:00:10Z',
+    ],
+    [
+      'compact',
+      { type: 'system', subtype: 'compact', summary: 'Context compacted after 50k tokens.' },
+      '2026-05-20T00:00:11Z',
+    ],
+  ])('routes a retired %s payload to UnknownEventRow — Unrecognized event', async (_name, payload, timestamp) => {
+    const event: StreamEvent = { type: 'unknown', payload, timestamp };
     renderWithEvents([event]);
     expect(await screen.findByText(/Unrecognized event/)).toBeInTheDocument();
     expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);

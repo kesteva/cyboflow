@@ -24,6 +24,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
+import { CLI_TOOLS } from '../../../../../shared/types/cliTools';
 import type {
   WorkflowGalleryEntry,
   AgentGalleryEntry,
@@ -452,7 +453,7 @@ describe('AgentCard', () => {
 
   it('shows tools count as "N of 8" and omits tokens when the estimate is null', () => {
     render(<AgentCard entry={buildAgentEntry({ tools: ['Read', 'Edit', 'Bash'], tokensEstimate: null })} />);
-    expect(screen.getByText(/of/)).toBeInTheDocument();
+    expect(screen.getByText(/of/).closest('span')).toHaveTextContent(`3 of ${CLI_TOOLS.length} tools`);
     expect(screen.queryByTestId('agent-card-tokens')).not.toBeInTheDocument();
   });
 

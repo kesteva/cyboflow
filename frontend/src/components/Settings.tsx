@@ -34,6 +34,7 @@ import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMod
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import { useConfigStore } from '../stores/configStore';
 import { usePersistentAgentsStore } from '../stores/persistentAgentsStore';
+import { useHostsStore } from '../stores/hostsStore';
 import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore';
 import {
   Sun,
@@ -271,6 +272,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [agentsEnabled, setAgentsEnabled] = useState(false);
   // Read-only: App owns the persistent-agents store's init(); Settings never calls it.
   const agentsStatus = usePersistentAgentsStore((s) => s.featureStatus);
+  const [environmentsEnabled, setEnvironmentsEnabled] = useState(false);
+  // Read-only: App owns the hosts store's init(); Settings never calls it.
+  const hostsStatus = useHostsStore((s) => s.featureStatus);
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
   const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState<number | ''>(5);
@@ -370,6 +374,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       );
       setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
       setAgentsEnabled(data.agents?.enabled === true);
+      setEnvironmentsEnabled(data.environments?.enabled === true);
       setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
 
       // Load additional paths
@@ -496,6 +501,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // fail the whole save. The spread keeps unknown future members.
         ...(agentsStatus?.devBuild === true
           ? { agents: { ..._config?.agents, enabled: agentsEnabled } }
+          : {}),
+        // Environments: same posture — the key is sent ONLY when main says the feature is available.
+        ...(hostsStatus?.available === true
+          ? { environments: { ..._config?.environments, enabled: environmentsEnabled } }
           : {}),
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
@@ -959,6 +968,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               agentsEnabled={agentsEnabled}
               onAgentsEnabledChange={setAgentsEnabled}
               agentsKillSwitch={agentsStatus?.killed === true}
+              environmentsAvailable={hostsStatus?.available === true}
+              environmentsEnabled={environmentsEnabled}
+              onEnvironmentsEnabledChange={setEnvironmentsEnabled}
+              environmentsKillSwitch={hostsStatus?.killed === true}
             />
 
             <SessionSettings

@@ -22,30 +22,33 @@ describe('validateInput', () => {
     }
   });
 
-  it('non-finite number (NaN) → { ok: false, error names field }', () => {
-    const schema = z.object({ projectId: z.number().finite() });
-    const result = validateInput(schema, { projectId: NaN }, 'cyboflow:listRuns');
+  it.each<{ name: string; schema: z.ZodType; args: unknown; channel: string; field: RegExp }>([
+    {
+      name: 'non-finite number (NaN)',
+      schema: z.object({ projectId: z.number().finite() }),
+      args: { projectId: NaN },
+      channel: 'cyboflow:listRuns',
+      field: /projectId/,
+    },
+    {
+      name: 'missing key',
+      schema: z.object({ projectId: z.number().finite() }),
+      args: {},
+      channel: 'cyboflow:listRuns',
+      field: /projectId/,
+    },
+    {
+      name: 'empty string',
+      schema: z.object({ workflowId: z.string().min(1) }),
+      args: { workflowId: '' },
+      channel: 'cyboflow:startRun',
+      field: /workflowId/,
+    },
+  ])('$name → { ok: false, error names field }', ({ schema, args, channel, field }) => {
+    const result = validateInput(schema, args, channel);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toMatch(/projectId/);
-    }
-  });
-
-  it('missing key → { ok: false, error names field }', () => {
-    const schema = z.object({ projectId: z.number().finite() });
-    const result = validateInput(schema, {}, 'cyboflow:listRuns');
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/projectId/);
-    }
-  });
-
-  it('empty string → { ok: false, error names field }', () => {
-    const schema = z.object({ workflowId: z.string().min(1) });
-    const result = validateInput(schema, { workflowId: '' }, 'cyboflow:startRun');
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/workflowId/);
+      expect(result.error).toMatch(field);
     }
   });
 });

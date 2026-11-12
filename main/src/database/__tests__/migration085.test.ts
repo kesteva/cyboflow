@@ -44,12 +44,6 @@ function buildDb(): Database.Database {
 }
 
 describe('Migration 085: review_items.audience (human/machine)', () => {
-  it('applies cleanly on a fresh DB', () => {
-    const db = buildDb();
-    expect(() => runMigrationViaProductionPath(db, readMigration('085_review_item_audience.sql'))).not.toThrow();
-    db.close();
-  });
-
   it('adds a NOT NULL audience column defaulting to human (PRAGMA table_info)', () => {
     const db = buildDb();
     runMigrationViaProductionPath(db, readMigration('085_review_item_audience.sql'));

@@ -5,7 +5,7 @@
  * dedup, the three short-circuits, sample persistence + retry-drop, recover, the
  * decision-review-item mint, and the status guards.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
@@ -144,7 +144,7 @@ function panelOf(judge: PairwiseJudgeClient, size = 3): PairwisePanelSlot[] {
 
 /** Spy logger — the degradation warns are part of the contract, so they must be observable. */
 type SpyLogger = {
-  [K in keyof LoggerLike]: ReturnType<typeof vi.fn>;
+  [K in keyof LoggerLike]: Mock;
 };
 
 function makeWorker(
@@ -152,9 +152,9 @@ function makeWorker(
   over: Partial<PairwiseJudgeWorkerDeps> = {},
 ): {
   worker: PairwiseJudgeWorker;
-  reviewItemWriter: ReturnType<typeof vi.fn>;
-  emitComparisonReady: ReturnType<typeof vi.fn>;
-  gitDiff: ReturnType<typeof vi.fn>;
+  reviewItemWriter: Mock;
+  emitComparisonReady: Mock;
+  gitDiff: Mock;
   logger: SpyLogger;
 } {
   const reviewItemWriter = vi.fn(async () => ({ reviewItemId: 'rvw_x' }));

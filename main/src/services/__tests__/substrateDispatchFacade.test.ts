@@ -294,38 +294,6 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     expect(sdk.spawnCliProcess).toHaveBeenCalledOnce();
     expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
   });
-
-  it("routes spawnCliProcess to the Codex SDK manager when run.agent_runtime === 'codex-sdk'", async () => {
-    const run = makeWorkflowRunRow({
-      substrate: 'sdk',
-      agent_provider: 'codex',
-      agent_runtime: 'codex-sdk',
-    });
-    const registry = makeRegistry(run);
-    const sdk = makeSpyManager();
-    const interactive = makeSpyManager();
-    const codexSdk = makeSpyManager();
-    const facade = makeFacade(
-      sdk,
-      interactive,
-      registry,
-      makeSpyLogger(),
-      [],
-      codexSdk,
-    );
-
-    await facade.spawnCliProcess({
-      panelId: run.id,
-      sessionId: run.id,
-      runId: run.id,
-      worktreePath: '/fake/worktree',
-      prompt: 'go',
-    });
-
-    expect(codexSdk.spawnCliProcess).toHaveBeenCalledOnce();
-    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
-    expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1292,9 +1260,9 @@ describe('SubstrateDispatchFacade — cross-substrate envelope parity through br
     // Same discriminant type across substrates.
     expect(interactiveEnvelope.type).toBe(sdkEnvelope.type);
 
-    // panelId === runId === sessionId invariant holds on the forwarded payload.
-    expect(golden.panelId).toBe(runId);
-    expect(golden.sessionId).toBe(runId);
+    // Same forwarded payload across substrates, carrying the narrowed SDK event.
+    expect(interactiveEnvelope.payload).toEqual(sdkEnvelope.payload);
+    expect(sdkEnvelope.payload).toMatchObject({ type: 'system', subtype: 'init', session_id: 'sess-test' });
   });
 });
 

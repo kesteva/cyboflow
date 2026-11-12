@@ -115,8 +115,20 @@ describe('timerCensus (enabled)', () => {
     // dropped fires would be unrecoverable and the reported rate would be
     // systematically low exactly when the process is busiest.
     const mod = await installEnabled();
+    // Sites are keyed by file:line and frames from this file are skipped (its
+    // name contains "timerCensus"), so schedule from a sourceURL'd script with
+    // each call on its own line.
+    let fired = 0;
+    const tick = () => {
+      fired += 1;
+    };
+    const calls = Array.from({ length: 9 }, () => 'setTimeout(tick, 1);').join('\n');
+    new Function('setTimeout', 'tick', `${calls}\n//# sourceURL=/virtual/sites.js`)(globalThis.setTimeout, tick);
+    await new Promise((resolve) => realSetTimeout(resolve, 50));
+    expect(fired).toBe(9);
     const rows = mod.drainTimerCensus();
-    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.length).toBeGreaterThanOrEqual(9);
+    expect(rows.reduce((sum, row) => sum + row.fires, 0)).toBe(9);
     // Truncation belongs to the formatter, which says what it elided.
     const many = Array.from({ length: 10 }, (_, i) => ({
       site: `site${i}`,

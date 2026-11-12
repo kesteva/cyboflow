@@ -119,12 +119,6 @@ afterEach(() => {
 const caller = () => appRouter.createCaller(createContext()).cyboflow.worktreeMonitor;
 
 describe('cyboflow.worktreeMonitor wiring', () => {
-  it('is registered on the appRouter', () => {
-    expect(typeof caller().registry).toBe('function');
-    expect(typeof caller().diskUsage).toBe('function');
-    expect(typeof caller().requestFresh).toBe('function');
-  });
-
   it('rejects with PRECONDITION_FAILED when no provider is wired', async () => {
     setWorktreeMonitorProvider(null);
     await expect(caller().registry({ projectId })).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
@@ -144,13 +138,6 @@ describe.skipIf(process.platform === 'win32')('cyboflow.worktreeMonitor.registry
     expect(byPath.get(wtPath('run-wt'))).toMatchObject({ tag: 'run-owned', prunable: true, runId: 'r-1' });
     expect(byPath.get(wtPath('orphan-wt'))).toMatchObject({ tag: 'orphan', prunable: true });
     expect(byPath.get(wtPath('inplace-wt'))).toMatchObject({ tag: 'in_place', prunable: false });
-  });
-
-  it('never marks an in_place / is_main_repo entry prunable', async () => {
-    const { worktrees } = await caller().registry({ projectId });
-    const guarded = worktrees.filter((w) => w.tag === 'in_place' || w.tag === 'is_main_repo');
-    expect(guarded.length).toBeGreaterThanOrEqual(2);
-    for (const w of guarded) expect(w.prunable).toBe(false);
   });
 
   it('keeps the main checkout non-prunable even when no session row owns it', async () => {

@@ -42,6 +42,7 @@ import { useDesignModeStore } from './stores/designModeStore';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useAgentThreadStore } from './stores/agentThreadStore';
 import { usePersistentAgentsStore, useAgentsEnvAvailable } from './stores/persistentAgentsStore';
+import { useHostsStore } from './stores/hostsStore';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useOmpFleetStore } from './stores/ompFleetStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
@@ -233,6 +234,7 @@ function App() {
   // Persistent agents store (feature status gate, agents list, thread subscriptions). App owns init; Settings
   // and the pane only read. The cloud store is NOT initialised here: each cloud consumer takes its own ref.
   useEffect(() => usePersistentAgentsStore.getState().init(), []);
+  useEffect(() => useHostsStore.getState().init(), []);
 
   // Load config on app startup
   useEffect(() => {
@@ -380,9 +382,9 @@ function App() {
               system → agentsEnv (only while the feature is running) → backlog →
               projectOverview (needs activeProjectId) → LandingHome. The
               navigationStore mutual-exclusion invariant guarantees at most one
-              overlay flag is set, so the order is just a tiebreaker. focusQueue
-              scrolls LandingHome to its review queue when the user arrived from
-              the human-review rail affordance. */}
+              overlay flag is set, so the order is just a tiebreaker. LandingHome
+              always opens at the top of the page, including when the user
+              arrived from the human-review rail affordance. */}
         <div className="flex flex-col flex-1 overflow-hidden">
           {guidedShell !== 'none' ? (
             <GuidedSetupSurface />
@@ -496,7 +498,7 @@ function App() {
                 </div>
               </div>
             )}>
-              <LandingHome focusQueue={showHumanReview} />
+              <LandingHome />
             </ErrorBoundary>
           )}
         </div>

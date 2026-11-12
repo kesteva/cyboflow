@@ -396,21 +396,16 @@ describe('chatSentinelProvider', () => {
     expect(runStatus(db, 'flow-nonquick-10')).toBe('failed');
   });
 
-  it('REJECTS a chat turn while the session run_id flow run is non-terminal (chat-during-active-flow)', () => {
-    seedFlowRun(db, 'flow-live-3', 'running');
-    seedSession(db, { id: 'sess-blocked', runId: 'flow-live-3', chatRunId: 'chat-3' });
-    seedQuickSentinel(db, 'chat-3', 'awaiting_review');
+  it.each(['running', 'awaiting_review'])(
+    'REJECTS a chat turn while the session run_id flow run is non-terminal (%s) (chat-during-active-flow)',
+    (flowStatus) => {
+      seedFlowRun(db, `flow-live-${flowStatus}`, flowStatus);
+      seedSession(db, { id: `sess-blocked-${flowStatus}`, runId: `flow-live-${flowStatus}`, chatRunId: `chat-${flowStatus}` });
+      seedQuickSentinel(db, `chat-${flowStatus}`, 'awaiting_review');
 
-    expect(() => provider('sess-blocked')).toThrow(ChatDuringActiveFlowError);
-  });
-
-  it('does NOT reject when the flow run is awaiting_input/stuck → only terminal exempts; running blocks', () => {
-    // A non-terminal flow run (awaiting_review) blocks — the guard is "non-terminal".
-    seedFlowRun(db, 'flow-rest-4', 'awaiting_review');
-    seedSession(db, { id: 'sess-rest', runId: 'flow-rest-4', chatRunId: 'chat-4' });
-    seedQuickSentinel(db, 'chat-4', 'awaiting_review');
-    expect(() => provider('sess-rest')).toThrow(ChatDuringActiveFlowError);
-  });
+      expect(() => provider(`sess-blocked-${flowStatus}`)).toThrow(ChatDuringActiveFlowError);
+    },
+  );
 
   it('does NOT trip the guard for a TERMINAL flow run (chat proceeds)', () => {
     seedFlowRun(db, 'flow-done-5', 'canceled');

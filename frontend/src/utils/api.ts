@@ -517,7 +517,7 @@ export class API {
 
 
   static models = {
-    /** Snapshot of guarded-model (Fable 5.1) availability. Empty map = all usable. */
+    /** Snapshot of guarded-model (Fable 5.2) availability. Empty map = all usable. */
     async getAvailability() {
       // Guard the `models` surface too: a preload version skew (older bridge)
       // should degrade to optimistic, not crash the picker.

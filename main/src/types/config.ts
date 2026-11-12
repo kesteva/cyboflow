@@ -2,6 +2,7 @@ import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/ag
 import type { AssistantContextRetention, AssistantRuntime } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { AgentsConfig } from '../../../shared/types/persistentAgents';
+import type { HostsConfig } from '../../../shared/types/hosts';
 import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -250,6 +251,9 @@ export interface AppConfig {
   // only when isDevBuild() — read it via ConfigManager.isAgentsEnabled(), never directly. Deep-merged and
   // rejected-in-release at the config boundary (ipc/configOps.ts). Not seeded into defaults.
   agents?: AgentsConfig;
+  // Environments (see shared/types/hosts.ts HostsConfig). DEV BUILDS ONLY, same rules as `agents`: read it via
+  // ConfigManager.isEnvironmentsEnabled(); rejected-in-release at the config boundary. Not seeded into defaults.
+  environments?: HostsConfig;
   // cyboflow cloud origin override, DEV BUILDS ONLY, hand-edited in config.json (no UI, not in
   // UpdateConfigRequest, stripped by configOps): 'staging' | 'production' | an https origin |
   // http://127.0.0.1:<port>. Read via ConfigManager.getCloudOrigin().
@@ -391,6 +395,8 @@ export interface UpdateConfigRequest {
   idleSessionReview?: IdleSessionReviewConfig;
   // Agents & Environments gate (see AppConfig.agents). Dev builds only; configOps rejects it in release.
   agents?: AgentsConfig;
+  // Environments gate (see AppConfig.environments). Dev builds only; configOps rejects it in release.
+  environments?: HostsConfig;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

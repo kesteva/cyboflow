@@ -267,17 +267,3 @@ describe('why migration 120 backfills instead of leaning on the read-side COALES
     expect(boardIdleSince('stamped')).toBe('2026-01-01T00:00:00Z');
   });
 });
-
-describe('the board read', () => {
-  it('COALESCEs a NULL idle_since (a busy row) back to updated_at', () => {
-    createSession('s1', { status: 'completed', idleSince: null });
-    const row = db
-      .getDb()
-      .prepare(
-        `SELECT strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(idle_since, updated_at)) AS idle_since_iso
-           FROM sessions WHERE id = ?`,
-      )
-      .get('s1') as { idle_since_iso: string };
-    expect(row.idle_since_iso).toBe('2026-01-01T00:00:00Z');
-  });
-});

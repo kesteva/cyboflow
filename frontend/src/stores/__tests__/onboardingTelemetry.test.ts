@@ -46,18 +46,6 @@ describe('onboardingTelemetry — step-name table', () => {
       'launching', // 14
     ]);
   });
-
-  it('carries the Model slug at index 3, between the Default-agent and Permission steps', () => {
-    expect(ONBOARDING_STEP_NAMES[2]).toBe('default_runtime');
-    expect(ONBOARDING_STEP_NAMES[3]).toBe('model');
-    expect(ONBOARDING_STEP_NAMES[4]).toBe('permission');
-  });
-
-  it('drops every retired coachmark slug', () => {
-    for (const gone of ['quick_session', 'substrate', 'session_permission', 'ship', 'human_review', 'rail_map']) {
-      expect(ONBOARDING_STEP_NAMES).not.toContain(gone);
-    }
-  });
 });
 
 describe('onboardingTelemetry — step-group constants (modal/guided)', () => {
@@ -67,12 +55,6 @@ describe('onboardingTelemetry — step-group constants (modal/guided)', () => {
 
   it('ONBOARDING_GUIDED_STEPS is exactly the eight full-window set-up screens', () => {
     expect(ONBOARDING_GUIDED_STEPS).toEqual([7, 8, 9, 10, 11, 12, 13, 14]);
-  });
-
-  it('modal and guided sets partition the 15 steps with no overlap and no gaps', () => {
-    const all = [...ONBOARDING_MODAL_STEPS, ...ONBOARDING_GUIDED_STEPS].sort((a, b) => a - b);
-    expect(all).toEqual(Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i));
-    expect(new Set(all).size).toBe(ONBOARDING_STEP_COUNT);
   });
 });
 

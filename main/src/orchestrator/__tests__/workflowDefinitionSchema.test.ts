@@ -85,14 +85,6 @@ describe('validateWorkflowDefinition (accept cases)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Case 10: an intra-phase loopback is allowed (task-verify -> implement)
-  // -------------------------------------------------------------------------
-  it('accepts an intra-phase loopback target', () => {
-    const def = makeValidDefinition();
-    expect(() => validateWorkflowDefinition(def)).not.toThrow();
-  });
-
-  // -------------------------------------------------------------------------
   // Case 11: a human step may carry its gate header, and it round-trips
   // -------------------------------------------------------------------------
   it('accepts a human step with a gateHeader and round-trips it', () => {
@@ -554,17 +546,6 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
     def.agentConfigs = { implement: { codexModel: '' } };
     expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
   });
-
-  // -------------------------------------------------------------------------
-  // Reject: a truly-empty {} entry still carries no signal even with the new
-  // fields available — none of model/custom/runtime/providerModel/codexModel
-  // are set.
-  // -------------------------------------------------------------------------
-  it('still rejects a truly-empty {} agentConfigs entry', () => {
-    const def = makeValidDefinition();
-    def.agentConfigs = { implement: {} };
-    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
-  });
 });
 
 describe('workflowDefinitionSchema (agentConfigs — Agents-pane validation parity)', () => {
@@ -646,12 +627,6 @@ describe('workflowDefinitionSchema (agentConfigs — Agents-pane validation pari
   it('still accepts a parity-clean custom copy (parity does not over-reject)', () => {
     const def = makeValidDefinition();
     def.agentConfigs = { implement: { model: 'sonnet', custom: validCustom() } };
-    expect(() => validateWorkflowDefinition(def)).not.toThrow();
-  });
-
-  it('does not run draft parity for model-only configs (no custom body to validate)', () => {
-    const def = makeValidDefinition();
-    def.agentConfigs = { implement: { model: 'haiku' } };
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
 });

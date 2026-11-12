@@ -33,7 +33,9 @@ test('Agents & Environments pane opens behind the flag and switches tabs', async
   await expect(page.locator('[data-testid="agents-empty"]')).toBeVisible();
   await expect(page.locator('[data-testid="rail-persistent-agents"]')).toHaveCount(0);
   await page.locator('[data-testid="agents-env-tab-environments"]').click();
-  await expect(page.locator('[data-testid="environments-placeholder"]')).toBeVisible();
+  // `environments.enabled` is unset in the fresh config, so the tab shows its off state (no host
+  // preflight, no network).
+  await expect(page.locator('[data-testid="environments-off"]')).toBeVisible();
   await item.click();
   await expect(page.locator('[data-testid="agents-env-view"]')).toHaveCount(0);
 });

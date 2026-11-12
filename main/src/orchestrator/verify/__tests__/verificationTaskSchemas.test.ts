@@ -430,6 +430,8 @@ describe('normalizeVerificationReportV1', () => {
   };
 
   it('accepts a valid pass report', () => {
+    // Also covers a report that reports only a subset of the expected ids: b2 is expected
+    // but not reported — that is the runner's concern, not this validator's.
     const result = normalizeVerificationReportV1(VALID_REPORT, EXPECTED_IDS);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -475,12 +477,6 @@ describe('normalizeVerificationReportV1', () => {
     const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/unknown behavior id "unknown-id"/);
-  });
-
-  it('allows a report that covers only a subset of expected behavior ids', () => {
-    // b2 is expected but not reported — that is the runner's concern, not this validator's.
-    const result = normalizeVerificationReportV1(VALID_REPORT, EXPECTED_IDS);
-    expect(result.ok).toBe(true);
   });
 
   it('requires buildLogExcerpt when outcome is build_failed', () => {

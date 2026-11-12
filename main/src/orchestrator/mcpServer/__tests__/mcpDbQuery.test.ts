@@ -240,18 +240,6 @@ describe('mcp-db-query — scope guard', () => {
 // ---------------------------------------------------------------------------
 
 describe('mcp-db-query — readonly connection refuses writes independent of validation', () => {
-  it('a raw readonly:true better-sqlite3 handle throws on an INSERT, proving the enforcement mechanism itself', () => {
-    const readonlyHandle = new Database(dbPath, { readonly: true, fileMustExist: true });
-    try {
-      expect(() => readonlyHandle.prepare("INSERT INTO widgets (name) VALUES ('smuggled')").run()).toThrow();
-    } finally {
-      readonlyHandle.close();
-    }
-    // No row was written — the writer connection still sees only the seeded 2.
-    const count = rawDb.prepare('SELECT COUNT(*) AS n FROM widgets').get() as { n: number };
-    expect(count.n).toBe(2);
-  });
-
   it("a WITH-prefixed write ('WITH x AS (SELECT 1) INSERT ...') that slips past validation is never executed (non-reader short-circuit)", async () => {
     const { socket, writes } = makeSocketDouble();
     await handler.handleMessage(

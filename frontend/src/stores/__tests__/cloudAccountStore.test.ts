@@ -154,6 +154,7 @@ describe('cloudAccountStore', () => {
     init();
     await flush();
     expect(unlockMutate).toHaveBeenCalledWith({ explicitRetry: false });
+    expect(refreshMutate).not.toHaveBeenCalled();
   });
 
   it('signIn rejection sets actionError', async () => {
