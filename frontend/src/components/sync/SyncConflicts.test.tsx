@@ -88,7 +88,7 @@ function conflict(over: Partial<RemoteSyncConflict> = {}): RemoteSyncConflict {
     changedSince: false,
     currentNow: 'Mine',
     actions: ['keep', 'use_other', 'merge'],
-    taskLabels: {},
+    edges: null,
     ...over,
   };
 }
@@ -257,7 +257,10 @@ describe('sync conflicts UI', () => {
           field: 'depends_on',
           actions: ['keep', 'swap'],
           extra: { removedEdge: { taskId: 'ta', dependsOnId: 'tb' }, keptEdge: { taskId: 'tb', dependsOnId: 'ta' } },
-          taskLabels: { ta: 'TASK-1 Cut the branch', tb: 'TASK-2 Tag the build' },
+          edges: {
+            removed: { task: 'TASK-1 Cut the branch', dependsOn: 'TASK-2 Tag the build' },
+            kept: { task: 'TASK-2 Tag the build', dependsOn: 'TASK-1 Cut the branch' },
+          },
         }),
       );
       const edges = screen.getByTestId('sync-conflict-edges');
@@ -267,6 +270,21 @@ describe('sync conflicts UI', () => {
       await waitFor(() =>
         expect(m.resolveConflict).toHaveBeenCalledWith({ conflictId: 'c1', action: { kind: 'swap' } }),
       );
+    });
+
+    it('lists a lone removed edge, naming a task that is gone here', () => {
+      openDialogFor(
+        conflict({
+          kind: 'dependency_edge',
+          field: 'depends_on',
+          actions: ['keep'],
+          edges: { removed: { task: 'TASK-1 Cut the branch', dependsOn: null }, kept: null },
+        }),
+      );
+      const edges = screen.getByTestId('sync-conflict-edges');
+      expect(edges).toHaveTextContent('Removed: TASK-1 Cut the branch depends on a deleted task');
+      expect(edges).not.toHaveTextContent('Kept:');
+      expect(edges).toHaveTextContent('A dependency added on another machine at the same time made a cycle.');
     });
 
     it('sends use_other', async () => {

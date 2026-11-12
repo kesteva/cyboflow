@@ -161,7 +161,10 @@ describe('dependency edge', () => {
     // A client-filed record has no title: the view names the item from the local copy.
     expect(open()[0]).toMatchObject({ actions: ['keep', 'swap'], entityTitle: 'a' });
     const refOf = (id: string) => (db.prepare('SELECT ref FROM tasks WHERE id = ?').get(id) as { ref: string }).ref;
-    expect(open()[0].taskLabels).toEqual({ [a]: `${refOf(a)} a`, [b]: `${refOf(b)} b` });
+    expect(open()[0].edges).toEqual({
+      removed: { task: `${refOf(a)} a`, dependsOn: `${refOf(b)} b` },
+      kept: { task: `${refOf(b)} b`, dependsOn: `${refOf(a)} a` },
+    });
     expect(await resolveConflict(deps, 'e1', { kind: 'swap' })).toMatchObject({ ok: true });
     expect(edges()).toEqual([{ t: a, d: b }]);
     expect(store.listPendingResolutions(projectId)).toEqual([{ id: 'e1', resolution: 'swapped' }]);

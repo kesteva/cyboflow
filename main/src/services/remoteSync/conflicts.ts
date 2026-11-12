@@ -19,6 +19,7 @@ import type { ConflictRecord, ConflictSide } from '../../../../shared/types/remo
 import type {
   RemoteSyncConflict,
   RemoteSyncConflictAction,
+  RemoteSyncConflictEdge,
   RemoteSyncConflictSide,
 } from '../../../../shared/types/remoteSync';
 import type { EntityCategory, IdeaScope, Priority, TaskExecutor } from '../../../../shared/types/tasks';
@@ -100,15 +101,14 @@ function toView(
   storedType: SyncedEntityType | null,
 ): RemoteSyncConflict {
   const entityType = localTypeOf(deps.db, r.entityId) ?? storedType ?? entityTypeOf(deps.db, r);
+  const local = entityType ? readEntityProjection(deps.db, projectId, entityType, r.entityId) : null;
   let changedSince = false;
   let currentNow: unknown = null;
-  if (r.kind === 'field' && r.field && entityType) {
-    const local = readEntityProjection(deps.db, projectId, entityType, r.entityId);
-    if (local && r.field in local.fields) {
-      currentNow = local.fields[r.field];
-      changedSince = canonicalJson(currentNow) !== canonicalJson(r.current.value);
-    }
+  if (r.kind === 'field' && r.field && local && r.field in local.fields) {
+    currentNow = local.fields[r.field];
+    changedSince = canonicalJson(currentNow) !== canonicalJson(r.current.value);
   }
+  const localTitle = local?.fields.title;
   return {
     id: r.id,
     projectId,
@@ -116,12 +116,7 @@ function toView(
     entityType,
     entityRef: r.entityRef,
     // Client-filed records (a cycle repair) carry no title: name the item from this machine's copy.
-    entityTitle:
-      typeof r.entityTitle === 'string'
-        ? r.entityTitle
-        : entityType
-          ? ((readEntityProjection(deps.db, projectId, entityType, r.entityId)?.fields.title as string | undefined) ?? null)
-          : null,
+    entityTitle: typeof r.entityTitle === 'string' ? r.entityTitle : typeof localTitle === 'string' ? localTitle : null,
     kind: r.kind,
     field: r.field ?? null,
     current: side(deps, r.current),
@@ -133,8 +128,8 @@ function toView(
     pendingResolution,
     changedSince,
     currentNow,
-    actions: actionsFor(deps.db, projectId, r, entityType),
-    taskLabels: r.kind === 'dependency_edge' ? taskLabelsOf(deps.db, projectId, r) : {},
+    actions: actionsFor(deps.db, r, local !== null),
+    edges: r.kind === 'dependency_edge' ? edgeLabelsOf(deps.db, projectId, r) : null,
   };
 }
 
@@ -149,13 +144,12 @@ function side(deps: ConflictDeps, s: ConflictSide): RemoteSyncConflictSide {
   };
 }
 
-function actionsFor(db: DatabaseLike, projectId: number, r: ConflictRecord, type: SyncedEntityType | null): RemoteSyncConflictAction['kind'][] {
+/** `exists`: the conflict's item is still here. */
+function actionsFor(db: DatabaseLike, r: ConflictRecord, exists: boolean): RemoteSyncConflictAction['kind'][] {
   switch (r.kind) {
-    case 'field': {
-      const exists = type !== null && readEntityProjection(db, projectId, type, r.entityId) !== null;
+    case 'field':
       if (!exists || !r.field || !WRITABLE_FIELDS.has(r.field)) return ['keep'];
       return MERGEABLE_FIELDS.has(r.field) ? ['keep', 'use_other', 'merge'] : ['keep', 'use_other'];
-    }
     case 'delete_vs_edit':
       return ['keep', 'recreate'];
     case 'orphaned':
@@ -312,27 +306,32 @@ interface Edge {
   dependsOnId: string;
 }
 
+function edgeOf(value: unknown): Edge | null {
+  const e = value as Partial<Edge> | null | undefined;
+  return typeof e?.taskId === 'string' && typeof e.dependsOnId === 'string' ? { taskId: e.taskId, dependsOnId: e.dependsOnId } : null;
+}
+
 /** A dependency_edge record's removed and kept edges; null when either is missing. */
 function edgesOf(c: Pick<ConflictRecord, 'extra'>): { removed: Edge; kept: Edge } | null {
-  const extra = c.extra as { removedEdge?: Partial<Edge>; keptEdge?: Partial<Edge> } | null | undefined;
-  const edge = (e: Partial<Edge> | undefined): Edge | null =>
-    typeof e?.taskId === 'string' && typeof e.dependsOnId === 'string' ? { taskId: e.taskId, dependsOnId: e.dependsOnId } : null;
-  const removed = edge(extra?.removedEdge);
-  const kept = edge(extra?.keptEdge);
+  const extra = c.extra as { removedEdge?: unknown; keptEdge?: unknown } | null | undefined;
+  const removed = edgeOf(extra?.removedEdge);
+  const kept = edgeOf(extra?.keptEdge);
   return removed && kept ? { removed, kept } : null;
 }
 
-/** "REF title" for the tasks a dependency_edge record's edges name, where they exist here. */
-function taskLabelsOf(db: DatabaseLike, projectId: number, c: Pick<ConflictRecord, 'extra'>): Record<string, string> {
-  const extra = c.extra as { removedEdge?: Partial<Edge>; keptEdge?: Partial<Edge> } | null | undefined;
-  const ids = [extra?.removedEdge, extra?.keptEdge].flatMap((e) => [e?.taskId, e?.dependsOnId]).filter((id): id is string => typeof id === 'string');
-  const labels: Record<string, string> = {};
+/** A dependency_edge record's edges as display text: each task's "REF title", null where it is gone here. */
+function edgeLabelsOf(db: DatabaseLike, projectId: number, c: Pick<ConflictRecord, 'extra'>): RemoteSyncConflict['edges'] {
+  const extra = c.extra as { removedEdge?: unknown; keptEdge?: unknown } | null | undefined;
   const stmt = db.prepare('SELECT ref, title FROM tasks WHERE id = ? AND project_id = ?');
-  for (const id of new Set(ids)) {
+  const label = (id: string): string | null => {
     const row = stmt.get(id, projectId) as { ref: string; title: string } | undefined;
-    if (row) labels[id] = `${row.ref} ${row.title}`;
-  }
-  return labels;
+    return row ? `${row.ref} ${row.title}` : null;
+  };
+  const text = (value: unknown): RemoteSyncConflictEdge | null => {
+    const e = edgeOf(value);
+    return e ? { task: label(e.taskId), dependsOn: label(e.dependsOnId) } : null;
+  };
+  return { removed: text(extra?.removedEdge), kept: text(extra?.keptEdge) };
 }
 
 function childrenOf(c: Pick<ConflictRecord, 'extra'>): Array<{ id: string; type: SyncedEntityType }> {

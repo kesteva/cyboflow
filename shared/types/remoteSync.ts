@@ -143,6 +143,12 @@ export type RemoteSyncConflictAction =
  * something the user did not see happen. Conflicts apply automatically; this
  * is the record the user reviews.
  */
+/** One dependency as display text: each task's "REF title", or null where it no longer exists on this machine. */
+export interface RemoteSyncConflictEdge {
+  task: string | null;
+  dependsOn: string | null;
+}
+
 export interface RemoteSyncConflict {
   id: string;
   projectId: number;
@@ -172,8 +178,8 @@ export interface RemoteSyncConflict {
   currentNow: unknown;
   /** The actions this conflict offers, the default first. */
   actions: RemoteSyncConflictAction['kind'][];
-  /** dependency_edge: "REF title" for each task its edges name that exists here, by task id. */
-  taskLabels: Record<string, string>;
+  /** dependency_edge: the edge the cycle repair removed and the one it kept; null for other kinds. */
+  edges: { removed: RemoteSyncConflictEdge | null; kept: RemoteSyncConflictEdge | null } | null;
 }
 
 export type RemoteSyncResolveResult = { ok: true } | { ok: false; message: string };
