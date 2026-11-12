@@ -148,7 +148,8 @@ describe('RemoteArtifactFetcher gates and validation', () => {
     expect(calls.length).toBe(0);
   });
 
-  it('refuses an unsafe relative path before any remote call', async () => {
+  // The fixture's remote root is a local temp dir, which is not a POSIX absolute path on Windows.
+  it.skipIf(!posix)('refuses an unsafe relative path before any remote call', async () => {
     for (const rel of ['../x.png', '/etc/passwd', 'a//b.png', 'a\\b.png']) {
       await expect(
         fetcher().fetch({ hostId: 'h1', runKey: 'run-1', relPaths: [rel], localDir: local, maxBytes: 10 }),

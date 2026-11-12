@@ -227,7 +227,8 @@ class ScriptedTransport implements Transport {
   }
 }
 
-describe('pushToolchain ordering and failures (scripted transport)', () => {
+// Each case's remote root is a local temp dir, which is not a POSIX absolute path on Windows.
+describe.runIf(posix)('pushToolchain ordering and failures (scripted transport)', () => {
   it('serialises pushes per host but lets different hosts run in parallel', async () => {
     const f = await fixture();
     const log: string[] = [];

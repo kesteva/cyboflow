@@ -7,7 +7,8 @@ import { FORWARD_PREP_PROGRAM } from '../sshTransport';
 
 // Runs the REAL remote program under the local /bin/sh: on macOS that is the same BSD userland as a remote Mac,
 // which is what caught `chmod --` (BSD chmod has no end-of-options marker).
-describe('FORWARD_PREP_PROGRAM under the local /bin/sh', () => {
+// Needs a real /bin/sh (the program runs on a POSIX environment); none on a Windows runner.
+describe.skipIf(process.platform === 'win32')('FORWARD_PREP_PROGRAM under the local /bin/sh', () => {
   it('creates the socket dir 0700 and removes a stale socket file', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'cf-fwd-'));
     const dir = path.join(root, 's');

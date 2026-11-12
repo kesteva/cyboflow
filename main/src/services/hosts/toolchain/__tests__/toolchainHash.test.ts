@@ -83,7 +83,8 @@ describe('normalizeToolchainMode / isValidToolchainRel', () => {
 });
 
 describe('buildToolchainManifest', () => {
-  it('lists claude, the MCP bundle and every codex vendor file with their hashes', async () => {
+  // The manifest records the local file mode; Windows has no executable bit, so claude reads back 0644.
+  it.skipIf(process.platform === 'win32')('lists claude, the MCP bundle and every codex vendor file with their hashes', async () => {
     const { resolved } = makeFakeToolchain();
     const { manifest, sources } = await buildToolchainManifest(resolved, { hasher: new ToolchainHasher() });
     expect(manifest.files.map((f) => f.rel)).toEqual([
