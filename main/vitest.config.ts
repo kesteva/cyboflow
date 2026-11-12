@@ -19,7 +19,9 @@ export default defineConfig({
     environment: 'node',
     // Windows runners: suites that build a fresh migrated DB per test spend ~2 s in
     // each hook or test body and stall 5-10x past that under full-suite load.
-    ...(process.platform === 'win32' ? { hookTimeout: 30_000, testTimeout: 30_000 } : {}),
+    // Hosted Linux CI hits the same stall once the suite count grows (11/12: nine
+    // 10 s hook timeouts in one ~50 s window at 1047 files), so CI gets it too.
+    ...(process.platform === 'win32' || process.env.CI ? { hookTimeout: 30_000, testTimeout: 30_000 } : {}),
     ...forkPoolOptions(),
     coverage: {
       provider: 'v8',
