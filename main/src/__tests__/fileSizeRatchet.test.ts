@@ -35,6 +35,15 @@ const FROZEN_LINE_CAPS: Record<string, number> = {
   'services/panels/claude/claudeCodeManager.ts': 4805, // hidden tryTransitionToAwaitingReview placeholder deleted; +5: per-query SDK process id stamp for the usage fold; +8: M2 cancel-during-remote-prep checks + host generation in the warm fingerprint (bookkeeping in panels/remotePrepCancel.ts)
   'database/database.ts': 3206, // post-migration VACUUM + sync-trigger re-creation → postMigrationMaintenance.ts; Crystal-fork cleanup (re-pinned after merging main's +20 lines): folder CRUD, run-command CRUD, app_opens readers; ~20 uncalled Crystal CRUD methods; dead inline migrations (timestamp rebuild, default-project import, project_folders, commit-mode/main_branch/app_opens/run-commands adders)
   'ipc/session.ts': 3246, // Crystal-fork cleanup: dead sessions:* read/continue channels, compact context
+  // Capped 2026-11-12 at the sizes of local main `cdf197fbf`: the six largest
+  // main/ files that had NO cap. taskChangeRouter grew 3803 → 4307 between
+  // v0.5.0 and this date with nothing to notice; it is the next planned split.
+  'orchestrator/taskChangeRouter.ts': 4307,
+  'services/trackerSync/trackerSyncService.ts': 5024,
+  'orchestrator/verify/verificationAgentRunner.ts': 4414,
+  'orchestrator/trpc/routers/runs.ts': 4311,
+  'orchestrator/programmatic/workflowController.ts': 4104,
+  'orchestrator/programmatic/monitor.ts': 3571,
 };
 
 function locateSrcRoot(): string {
