@@ -106,7 +106,7 @@ import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
 import { EnvironmentPicker, useEnvironmentSelection } from '../EnvironmentPicker';
-import { isRemoteLaunchRuntime } from '../../agentsEnv/hostLaunchability';
+import { isRemoteLaunchRuntime, remoteLaunchRuntimeFor } from '../../agentsEnv/hostLaunchability';
 import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_OMP_LAUNCH_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
@@ -1006,8 +1006,8 @@ export default function SessionStartWizard(): React.JSX.Element {
   const remoteEnvironmentLabel =
     remoteHostId !== null ? (envSelection.hosts.find((h) => h.id === remoteHostId)?.label ?? 'this environment') : null;
   useEffect(() => {
-    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
-  }, [runtimeNeedsRemoteCoercion, reseedAgentRuntime]);
+    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(remoteLaunchRuntimeFor(agentRuntime));
+  }, [runtimeNeedsRemoteCoercion, agentRuntime, reseedAgentRuntime]);
   /**
    * The level the wizard DISPLAYS absent an explicit per-run override (Tier 2,
    * item 13c, [C8]): project's solution-thoroughness stamp -> workflow's own

@@ -26,7 +26,7 @@ import { workflowTitleForName } from './wizard/workflowMeta';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { EnvironmentPicker, useEnvironmentSelection } from './EnvironmentPicker';
-import { isRemoteLaunchRuntime } from '../agentsEnv/hostLaunchability';
+import { isRemoteLaunchRuntime, remoteLaunchRuntimeFor } from '../agentsEnv/hostLaunchability';
 import { API } from '../../utils/api';
 import { ModelSelector, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
@@ -368,8 +368,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
   const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
   useEffect(() => {
-    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
-  }, [runtimeNeedsRemoteCoercion, reseedAgentRuntime]);
+    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(remoteLaunchRuntimeFor(agentRuntime));
+  }, [runtimeNeedsRemoteCoercion, agentRuntime, reseedAgentRuntime]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -750,13 +750,16 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     )
       ? quickDefaults.agentRuntime
       : claudeRuntimeFromSubstrate(quickDefaults.substrate);
-    // A remote environment only hosts SDK runtimes: an untouched quick default it cannot run follows the
-    // picker's (already coerced) runtime instead, transport included, or main refuses the launch.
+    // A remote environment only hosts SDK runtimes: an untouched quick default it cannot run moves to its OWN
+    // provider's SDK runtime (transport included), or main refuses the launch. Never the picker's runtime — that
+    // control is keyed to the selected WORKFLOW and may sit on another provider.
     const followsRemoteCoercion =
       !isAgentRuntimeTouched && remoteHostId !== null && !isRemoteLaunchRuntime(quickDefaultRuntime);
-    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched || followsRemoteCoercion
+    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched
       ? agentRuntime
-      : quickDefaultRuntime;
+      : followsRemoteCoercion
+        ? remoteLaunchRuntimeFor(quickDefaultRuntime)
+        : quickDefaultRuntime;
     const quickPermissionMode = isPermissionModeTouched
       ? permissionMode
       : quickDefaults.permissionMode;

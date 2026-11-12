@@ -16,6 +16,15 @@ export function isRemoteLaunchRuntime(runtime: string): runtime is RemoteLaunchR
   return (REMOTE_LAUNCH_RUNTIMES as readonly string[]).includes(runtime);
 }
 
+/**
+ * The runtime a remote launch uses in place of one the environment cannot host: the SAME provider's SDK runtime
+ * (Claude CLI → Claude SDK, Codex CLI → Codex SDK), or Claude's when that provider has none there (Pi, OMP).
+ */
+export function remoteLaunchRuntimeFor(runtime: string): RemoteLaunchRuntime {
+  if (isRemoteLaunchRuntime(runtime)) return runtime;
+  return runtime.startsWith('codex-') ? 'codex-sdk' : 'claude-sdk';
+}
+
 export function hostLaunchability(
   host: HostView,
   opts: { kind: HostLaunchKind; runtime?: string; featureStatus?: Pick<HostsFeatureStatus, 'killed'> | null },
