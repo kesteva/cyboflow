@@ -29,15 +29,7 @@ import type {
   FindingPriority,
   FindingProposedTarget,
 } from '../../../../../shared/types/reviews';
-import {
-  selectUntriaged,
-  selectReadyBuckets,
-  selectGreedyReadyRows,
-  selectTallyParts,
-  selectSelectedFindingIds,
-  selectFindingsCounters,
-  type TriageFinding,
-} from '../../../stores/insightsStore';
+import type { TriageFinding } from '../../../stores/insightsStore';
 import { findingBucket } from '../../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
@@ -723,44 +715,5 @@ describe('FindingsSection — single-project selection lock', () => {
       selectedFindingIds: ['a-r'],
       lockProjectId: 1,
     });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Pure selectors sanity (the store contract the section binds to)
-// ---------------------------------------------------------------------------
-
-describe('FindingsSection — selector contract', () => {
-  it('selectFindingsCounters is findings-scoped — pending = the rendered triage rows', () => {
-    // pending = triageFindings.length (untriaged ∪ ready), NOT a whole-inbox
-    // finding total: orphan-hidden findings are never in this list.
-    const triage: TriageFinding[] = [finding({ id: 'a' }), finding({ id: 'b' }), finding({ id: 'c' })];
-    const quality: QualityFinding[] = [qualityDismissed(finding({ id: 'x' }))];
-    quality[0].status = 'resolved';
-    const counters = selectFindingsCounters(triage, quality);
-    expect(counters.pending).toBe(3); // = triageFindings.length
-    expect(counters.resolved).toBe(1);
-  });
-
-  it('selectSelectedFindingIds returns selected ready ids in bucket order', () => {
-    const findings = [
-      ready('backlog', 'P0', { id: 't', selected: true }),
-      ready('fix', 'P0', { id: 'q', selected: true }),
-      ready('docs', 'P0', { id: 'd', selected: false }),
-    ];
-    expect(selectSelectedFindingIds(findings)).toEqual(['q', 't']);
-  });
-
-  it('selectUntriaged excludes ready findings', () => {
-    const findings = [finding({ id: 'u' }), ready('fix', 'P0', { id: 'r' })];
-    expect(selectUntriaged(findings).map((f) => f.id)).toEqual(['u']);
-  });
-
-  it('selectReadyBuckets + selectGreedyReadyRows + selectTallyParts compose', () => {
-    const findings = [ready('fix', 'P0', { id: 'q', selected: true })];
-    const buckets = selectReadyBuckets(findings);
-    expect(buckets.quick).toHaveLength(1);
-    expect(selectGreedyReadyRows(buckets, false).visibleRows).toBe(1);
-    expect(selectTallyParts(findings)).toEqual({ count: 1, quick: 1, doc: 0, task: 0 });
   });
 });

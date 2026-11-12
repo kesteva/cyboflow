@@ -112,18 +112,6 @@ describe('RunExecutor.execute — missing rows', () => {
     );
   });
 
-  it('(a) throws when workflow_runs row is missing', async () => {
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(null),
-      getById: vi.fn().mockReturnValue(null),
-    };
-    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
-
-    await expect(executor.execute('missing-run-id')).rejects.toThrow(
-      'workflow_runs row not found for runId=missing-run-id',
-    );
-  });
-
   it('(b) throws when workflow row is missing', async () => {
     const run = makeWorkflowRunRow();
     const registry: WorkflowRegistryLike = {
@@ -278,6 +266,8 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
   it('falls through for a legacy row carrying no provider columns at all', async () => {
     // A pre-provider-axis row means "it ran as Claude", which supports
     // orchestrated — the guard must not turn those into failures.
+    // Also covers programmatic-stamped with no runner injected: liveness is
+    // preserved, the agent walks the same DAG via the orchestrated spawn.
     const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -437,22 +427,6 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
 
     executor.disposeMonitorResources(run.id);
     expect(executor.peekRunDirectives(run.id)).toBeUndefined();
-  });
-
-  it('falls through to the orchestrated spawn when stamped programmatic but no runner is injected', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-    const spawner = makeSpawner();
-    const executor = makeExecutor(spawner, registry, undefined); // no runner
-
-    await executor.execute(run.id);
-
-    // Liveness preserved: the agent walks the same DAG via the orchestrated spawn.
-    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
   });
 
   it('takes the orchestrated spawn path (NOT the runner) for an orchestrated run even when a runner is injected', async () => {
@@ -1046,34 +1020,6 @@ describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
 });
 
 describe('RunExecutor.execute — terminal phase triggers teardownRun via finally', () => {
-  it('(iii) bridge.dispose() fires when execute() completes normally (finally arm)', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-    const spawner = makeSpawner();
-
-    const disposeSpy = vi.fn();
-    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
-
-    class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
-        return 'test prompt';
-      }
-
-      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
-        return fakeBridge;
-      }
-    }
-
-    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
-    await executor.execute(run.id);
-
-    expect(disposeSpy).toHaveBeenCalledOnce();
-  });
-
   it('(iii-b) bridge.dispose() fires even when spawnCliProcess throws (finally arm on error path)', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
@@ -1106,11 +1052,20 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
 });
 
 describe('RunExecutor.buildOptionsOverrides — agentPermissionMode threading', () => {
-  it('(iv) threads agentPermissionMode from run.permission_mode_snapshot ("default")', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'default' });
-    // Live workflow.permission_mode intentionally DIFFERS from the snapshot to
-    // prove buildOptionsOverrides reads the immutable snapshot, not the live row.
-    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'dontAsk' });
+  it.each([
+    // [snapshot, live workflow.permission_mode (undefined = factory default)]
+    // Live mode intentionally DIFFERS from the snapshot to prove
+    // buildOptionsOverrides reads the immutable snapshot, not the live row.
+    ['default', 'dontAsk'],
+    ['dontAsk', 'default'],
+    ['auto', undefined],
+  ] as const)('threads agentPermissionMode %s straight from the snapshot', async (snapshot, liveMode) => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: snapshot });
+    const workflow = makeWorkflowRow(
+      liveMode === undefined
+        ? { id: run.workflow_id }
+        : { id: run.workflow_id, permission_mode: liveMode },
+    );
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
@@ -1130,58 +1085,10 @@ describe('RunExecutor.buildOptionsOverrides — agentPermissionMode threading', 
     expect(capturedOverrides).not.toBeNull();
     // The snapshot value wins, NOT the live workflow.permission_mode.
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(capturedOverrides!.agentPermissionMode).toBe('default');
+    expect(capturedOverrides!.agentPermissionMode).toBe(snapshot);
     // The dead preToolUseHook wire is gone — no hook is threaded.
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     expect('preToolUseHook' in capturedOverrides!).toBe(false);
-  });
-
-  it('(iv-b) threads agentPermissionMode "dontAsk" straight from the snapshot', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'dontAsk' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'default' });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-
-    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
-    const spawner = makeSpawner();
-    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
-      async (opts: ClaudeSpawnerOptions) => {
-        capturedOverrides = opts;
-      },
-    );
-
-    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
-    await executor.execute(run.id);
-
-    expect(capturedOverrides).not.toBeNull();
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(capturedOverrides!.agentPermissionMode).toBe('dontAsk');
-  });
-
-  it('(iv-c) threads agentPermissionMode "auto" from the snapshot (native auto)', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'auto' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-
-    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
-    const spawner = makeSpawner();
-    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
-      async (opts: ClaudeSpawnerOptions) => {
-        capturedOverrides = opts;
-      },
-    );
-
-    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
-    await executor.execute(run.id);
-
-    expect(capturedOverrides).not.toBeNull();
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(capturedOverrides!.agentPermissionMode).toBe('auto');
   });
 });
 

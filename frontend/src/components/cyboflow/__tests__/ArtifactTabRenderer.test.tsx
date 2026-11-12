@@ -23,7 +23,7 @@ import { useFeedback, type UseFeedbackResult } from '../../../hooks/useFeedback'
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import { useActiveRunsStore, type ActiveRunRow } from '../../../stores/activeRunsStore';
 import { ARTIFACT_COLORS } from '../../../../../shared/types/artifacts';
-import type { Artifact, ArtifactType, TaskVerificationReportEntry } from '../../../../../shared/types/artifacts';
+import type { Artifact, TaskVerificationReportEntry } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { IdeaComponentState } from '../../../../../shared/types/ideaComponents';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
@@ -1568,36 +1568,6 @@ describe('ArtifactTabRenderer', () => {
     await waitFor(() =>
       expect(commitMutate).toHaveBeenCalledWith({ projectId: 1, artifactId: 'art-1' }),
     );
-  });
-
-  it('shows the in-repo badge and hides the Commit button when committed', () => {
-    setHook({ loading: false, error: null, data: { kind: 'idea', idea: makeIdea() } });
-    render(<ArtifactTabRenderer artifact={makeArtifact({ committed: true })} {...PROPS} />);
-
-    expect(screen.getByTestId('artifact-badge-committed')).toHaveTextContent('✓ in repo');
-    expect(screen.queryByTestId('artifact-commit-button')).not.toBeInTheDocument();
-  });
-
-  it('dispatches every atype to a distinct body', () => {
-    const cases: Array<{ atype: ArtifactType; mode: 'template' | 'canvas'; testid: string; data: ArtifactData }> = [
-      { atype: 'idea-spec', mode: 'template', testid: 'artifact-idea-spec', data: { loading: false, error: null, data: { kind: 'idea', idea: makeIdea() } } },
-      { atype: 'decomposed-stories', mode: 'template', testid: 'artifact-decomposed-stories', data: { loading: false, error: null, data: { kind: 'stories', ideas: [makeIdea({ children: [] })] } } },
-      { atype: 'screenshots', mode: 'template', testid: 'artifact-screenshots', data: { loading: false, error: null, data: { kind: 'screenshots', payload: {} } } },
-      { atype: 'ui-prototype', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
-      { atype: 'generic', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
-      { atype: 'arch-design', mode: 'template', testid: 'artifact-arch-design', data: { loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } } },
-      { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
-      { atype: 'eval-report', mode: 'template', testid: 'artifact-eval-report', data: { loading: false, error: null, data: { kind: 'eval-report', payload: { markdown: '## x' } } } },
-      { atype: 'verify-runbook', mode: 'template', testid: 'artifact-verify-runbook', data: { loading: false, error: null, data: { kind: 'verify-runbook', payload: { markdown: '## x' } } } },
-      { atype: 'adversarial-review', mode: 'template', testid: 'artifact-adversarial-review', data: { loading: false, error: null, data: { kind: 'adversarial-review', payload: { markdown: '## x' } } } },
-      { atype: 'project-brief', mode: 'template', testid: 'artifact-project-brief', data: { loading: false, error: null, data: { kind: 'brief', payload: { markdown: '## x' } } } },
-    ];
-    for (const c of cases) {
-      setHook(c.data);
-      const { unmount } = render(<ArtifactTabRenderer artifact={makeArtifact({ atype: c.atype, mode: c.mode })} {...PROPS} />);
-      expect(screen.getByTestId(c.testid)).toBeInTheDocument();
-      unmount();
-    }
   });
 
   // --- approve-ideas ---------------------------------------------------------

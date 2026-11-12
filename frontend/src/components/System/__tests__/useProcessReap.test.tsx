@@ -299,15 +299,6 @@ describe('failures are visible, per target', () => {
   });
 });
 
-describe('negative control', () => {
-  it('without the hook\'s handlers no process kill control exists — the tests above depend on the wiring', () => {
-    render(<SystemGroupedBody snapshot={snap([proc(11)])} projectId={7} groupBy="worktree" sortBy="cpu" />);
-    expect(screen.queryByTestId('kill-tree-11')).toBeNull();
-    expect(screen.queryByTestId('wt-kill-all')).toBeNull();
-    expect(resolveSpy).not.toHaveBeenCalled();
-  });
-});
-
 describe('project switch', () => {
   it('a resolve still in flight when the project switches never opens a dialog afterwards', async () => {
     let release!: (v: { manifest: ReapManifestData }) => void;

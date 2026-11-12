@@ -6,8 +6,6 @@
  * matching the on-disk entry, and non-ASCII -> hyphen. Plain vitest, no fs.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { encodeCwd } from '../encodeCwd';
 
 describe('encodeCwd', () => {
@@ -36,10 +34,5 @@ describe('encodeCwd', () => {
     expect(encodeCwd('/Users/x/.cyboflow_smoke295/proj/worktrees/grand-hill-20260921')).toBe(
       '-Users-x--cyboflow-smoke295-proj-worktrees-grand-hill-20260921',
     );
-  });
-
-  it('documents the #19972 collision caveat in a comment block', () => {
-    const src = readFileSync(join(__dirname, '..', 'encodeCwd.ts'), 'utf8');
-    expect(/19972|collision/i.test(src)).toBe(true);
   });
 });

@@ -62,38 +62,19 @@ describe('makeSpyLogger', () => {
   // Per-method vi.fn spy-ability
   // -------------------------------------------------------------------------
 
-  it('each method is individually spy-able via .mock.calls', () => {
-    logger.info('msg-a', { x: 1 });
+  it.each(['info', 'warn', 'error', 'debug'] as const)(
+    '%s is individually spy-able and mirrored in calls',
+    (level) => {
+      logger[level]('msg-a', { x: 1 });
 
-    // Per-method spy surface
-    expect(logger.info).toHaveBeenCalledTimes(1);
-    expect(logger.info).toHaveBeenCalledWith('msg-a', { x: 1 });
+      // Per-method spy surface
+      expect(logger[level]).toHaveBeenCalledTimes(1);
+      expect(logger[level]).toHaveBeenCalledWith('msg-a', { x: 1 });
 
-    // calls array surface — same invocation reflected in both
-    expect(logger.calls[0]).toEqual({ level: 'info', message: 'msg-a', ctx: { x: 1 } });
-  });
-
-  it('warn mock.calls[0] and calls[0] both reflect the invocation', () => {
-    logger.warn('watch out', { key: 'val' });
-
-    expect(logger.warn).toHaveBeenCalledWith('watch out', { key: 'val' });
-    expect(logger.calls[0]).toEqual({
-      level: 'warn',
-      message: 'watch out',
-      ctx: { key: 'val' },
-    });
-  });
-
-  it('error and debug methods are also vi.fn spies', () => {
-    logger.error('bad');
-    logger.debug('trace', { step: 2 });
-
-    expect(logger.error).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalledWith('bad');
-
-    expect(logger.debug).toHaveBeenCalledTimes(1);
-    expect(logger.debug).toHaveBeenCalledWith('trace', { step: 2 });
-  });
+      // calls array surface — same invocation reflected in both
+      expect(logger.calls[0]).toEqual({ level, message: 'msg-a', ctx: { x: 1 } });
+    },
+  );
 
   it('does NOT include ctx key when ctx is undefined', () => {
     logger.info('bare message');

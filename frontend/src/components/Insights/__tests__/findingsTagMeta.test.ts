@@ -10,17 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   FINDING_PRIORITIES,
   type FindingPriority,
-  type FindingTagBucket,
   type ReviewItem,
   type ReviewItemSeverity,
 } from '../../../../../shared/types/reviews';
 import {
-  BUCKET_LABEL,
-  BUCKET_SWATCH,
-  BUCKET_TEXT_CLASS,
   PRIORITY_BADGE,
   PRIORITY_BADGE_UNSET,
-  READY_BUCKETS,
   SEVERITY_DOT,
   allocateReadyRows,
   composeUntriagedMeta,
@@ -322,9 +317,10 @@ describe('priority badges', () => {
     expect(priorityBadge('P0')).toBe(PRIORITY_BADGE.P0);
     expect(priorityBadge('P1')).toBe(PRIORITY_BADGE.P1);
     expect(priorityBadge('P2')).toBe(PRIORITY_BADGE.P2);
-    expect(PRIORITY_BADGE.P0.label).toBe('P0');
-    expect(PRIORITY_BADGE.P1.label).toBe('P1');
-    expect(PRIORITY_BADGE.P2.label).toBe('P2');
+    for (const priority of FINDING_PRIORITIES) {
+      expect(PRIORITY_BADGE[priority].label).toBe(priority);
+      expect(PRIORITY_BADGE[priority].class).toBeTruthy();
+    }
   });
 });
 
@@ -333,20 +329,7 @@ describe('priority badges', () => {
 // ---------------------------------------------------------------------------
 
 describe('exhaustive display maps', () => {
-  const buckets: readonly FindingTagBucket[] = READY_BUCKETS;
   const severities: readonly ReviewItemSeverity[] = ['error', 'warning', 'info'];
-
-  it('READY_BUCKETS is the fixed render order quick, doc, task', () => {
-    expect(READY_BUCKETS).toEqual(['quick', 'doc', 'task']);
-  });
-
-  it('every bucket has a label, swatch, and text class', () => {
-    for (const bucket of buckets) {
-      expect(BUCKET_LABEL[bucket]).toBeTruthy();
-      expect(BUCKET_SWATCH[bucket]).toBeTruthy();
-      expect(BUCKET_TEXT_CLASS[bucket]).toBeTruthy();
-    }
-  });
 
   it('every severity has a dot color, with error tokenized to --severity-error (OD-2)', () => {
     for (const severity of severities) {
@@ -354,12 +337,5 @@ describe('exhaustive display maps', () => {
     }
     expect(SEVERITY_DOT.error).toBe('var(--severity-error)');
     expect(SEVERITY_DOT.warning).toBe('var(--amber-accent)');
-  });
-
-  it('every concrete priority has a badge spec', () => {
-    for (const priority of FINDING_PRIORITIES) {
-      expect(PRIORITY_BADGE[priority].label).toBe(priority);
-      expect(PRIORITY_BADGE[priority].class).toBeTruthy();
-    }
   });
 });

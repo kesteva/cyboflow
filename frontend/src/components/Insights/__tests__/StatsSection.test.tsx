@@ -196,20 +196,43 @@ describe('StatsSection card grid', () => {
     expect(ids).toEqual(['stats-card-wf-pricey', 'stats-card-wf-cheap', 'stats-card-wf-free']);
   });
 
+  it('breaks cost and token ties alphabetically by workflow name', () => {
+    mockWorkflowStats = [
+      runStats({ workflowId: 'wf-c', workflowName: 'Charlie' }),
+      runStats({ workflowId: 'wf-a', workflowName: 'Alpha' }),
+      runStats({ workflowId: 'wf-b', workflowName: 'Bravo' }),
+    ];
+    mockWorkflowUsage = [
+      usageStats({ workflowId: 'wf-c', workflowName: 'Charlie', totalCostUsd: 2, totalTokens: 5000 }),
+      usageStats({ workflowId: 'wf-a', workflowName: 'Alpha', totalCostUsd: 2, totalTokens: 5000 }),
+      usageStats({ workflowId: 'wf-b', workflowName: 'Bravo', totalCostUsd: 2, totalTokens: 5000 }),
+    ];
+    render(<StatsSection />);
+    const ids = screen
+      .getAllByTestId(/^stats-card-/)
+      .map((n) => n.getAttribute('data-testid'));
+    expect(ids).toEqual(['stats-card-wf-a', 'stats-card-wf-b', 'stats-card-wf-c']);
+  });
+
   it('headlines TOTAL tokens with a smaller avg figure beside it', () => {
-    mockWorkflowStats = [runStats({ workflowId: 'wf-a', workflowName: 'Alpha' })];
+    mockWorkflowStats = [
+      runStats({ workflowId: 'wf-a', workflowName: 'Alpha', errorRatePct: 8.3, totalRuns: 12 }),
+    ];
     mockWorkflowUsage = [
       usageStats({
         workflowId: 'wf-a',
         workflowName: 'Alpha',
         totalTokens: 1_840_000,
         avgTotalTokens: 184_000,
+        totalCostUsd: 4.2,
       }),
     ];
     render(<StatsSection />);
     // m-tier compact form for the big total; k-form for the per-run average.
     expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('1.8m');
     expect(screen.getByTestId('stats-avg-tokens')).toHaveTextContent('avg 184k');
+    // Meta line: error % · runs · cost (2dp).
+    expect(screen.getByTestId('stats-meta')).toHaveTextContent('error 8.3% · runs 12 · cost $4.20');
   });
 
   it('renders an em-dash headline and no avg figure for a card without usage', () => {

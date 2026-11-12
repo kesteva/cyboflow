@@ -221,24 +221,14 @@ describe('decideRunbookBootstrap', () => {
    * revision (the Verify Setup flow), then prove it.
    */
   it('a CONTENT drift declines instead — a proof cannot re-stamp the content hash', () => {
+    // The reprove arm is keyed on the exact reason, not on "the decline was
+    // stale-proof": both drifts decline as 'stale-proof' at the gate, so a mode
+    // decision made off the DECLINE cannot tell them apart — which is how the
+    // loop above got built in the first place. Pinned as a pair with the
+    // drifted → reprove case.
     expect(decideRunbookBootstrap({ ...on, status: status('content-drifted') })).toEqual({
       proceed: false,
       reason: 'stale-proof',
-    });
-  });
-
-  it('the reprove arm is keyed on the exact reason, not on "the decline was stale-proof"', () => {
-    // Both drifts decline as 'stale-proof' at the gate, so a mode decision made
-    // off the DECLINE cannot tell them apart — which is how the loop above got
-    // built in the first place. Pinned as a pair.
-    expect(declineForRunbookStatus(status('content-drifted'))).toBe(
-      declineForRunbookStatus(status('drifted')),
-    );
-    expect(decideRunbookBootstrap({ ...on, status: status('drifted') })).toMatchObject({
-      mode: 'reprove',
-    });
-    expect(decideRunbookBootstrap({ ...on, status: status('content-drifted') })).toMatchObject({
-      proceed: false,
     });
   });
 

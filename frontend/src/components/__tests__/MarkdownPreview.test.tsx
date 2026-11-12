@@ -29,11 +29,6 @@ beforeEach(() => {
 });
 
 describe('MarkdownPreview', () => {
-  it('parses once on first render', () => {
-    render(<MarkdownPreview content="hello" />);
-    expect(parseCounter.count).toBe(1);
-  });
-
   it('(i) does not re-invoke ReactMarkdown when re-rendered with identical content', () => {
     const { rerender } = render(<MarkdownPreview content="hello" id="a" />);
     expect(parseCounter.count).toBe(1);

@@ -114,7 +114,7 @@ describe('onboardingStore — hydrate', () => {
   });
 
   it('a snapshot parked on a guided screen hydrates as skipped at the clamped step (resumable)', () => {
-    for (const [step, expected] of [[7, 7], [8, 7], [12, 7], [14, 7]] as const) {
+    for (const [step, expected] of [[7, 7], [8, 7], [9, 7], [10, 7], [11, 7], [12, 7], [13, 7], [14, 7]] as const) {
       for (const status of ['active', 'skipped'] as const) {
         reset();
         s().hydrate({ version: 4, status, step }, 0);
@@ -601,12 +601,6 @@ describe('onboardingStore — the handoff step (6)', () => {
     expect(s().step).toBe(6);
   });
 
-  it('setHandoffChoice flips the branch', () => {
-    expect(s().handoffChoice).toBe('continue');
-    s().setHandoffChoice('skip');
-    expect(s().handoffChoice).toBe('skip');
-  });
-
   it('back() from the handoff step returns to Telemetry', () => {
     useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
     s().back();
@@ -716,13 +710,6 @@ describe('onboardingStore — goTo / skip / resume / dismiss', () => {
     expect(s().projectChoice).toBe('new');
   });
 
-  it('a COLD boot still clamps a parked guided step to the branch choice (hydrate)', () => {
-    useOnboardingStore.setState({ status: 'idle', hydrated: false });
-    s().hydrate({ version: 4, status: 'skipped', step: 12 }, 1);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(7);
-  });
-
   it('skip() is a no-op unless the tour is active', () => {
     for (const status of ['idle', 'skipped', 'completed'] as const) {
       reset();
@@ -818,20 +805,6 @@ describe('onboardingStore — goTo / skip / resume / dismiss', () => {
     expect(s().status).toBe('active');
     expect(s().step).toBe(0);
     expect(s().replay).toBe(true);
-  });
-});
-
-describe('onboardingStore — step-group membership', () => {
-  it('the modal and guided sets partition the tour, with the conditional step in the modal half', async () => {
-    const { ONBOARDING_MODAL_STEPS, ONBOARDING_GUIDED_STEPS, ONBOARDING_STEP_COUNT } = await import(
-      '../../utils/onboarding'
-    );
-    expect(ONBOARDING_MODAL_STEPS).toContain(2);
-    expect(ONBOARDING_MODAL_STEPS).toContain(3);
-    expect(ONBOARDING_GUIDED_STEPS).not.toContain(2);
-    expect([...ONBOARDING_MODAL_STEPS, ...ONBOARDING_GUIDED_STEPS]).toEqual(
-      Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i),
-    );
   });
 });
 
@@ -988,16 +961,5 @@ describe('onboardingStore — the in-shell guided steps (9-14)', () => {
     expect(s.launched).toBeNull();
     expect(s.sessionChoice).toBe('planner');
     expect(s.assistantAvailable).toBe(true);
-  });
-
-  it('a snapshot parked on any in-shell step (9-14) hydrates as skipped at the branch choice', () => {
-    for (const step of [9, 10, 11, 12, 13, 14]) {
-      for (const status of ['active', 'skipped'] as const) {
-        useOnboardingStore.setState({ status: 'idle', hydrated: false });
-        useOnboardingStore.getState().hydrate({ version: 4, status, step }, 1);
-        expect(useOnboardingStore.getState().status).toBe('skipped');
-        expect(useOnboardingStore.getState().step).toBe(7);
-      }
-    }
   });
 });

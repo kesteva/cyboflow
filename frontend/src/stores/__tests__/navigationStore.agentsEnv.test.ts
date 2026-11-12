@@ -35,13 +35,6 @@ function reset(): void {
 describe('navigationStore: agents & environments', () => {
   beforeEach(reset);
 
-  it('defaults to closed with tab agents and no agent', () => {
-    const s = useNavigationStore.getState();
-    expect(s.agentsEnvOpen).toBe(false);
-    expect(s.agentsEnvTab).toBe('agents');
-    expect(s.agentsEnvAgentId).toBeNull();
-  });
-
   it('openAgentsEnv forces home and closes every sibling', () => {
     useNavigationStore.setState({
       humanReviewOpen: true,

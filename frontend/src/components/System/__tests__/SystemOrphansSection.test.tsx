@@ -172,10 +172,7 @@ describe('SystemOrphansSection', () => {
     expect(controlsIn(container)).toEqual([]);
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
     expect(container.textContent ?? '').not.toMatch(/kill tree|prune|reap all|delete/i);
-  });
-
-  it('control check can fail: it detects a button injected into the subtree', () => {
-    const { container } = render(<SystemOrphansSection snapshot={fixture} />);
+    // Negative control: controlsIn must be able to fail, so the empty check above is not vacuous.
     const stray = document.createElement('button');
     stray.textContent = 'Kill tree';
     container.querySelector('[data-testid="orphan-group-processes"]')?.appendChild(stray);

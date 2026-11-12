@@ -14,10 +14,16 @@ import { useOmpAvailability } from '../useOmpAvailability';
 import { useConfigStore } from '../../stores/configStore';
 import type { AppConfig } from '../../types/config';
 
-const { availabilityMock } = vi.hoisted(() => ({ availabilityMock: vi.fn() }));
+const { availabilityMock, trpcMock } = vi.hoisted(() => {
+  const availabilityMock = vi.fn();
+  const trpcMock: { cyboflow: { omp?: { availability: { query: () => unknown } } } } = {
+    cyboflow: {},
+  };
+  return { availabilityMock, trpcMock };
+});
 
 vi.mock('../../trpc/client', () => ({
-  trpc: { cyboflow: { omp: { availability: { query: () => availabilityMock() } } } },
+  trpc: trpcMock,
 }));
 
 /** Seed the config store the way a loaded app has it. */
@@ -27,6 +33,7 @@ function setAria(ariaMode: boolean): void {
 
 beforeEach(() => {
   availabilityMock.mockReset();
+  trpcMock.cyboflow.omp = { availability: { query: () => availabilityMock() } };
   availabilityMock.mockResolvedValue({ launchable: true, ariaMode: true });
   setAria(false);
 });
@@ -76,8 +83,10 @@ describe('useOmpAvailability', () => {
   });
 
   it('floors to unavailable when the omp router is absent (partial trpc mock)', async () => {
+    trpcMock.cyboflow.omp = undefined;
     const { result } = renderHook(() => useOmpAvailability());
-    await waitFor(() => expect(result.current.launchable).toBe(true));
-    expect(result.current).toEqual({ launchable: true, ariaMode: false });
+    // Let the effect run; the floor is the initial false, never a throw.
+    await waitFor(() => expect(result.current).toEqual({ launchable: false, ariaMode: false }));
+    expect(availabilityMock).not.toHaveBeenCalled();
   });
 });

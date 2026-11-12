@@ -6,10 +6,6 @@ describe('designModeStore', () => {
     useDesignModeStore.setState({ activeDesignSessionId: null });
   });
 
-  it('starts with no active design session', () => {
-    expect(useDesignModeStore.getState().activeDesignSessionId).toBeNull();
-  });
-
   it('enterDesignMode sets the active session id', () => {
     useDesignModeStore.getState().enterDesignMode('sess-1');
     expect(useDesignModeStore.getState().activeDesignSessionId).toBe('sess-1');

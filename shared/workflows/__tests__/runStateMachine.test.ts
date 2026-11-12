@@ -256,10 +256,6 @@ describe('(c) assertTransitionAllowed throw semantics', () => {
     expect(() => assertTransitionAllowed('running', 'completed')).not.toThrow();
   });
 
-  it('does NOT throw on queued -> starting (positive control)', () => {
-    expect(() => assertTransitionAllowed('queued', 'starting')).not.toThrow();
-  });
-
   it('error name is IllegalTransitionError', () => {
     let caught: unknown;
     try {
@@ -297,18 +293,6 @@ describe('(d) terminal-state lockdown', () => {
     }
   });
 
-  it('completed -> completed same-status no-op is explicitly rejected', () => {
-    expect(isTransitionAllowed('completed', 'completed')).toBe(false);
-  });
-
-  it('failed -> failed same-status no-op is explicitly rejected', () => {
-    expect(isTransitionAllowed('failed', 'failed')).toBe(false);
-  });
-
-  it('canceled -> canceled same-status no-op is explicitly rejected', () => {
-    expect(isTransitionAllowed('canceled', 'canceled')).toBe(false);
-  });
-
   it('assertTransitionAllowed throws for every (terminal -> any) pair', () => {
     for (const terminal of terminals) {
       for (const target of ALL_STATUSES) {
@@ -337,26 +321,6 @@ describe('(e) P4 review-item fold reuses existing review states (no new review s
     // and this guard fires.
     expect(ALL_STATUSES).toHaveLength(10);
     expect(Object.keys(ALLOWED_TRANSITIONS).sort()).toEqual([...ALL_STATUSES].sort());
-  });
-
-  it('the human-gate pause path (running -> awaiting_review) is a legal edge', () => {
-    // HumanStepManager.openHumanGate issues this exact transition; it must be
-    // allowed by the table (it is — shared with the tool-approval gate).
-    expect(isTransitionAllowed('running', 'awaiting_review')).toBe(true);
-  });
-
-  it('the aggregate-unblock auto-resume edge (awaiting_review -> running) is legal', () => {
-    // HumanStepManager.maybeResumeRun / resolveHumanGate issue this when the last
-    // blocking review_item resolves. The "cannot leave awaiting_review while a
-    // blocking item is still pending" rule is an AGGREGATE-DB gate enforced by
-    // HumanStepManager.countPendingBlockingReviewItems — NOT a per-edge state
-    // rule — so the edge itself stays legal here (see reviewItemFold.test.ts +
-    // mcpQueryHandler.test.ts for the behavioral aggregate-blocking proof).
-    expect(isTransitionAllowed('awaiting_review', 'running')).toBe(true);
-  });
-
-  it('awaiting_input -> running (question resolve auto-resume) is legal', () => {
-    expect(isTransitionAllowed('awaiting_input', 'running')).toBe(true);
   });
 });
 

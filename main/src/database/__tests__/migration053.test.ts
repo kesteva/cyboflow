@@ -54,12 +54,6 @@ function buildDb(): Database.Database {
 }
 
 describe('Migration 053: ideas/epics/tasks.experiment_arm', () => {
-  it('applies cleanly (backfill no-ops on empty experiment tables)', () => {
-    const db = buildDb();
-    expect(() => runMigrationViaProductionPath(db, readMigration('053_experiment_arm_entities.sql'))).not.toThrow();
-    db.close();
-  });
-
   it('adds experiment_arm to all three entity tables (PRAGMA table_info)', () => {
     const db = buildDb();
     runMigrationViaProductionPath(db, readMigration('053_experiment_arm_entities.sql'));

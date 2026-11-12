@@ -254,23 +254,16 @@ describe('WorkflowCanvas', () => {
     expect(screen.queryByTestId('workflow-canvas-host')).not.toBeInTheDocument();
   });
 
-  it('renders one column per phase with 138px width and 14px gap in canvas inner', () => {
+  it.each([
+    ['MOCK_DEFINITION', MOCK_DEFINITION],
+    ['TALL_DEFINITION (wide workflow, unchanged by the containment split)', TALL_DEFINITION],
+  ])('renders one column per phase with 138px width and 14px gap in canvas inner: %s', (_name, definition) => {
     render(
       <WorkflowCanvas
-        definition={MOCK_DEFINITION}
+        definition={definition}
         currentStepId={null}
       />,
     );
-
-    // Two phase columns expected
-    const col1 = screen.getByTestId('phase-column-phase-1');
-    const col2 = screen.getByTestId('phase-column-phase-2');
-    expect(col1).toBeInTheDocument();
-    expect(col2).toBeInTheDocument();
-
-    // Each column has width 138px
-    expect(col1).toHaveStyle({ width: '138px' });
-    expect(col2).toHaveStyle({ width: '138px' });
 
     // Canvas inner has gap: 14px
     const inner = screen.getByTestId('workflow-canvas-inner');
@@ -278,7 +271,12 @@ describe('WorkflowCanvas', () => {
 
     // Total column count equals phases.length
     const allColumns = screen.getAllByTestId(/^phase-column-/);
-    expect(allColumns).toHaveLength(MOCK_DEFINITION.phases.length);
+    expect(allColumns).toHaveLength(definition.phases.length);
+
+    // Each column has width 138px
+    for (const col of allColumns) {
+      expect(col).toHaveStyle({ width: '138px' });
+    }
   });
 
   it('state derivation: currentStepId="step-b" → step-a done, step-b running, step-c pending', () => {
@@ -440,21 +438,6 @@ describe('WorkflowCanvas', () => {
     // inner content — it must not scroll away with the graph.
     expect(inner.contains(meta)).toBe(false);
     expect(viewport.contains(meta)).toBe(false);
-  });
-
-  it('wide workflow: horizontal card dimensions, phase gaps, and column count are unchanged by the containment split', () => {
-    render(
-      <WorkflowCanvas definition={TALL_DEFINITION} currentStepId={null} />,
-    );
-
-    const inner = screen.getByTestId('workflow-canvas-inner');
-    expect(inner).toHaveStyle({ gap: '14px' });
-
-    const allColumns = screen.getAllByTestId(/^phase-column-/);
-    expect(allColumns).toHaveLength(TALL_DEFINITION.phases.length);
-    for (const col of allColumns) {
-      expect(col).toHaveStyle({ width: '138px' });
-    }
   });
 
   it('keeps the canvas root height-bound to its parent (h-full flex-col) so the graph overflow scrolls instead of growing the pane', () => {

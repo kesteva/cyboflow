@@ -6,7 +6,6 @@
  *
  * Tests:
  *   1. createContext() returns { userId: 'local' }.
- *   2. protectedProcedure accepts a context with userId defined (no UNAUTHORIZED).
  *   3. appRouter.cyboflow.runs.list is live (TASK-710) — guard coverage in runs.test.ts.
  *   4. appRouter.cyboflow.approvals.listPending returns [] (working stub — DB not yet wired).
  *   4b. appRouter.cyboflow.approvals.approve returns { success: true } (working stub).
@@ -154,19 +153,6 @@ describe('appRouter (createCaller)', () => {
       caller.cyboflow.events.setBadgeCount({ count: 10000 }),
     ).rejects.toThrow();
   });
-
-  it('protectedProcedure accepts a context with userId defined (no UNAUTHORIZED)', async () => {
-    // All procedures use protectedProcedure; if any threw UNAUTHORIZED we
-    // would have seen it in the tests above. This test makes the intent
-    // explicit by asserting the error code is METHOD_NOT_SUPPORTED, not UNAUTHORIZED.
-    // Uses cyboflow.runs.cancel (METHOD_NOT_SUPPORTED until setCancelRunDeps() is
-    // wired) since cyboflow.runs.get went live (Phase 4a) and now throws
-    // PRECONDITION_FAILED on a db-less context instead of the old stub error.
-    const err = await caller.cyboflow.runs.cancel({ runId: 'run-1' }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(TRPCError);
-    expect((err as TRPCError).code).toBe('METHOD_NOT_SUPPORTED');
-    expect((err as TRPCError).code).not.toBe('UNAUTHORIZED');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -182,95 +168,23 @@ describe('appRouter (createCaller)', () => {
 // ---------------------------------------------------------------------------
 
 describe('appRouter subscription placeholders', () => {
-  it('cyboflow.events.onStreamEvent yields zero events and terminates on abort', async () => {
+  it.each<[string, unknown]>([
+    ['cyboflow.events.onStreamEvent', { runId: 'run-1' }],
+    ['cyboflow.events.onApprovalCreated', undefined],
+    ['cyboflow.events.onStuckDetected', undefined],
+    ['cyboflow.runs.onStepTransition', { runId: 'run-abort-test' }],
+  ])('%s yields zero events and terminates on abort', async (path, input) => {
     const controller = new AbortController();
 
-    // Invoke the subscription — for tRPC v11 async-generator subscriptions,
-    // callProcedure returns the generator directly.
-    const result = await callSubscription(
-      'cyboflow.events.onStreamEvent',
-      { runId: 'run-1' },
-      controller.signal,
-    );
+    const result = await callSubscription(path, input, controller.signal);
 
     expect(isAsyncIterable(result)).toBe(true);
 
     const iterable = result as AsyncIterable<unknown>;
     const collected: unknown[] = [];
 
-    // Abort immediately before draining — the placeholder awaits the abort
-    // signal, so this causes it to return without yielding any event.
-    controller.abort();
-
-    for await (const ev of iterable) {
-      collected.push(ev);
-    }
-
-    expect(collected).toHaveLength(0);
-  });
-
-  it('cyboflow.events.onApprovalCreated yields zero events and terminates on abort', async () => {
-    const controller = new AbortController();
-
-    const result = await callSubscription(
-      'cyboflow.events.onApprovalCreated',
-      undefined,
-      controller.signal,
-    );
-
-    expect(isAsyncIterable(result)).toBe(true);
-
-    const iterable = result as AsyncIterable<unknown>;
-    const collected: unknown[] = [];
-
-    controller.abort();
-
-    for await (const ev of iterable) {
-      collected.push(ev);
-    }
-
-    expect(collected).toHaveLength(0);
-  });
-
-  it('cyboflow.events.onStuckDetected yields zero events and terminates on abort', async () => {
-    const controller = new AbortController();
-
-    const result = await callSubscription(
-      'cyboflow.events.onStuckDetected',
-      undefined,
-      controller.signal,
-    );
-
-    expect(isAsyncIterable(result)).toBe(true);
-
-    const iterable = result as AsyncIterable<unknown>;
-    const collected: unknown[] = [];
-
-    controller.abort();
-
-    for await (const ev of iterable) {
-      collected.push(ev);
-    }
-
-    expect(collected).toHaveLength(0);
-  });
-
-  it('cyboflow.runs.onStepTransition yields zero events and terminates on abort', async () => {
-    const controller = new AbortController();
-
-    const result = await callSubscription(
-      'cyboflow.runs.onStepTransition',
-      { runId: 'run-abort-test' },
-      controller.signal,
-    );
-
-    expect(isAsyncIterable(result)).toBe(true);
-
-    const iterable = result as AsyncIterable<unknown>;
-    const collected: unknown[] = [];
-
-    // Abort immediately before draining — eventToAsyncIterable respects
-    // the abort signal and returns without yielding any event.
+    // Abort immediately before draining — the subscription respects the abort
+    // signal and returns without yielding any event.
     controller.abort();
 
     for await (const ev of iterable) {

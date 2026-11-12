@@ -116,20 +116,13 @@ describe('PendingApprovalCard — "Why stuck?" button', () => {
     vi.clearAllMocks();
   });
 
-  it('does NOT render "Why stuck?" button when runStatus is undefined', () => {
-    render(<PendingApprovalCard item={singleItem} />);
-    expect(screen.queryByRole('button', { name: /why stuck/i })).not.toBeInTheDocument();
-  });
-
-  it('does NOT render "Why stuck?" button when runStatus is "running"', () => {
-    render(<PendingApprovalCard item={singleItem} runStatus="running" />);
-    expect(screen.queryByRole('button', { name: /why stuck/i })).not.toBeInTheDocument();
-  });
-
-  it('does NOT render "Why stuck?" button when runStatus is "awaiting_review"', () => {
-    render(<PendingApprovalCard item={singleItem} runStatus="awaiting_review" />);
-    expect(screen.queryByRole('button', { name: /why stuck/i })).not.toBeInTheDocument();
-  });
+  it.each([undefined, 'running', 'awaiting_review'] as const)(
+    'does NOT render "Why stuck?" button when runStatus is %s',
+    (runStatus) => {
+      render(<PendingApprovalCard item={singleItem} runStatus={runStatus} />);
+      expect(screen.queryByRole('button', { name: /why stuck/i })).not.toBeInTheDocument();
+    },
+  );
 
   it('renders "Why stuck?" button when runStatus is "stuck"', () => {
     render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);

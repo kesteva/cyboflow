@@ -31,11 +31,6 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.getFanOutDispatch', () => {
-  it("defaults to 'workflow' on a fresh instance (before initialize)", () => {
-    const mgr = new ConfigManager();
-    expect(mgr.getFanOutDispatch()).toBe('workflow');
-  });
-
   it('is NOT seeded into the constructor defaults (config.json stays byte-identical)', () => {
     const mgr = new ConfigManager();
     expect(mgr.getConfig().fanOutDispatch).toBeUndefined();

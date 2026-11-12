@@ -59,6 +59,9 @@ describe('applyWorkflowAgentConfigs', () => {
     expect(result.source).toBe('builtin-override');
     expect(result.rawContent).toBeUndefined();
     expect(result.systemPrompt).toBe('BUILTIN PROMPT'); // no custom → body untouched
+    expect(result.runtime).toBeUndefined();
+    expect(result.providerModel).toBeUndefined();
+    expect(result.codexModel).toBeUndefined();
   });
 
   it('custom copy replaces body fields and drops rawContent', () => {
@@ -241,6 +244,7 @@ describe('applyWorkflowAgentConfigs', () => {
       planner: { codexModel: 'gpt-5.2-codex' },
     });
     expect(result.codexModel).toBe('gpt-5.2-codex');
+    expect(result.providerModel).toBe('gpt-5.2-codex');
     expect(result.source).toBe('builtin-override');
     expect(result.rawContent).toBeUndefined();
   });
@@ -277,15 +281,6 @@ describe('applyWorkflowAgentConfigs', () => {
     expect(result.source).toBe('builtin'); // no valid signal → untouched
   });
 
-  it('model-only behavior is unchanged when runtime/codexModel are absent', () => {
-    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { model: 'opus' } });
-    expect(result.model).toBe('opus');
-    expect(result.runtime).toBeUndefined();
-    expect(result.providerModel).toBeUndefined();
-    expect(result.codexModel).toBeUndefined();
-    expect(result.source).toBe('builtin-override');
-  });
-
   // ── providerModel (migration 104 generalization of codexModel) ──────────────
 
   it('a providerModel-only config is signal: sets BOTH providerModel and the mirrored codexModel', () => {
@@ -301,14 +296,6 @@ describe('applyWorkflowAgentConfigs', () => {
   it('an explicit providerModel wins over a stale codexModel on the SAME config', () => {
     const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
       planner: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex', codexModel: 'gpt-5-stale' },
-    });
-    expect(result.providerModel).toBe('gpt-5.2-codex');
-    expect(result.codexModel).toBe('gpt-5.2-codex');
-  });
-
-  it('a config carrying ONLY the deprecated codexModel key still resolves providerModel (old-key data still works)', () => {
-    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
-      planner: { codexModel: 'gpt-5.2-codex' },
     });
     expect(result.providerModel).toBe('gpt-5.2-codex');
     expect(result.codexModel).toBe('gpt-5.2-codex');

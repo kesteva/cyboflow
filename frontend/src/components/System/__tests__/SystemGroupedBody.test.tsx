@@ -242,19 +242,7 @@ describe('trust tiers', () => {
     render(<SystemGroupedBody snapshot={snap([wt('/wt/a')], [proc(1)])} projectId={7} groupBy="worktree" sortBy="cpu" />);
     expect(screen.queryByTestId('kill-tree-1')).toBeNull();
     expect(screen.queryByTestId('wt-prune')).toBeNull();
-  });
-
-  it('disables Prune on a non-prunable worktree', () => {
-    render(
-      <SystemGroupedBody
-        snapshot={snap([wt('/wt/main', { tag: 'is_main_repo', prunable: false })], [])}
-        projectId={7}
-        groupBy="worktree"
-        sortBy="cpu"
-        {...handlers}
-      />,
-    );
-    expect(screen.getByTestId('wt-prune')).toBeDisabled();
+    expect(screen.queryByTestId('wt-kill-all')).toBeNull();
   });
 
   it("disables Prune on a worktree live in another instance and says where", () => {

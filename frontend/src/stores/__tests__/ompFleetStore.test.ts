@@ -69,15 +69,6 @@ describe('ompFleetStore', () => {
     mockAvailability.mockResolvedValue({ launchable: true, ariaMode: true });
   });
 
-  it('starts absent with no worker count', () => {
-    expect(useOmpFleetStore.getState()).toMatchObject({
-      status: 'absent',
-      workerCount: null,
-      errorKind: null,
-      lastCheckedAt: null,
-    });
-  });
-
   it('setSnapshot maps ok → available with worker count', () => {
     useOmpFleetStore.getState().setSnapshot(OK_SNAPSHOT);
     expect(useOmpFleetStore.getState()).toMatchObject({

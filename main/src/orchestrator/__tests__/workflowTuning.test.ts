@@ -254,11 +254,6 @@ describe('serializeDefinition', () => {
       }
     }
   });
-
-  it('is stable across repeated calls', () => {
-    const out = applyTuningPreset(WORKFLOW_DEFINITIONS.planner, 'planner', 'efficient');
-    expect(serializeDefinition(out)).toBe(serializeDefinition(out));
-  });
 });
 
 describe('sprint × efficient', () => {

@@ -49,6 +49,8 @@ describe('FileTabRenderer — DiffBody export smoke', () => {
 
   it('renders the split view when mode="split"', () => {
     render(<DiffBody fileDiff={PARSED} mode="split" />);
+    expect(screen.getByTestId('file-tab-split')).toBeInTheDocument();
+    expect(screen.queryByTestId('file-tab-hunks')).not.toBeInTheDocument();
     expect(screen.getByText(/old line/)).toBeInTheDocument();
   });
 

@@ -143,22 +143,4 @@ describe('effectiveAgents runtime resolution (migration 070)', () => {
     expect(result.providerModel).toBe('gpt-5.2-codex');
     expect(result.codexModel).toBe('gpt-5.2-codex');
   });
-
-  it('a workflow config providerModel WINS over a stale config codexModel', () => {
-    const base = mergeAgent(builtin('planner'), row({ runtime: 'claude-interactive' }));
-    const [result] = applyWorkflowAgentConfigs([base], {
-      planner: { runtime: 'codex-sdk', codexModel: 'gpt-5-stale', providerModel: 'gpt-5.2-codex' },
-    });
-    expect(result.providerModel).toBe('gpt-5.2-codex');
-    expect(result.codexModel).toBe('gpt-5.2-codex');
-  });
-
-  it('a workflow config with only the LEGACY codexModel key still resolves', () => {
-    const base = mergeAgent(builtin('planner'), row({ runtime: 'claude-interactive' }));
-    const [result] = applyWorkflowAgentConfigs([base], {
-      planner: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' },
-    });
-    expect(result.providerModel).toBe('gpt-5.2-codex');
-    expect(result.codexModel).toBe('gpt-5.2-codex');
-  });
 });

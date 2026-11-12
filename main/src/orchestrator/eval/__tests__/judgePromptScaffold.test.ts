@@ -71,16 +71,6 @@ describe('JUDGE_OUTPUT_SCHEMA', () => {
     expect(items.properties.verdict.enum).toEqual([...VERDICTS]);
   });
 
-  it('requires the verdict skeleton (id + verdict + evidence) and top-level verdicts array', () => {
-    expect(JUDGE_OUTPUT_SCHEMA.required).toEqual(['verdicts']);
-    const items = (
-      (JUDGE_OUTPUT_SCHEMA.properties as Record<string, unknown>).verdicts as {
-        items: { required: string[] };
-      }
-    ).items;
-    expect(items.required).toEqual(['id', 'verdict', 'evidence']);
-  });
-
   it('snapshot-locks the full schema shape (the shape is the K-sample contract)', () => {
     // The one sanctioned snapshot (per the plan): a schema-shape drift silently
     // degrades every jury sample, so we freeze the exact skeleton.

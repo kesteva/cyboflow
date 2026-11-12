@@ -153,16 +153,11 @@ describe('pureAddQuestion', () => {
     expect(result[0].id).toBe('question-a');
   });
 
-  it('is idempotent — adding the same id twice keeps length at 1', () => {
-    const after1 = pureAddQuestion([], Q_A);
-    const after2 = pureAddQuestion(after1, Q_A);
-    expect(after2).toHaveLength(1);
-  });
-
   it('returns the same array reference when idempotent (no-op path)', () => {
     const existing = [Q_A];
     const result = pureAddQuestion(existing, Q_A);
     expect(result).toBe(existing); // same reference — no allocation
+    expect(result).toHaveLength(1);
   });
 
   it('appends to end of queue when id is new', () => {
@@ -483,16 +478,11 @@ describe('setOtherText', () => {
     const { otherText } = useQuestionStore.getState();
     expect(otherText['q-1']).toBe('alpha');
     expect(otherText['q-2']).toBe('beta');
-  });
-
-  it('does not mutate other keys when setting one key', () => {
-    useQuestionStore.getState().setOtherText('q-1', 'alpha');
-    useQuestionStore.getState().setOtherText('q-2', 'beta');
-    // Overwrite q-1 only
+    // Overwrite q-1 only; q-2 is untouched
     useQuestionStore.getState().setOtherText('q-1', 'updated');
-    const { otherText } = useQuestionStore.getState();
-    expect(otherText['q-1']).toBe('updated');
-    expect(otherText['q-2']).toBe('beta');
+    const after = useQuestionStore.getState().otherText;
+    expect(after['q-1']).toBe('updated');
+    expect(after['q-2']).toBe('beta');
   });
 });
 

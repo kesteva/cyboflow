@@ -386,7 +386,10 @@ describe('DefaultProgrammaticRunner', () => {
     expect(driver.driveLane).toHaveBeenCalled();
   });
 
-  it('does NOT build a fan-out driver for a run with a null batch_id (no host-driven fan-out)', async () => {
+  it.each([
+    ['null', null],
+    ['absent (field left off)', undefined],
+  ])('does NOT build a fan-out driver for a run whose batch_id is %s (no host-driven fan-out)', async (_label, batchId) => {
     const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
       () => ({ resolveItems: vi.fn(() => ['x']), driveLane: vi.fn() }),
     );
@@ -401,22 +404,9 @@ describe('DefaultProgrammaticRunner', () => {
     // The run has no batch_id AND it is never stamped mid-walk (single-step def,
     // no readRunBatchId wired) ⇒ the factory is never invoked ⇒ host.fanOut stays
     // undefined ⇒ the fanOut step runs as a normal single agent step.
-    await expect(runner.run(ctxFor(fanOutDef(), { batchId: null }))).resolves.toBeUndefined();
-    expect(fanOutDriverFactory).not.toHaveBeenCalled();
-  });
-
-  it('does NOT build a fan-out driver when the run carries no batch_id at all', async () => {
-    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
-      () => ({ resolveItems: vi.fn(() => []), driveLane: vi.fn() }),
-    );
-    const runner = new DefaultProgrammaticRunner({
-      spawner: makeSpawner(),
-      reporter,
-      gate: gateOf('approve'),
-      fanOutDriverFactory,
-    });
-
-    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+    await expect(
+      runner.run(ctxFor(fanOutDef(), batchId === undefined ? undefined : { batchId })),
+    ).resolves.toBeUndefined();
     expect(fanOutDriverFactory).not.toHaveBeenCalled();
   });
 

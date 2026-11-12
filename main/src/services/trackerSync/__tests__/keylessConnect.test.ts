@@ -84,6 +84,7 @@ import type {
   TrackerAdapterCapabilities,
   TrackerFieldOptionsRaw,
 } from '../adapterTypes';
+import { BeadsAdapter } from '../beadsAdapter';
 import { TrackerAuthError } from '../errors';
 import type { EntityWriteRouter } from '../inboundSync';
 import { getConnection, insertConnection, readSecret, updateConnectionSettings } from '../store';
@@ -1008,6 +1009,15 @@ describe('defaultAdapterFactory — beads', () => {
     );
 
     expect(adapterUnderTest.provider).toBe('beads');
+    expect(adapterUnderTest).toBeInstanceOf(BeadsAdapter);
+    const fields = adapterUnderTest as unknown as {
+      workspacePath: string;
+      expectedInstanceId: string | undefined;
+      expectedPrefix: string | undefined;
+    };
+    expect(fields.workspacePath).toBe(PROJECT_PATH);
+    expect(fields.expectedInstanceId).toBe(INSTANCE_ID);
+    expect(fields.expectedPrefix).toBe(PREFIX);
   });
 
   it('refuses a row with no recorded workspace path, naming re-detect as the fix', () => {

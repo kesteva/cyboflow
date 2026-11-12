@@ -18,10 +18,6 @@ const config = resolveOmpBridgeCommandConfig();
 const live = process.env.OMP_BRIDGE_LIVE === '1';
 
 describe.skipIf(!live || config === undefined)('live bridge smoke', () => {
-  it('resolves real config', () => {
-    expect(config).toBeDefined();
-  });
-
   it('fleet_kill on a nonexistent worker traverses the full path', async () => {
     const adapter = new OmpBridgeCommandAdapter(
       new OmpBridgeHttpClient(config!.url, config!.token, config!.sessionId),

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { classifyProcessType, type OwnedHandles } from './processTypes';
-import { buildWorktreeTruthFixture } from './worktreeTruth';
 
 const BROKER_CMD = 'node /x/app-server-broker.mjs serve --cwd /wt/one --endpoint unix:/tmp/s';
 
@@ -63,14 +62,5 @@ describe('classifyProcessType', () => {
   it('negative control: without the handle the same pid is not classified as owned', () => {
     const owned = handles({ cli: [cliHandle(10, 'claude')] });
     expect(classifyProcessType({ pid: 99, command: 'claude' }, owned)).toBe('unknown');
-  });
-});
-
-describe('buildWorktreeTruthFixture', () => {
-  it('exposes the given paths as knownWorktreePaths', () => {
-    const truth = buildWorktreeTruthFixture(['/wt/a', '/wt/b']);
-    expect(truth.knownWorktreePaths.has('/wt/a')).toBe(true);
-    expect(truth.knownWorktreePaths.has('/wt/c')).toBe(false);
-    expect(buildWorktreeTruthFixture().knownWorktreePaths.size).toBe(0);
   });
 });

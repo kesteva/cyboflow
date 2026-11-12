@@ -204,34 +204,9 @@ describe('transcriptNormalizer', () => {
       const event = narrower.narrow(r.event);
       expect('kind' in event && event.kind === '__unknown__').toBe(false);
     });
-
-    it('records the post-normalize __unknown__ rate for panel-critical lines is 0', () => {
-      let unknownCount = 0;
-      for (const [, line] of panelLines) {
-        const r = normalizeTranscriptLine(line);
-        if (r.kind !== 'panel') {
-          unknownCount += 1;
-          continue;
-        }
-        const event = narrower.narrow(r.event);
-        if ('kind' in event && event.kind === '__unknown__') unknownCount += 1;
-      }
-      expect(unknownCount).toBe(0);
-    });
   });
 
   describe('STRING-content user lines are preserved, not dropped', () => {
-    const narrower = new TypedEventNarrowing(makeSpyLogger());
-
-    it('wraps a string-content user line without dropping it', () => {
-      const r = normalizeTranscriptLine(USER_STRING_CONTENT_LINE);
-      expect(r.kind).toBe('panel');
-      if (r.kind !== 'panel') throw new Error('expected panel');
-      // Survives narrow() (NOT __unknown__).
-      const event = narrower.narrow(r.event);
-      expect('kind' in event && event.kind === '__unknown__').toBe(false);
-    });
-
     it('preserves the original string content verbatim in the normalized output', () => {
       const r = normalizeTranscriptLine(USER_STRING_CONTENT_LINE);
       if (r.kind !== 'panel') throw new Error('expected panel');

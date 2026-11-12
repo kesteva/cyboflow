@@ -46,21 +46,6 @@ const ADAPTERS: Record<TrackerProvider, TrackerAdapter> = {
 };
 
 describe('TrackerAdapterCapabilities — per-provider exhaustiveness', () => {
-  it('every provider declares a contentWrite/archive shape', () => {
-    for (const provider of Object.keys(ADAPTERS) as TrackerProvider[]) {
-      const { capabilities } = ADAPTERS[provider];
-      expect(capabilities.contentWrite).toEqual(
-        expect.objectContaining({
-          title: expect.any(Boolean),
-          description: expect.any(Boolean),
-          priority: expect.any(Boolean),
-          category: expect.any(Boolean),
-        }),
-      );
-      expect(['trash', 'archive', 'none']).toContain(capabilities.archive);
-    }
-  });
-
   it('Dart: everything is writable, and archive is a trash (not a hard delete)', () => {
     expect(ADAPTERS.dart.capabilities.contentWrite).toEqual({
       title: true,

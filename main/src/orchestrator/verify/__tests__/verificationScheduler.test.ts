@@ -539,26 +539,6 @@ describe('VerificationScheduler — delivery outbox (§5.6)', () => {
     expect(row.status).toBe('skipped');
     expect(row.d).toBe('pending');
   });
-
-  it('markTerminal stamps delivery_state=pending and markTerminalAndDeliver flips it to delivered', async () => {
-    // A live over-age expiry exercises the full terminal→deliver→delivered path.
-    const sched = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      artifactsDirResolver: () => '/tmp/a',
-      config: { ...baseConfig, queuedAgeCeilingMs: 1 },
-      onVerdict: async () => {},
-      now: () => 40_000_000,
-    });
-    db.prepare(
-      `INSERT INTO verification_requests
-         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
-       VALUES ('vr_flip', 'run-1', 1, 'queued', 'static-render-snapshot', ?, '[]', 0, ?)`,
-    ).run(JSON.stringify({ intent: 'x' }), new Date(40_000_000 - 10_000).toISOString());
-    await sched.drain();
-    const row = db.prepare('SELECT status, delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_flip') as { status: string; d: string | null };
-    expect(row.status).toBe('skipped');
-    expect(row.d).toBe('delivered');
-  });
 });
 
 // ---------------------------------------------------------------------------

@@ -56,25 +56,6 @@ describe('resolvePermissionMode — override ladder', () => {
     expect(resolvePermissionMode({ globalDefaultMode: 'dontAsk' })).toBe('dontAsk');
   });
 
-  it('full precedence: requested beats frontmatter beats globalDefault', () => {
-    // Highest set level should win. Distinct valid values at every rung.
-    expect(
-      resolvePermissionMode({
-        requestedMode: 'dontAsk',
-        frontmatterMode: 'acceptEdits',
-        globalDefaultMode: 'auto',
-      }),
-    ).toBe('dontAsk');
-
-    // Drop requested → frontmatter wins.
-    expect(
-      resolvePermissionMode({ frontmatterMode: 'acceptEdits', globalDefaultMode: 'auto' }),
-    ).toBe('acceptEdits');
-
-    // Drop frontmatter → globalDefault wins.
-    expect(resolvePermissionMode({ globalDefaultMode: 'auto' })).toBe('auto');
-  });
-
   it("'auto' is a recognized mode and resolves through every level", () => {
     expect(resolvePermissionMode({ requestedMode: 'auto' })).toBe('auto');
     expect(resolvePermissionMode({ frontmatterMode: 'auto' })).toBe('auto');

@@ -281,6 +281,9 @@ describe('McpQueryHandler workflow/variant config', () => {
     const data = res.data as { workflow: Record<string, unknown>; definition: unknown; baseline_rotation: unknown };
     expect(data.workflow).toMatchObject({ id: 'wf-global-sprint', tuning_level: 'standard' });
     // spec_json '{}' → the built-in fallback definition (non-null for a real built-in name).
+    expect(data.definition).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'),
+    );
     expect(data.baseline_rotation).toEqual({ inRotation: false, weight: 1 });
   });
 

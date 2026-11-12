@@ -9,8 +9,8 @@
  *
  *   1. ASSIGNABILITY (compile-time) — every builder output is assignable to the real
  *      `SDKMessage` union. This is already enforced by the `satisfies` clauses inside
- *      fakeSdk, but the typed const below makes a regression a NAMED test whose file
- *      also fails `tsc` (the CI gate), not just an anonymous type error.
+ *      fakeSdk, but the typed const below makes a regression fail `tsc` in this file
+ *      (the CI gate), not just in an anonymous fixture.
  *   2. NARROW-ACCEPTANCE (runtime) — each representative builder event, run through a
  *      fresh real `TypedEventNarrowing`, narrows to its EXPECTED wire kind and never to
  *      the `{kind:'__unknown__'}` fallback. (The narrowing fail-softs to `__unknown__`;
@@ -246,15 +246,6 @@ function resolveInstalledSdkVersion(): string {
 // ---------------------------------------------------------------------------
 
 describe('sdkContract — fakeSdk builders vs the real SDK + narrowing', () => {
-  it('every fakeSdk builder output is assignable to the real SDKMessage union', () => {
-    // Compile-time: `ALL_BUILDER_OUTPUTS: readonly SDKMessage[]` above enforces
-    // assignability. Runtime: sanity-check each carries a wire `type` discriminant.
-    expect(ALL_BUILDER_OUTPUTS.length).toBeGreaterThan(0);
-    for (const message of ALL_BUILDER_OUTPUTS) {
-      expect(typeof (message as { type?: unknown }).type).toBe('string');
-    }
-  });
-
   it.each(NARROWABLE)(
     '$name narrows to $expected and never to __unknown__',
     ({ event, expected }) => {

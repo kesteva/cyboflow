@@ -79,7 +79,12 @@ describe('OmpTurnUsageAccumulator', () => {
   it('accrues zero cost when a message reports tokens but no cost breakdown', () => {
     const accumulator = new OmpTurnUsageAccumulator();
     accumulator.addMessageUsage(usage({ cost: undefined }));
-    expect(accumulator.snapshot()).toBeDefined();
+    expect(accumulator.snapshot()).toEqual({
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 30,
+      cache_creation_input_tokens: 40,
+    });
     expect(accumulator.costUsd()).toBe(0);
   });
 

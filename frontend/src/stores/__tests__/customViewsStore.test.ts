@@ -84,6 +84,7 @@ vi.mock('../../trpc/client', () => ({
   },
 }));
 
+import { trpc } from '../../trpc/client';
 import { useCustomViewsStore } from '../customViewsStore';
 import { useAgentThreadStore } from '../agentThreadStore';
 import { QUEUE_SECTION_ORDER } from '../../customViews/catalog';
@@ -174,11 +175,23 @@ describe('customViewsStore.init', () => {
   });
 
   it('leaves the surface on Default when the queries fail', async () => {
-    const store = useCustomViewsStore.getState();
-    const release = store.init('review-queue');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(trpc.cyboflow.customViews.listViews.query).mockRejectedValueOnce(new Error('boom'));
+    vi.mocked(trpc.cyboflow.customViews.getActiveView.query).mockRejectedValueOnce(new Error('boom'));
+    vi.mocked(trpc.cyboflow.customViews.listWidgets.query).mockRejectedValueOnce(new Error('boom'));
+    useCustomViewsStore.setState({
+      viewsBySurface: { 'review-queue': [makeView({ id: 'v1', name: 'V', surface: 'review-queue' })], 'project-overview': [] },
+      activeViewIdBySurface: { 'review-queue': 'v1', 'project-overview': 'default' },
+      widgets: [widget({ id: 'w1' })],
+    });
+    const release = useCustomViewsStore.getState().init('review-queue');
     await vi.waitFor(() => expect(useCustomViewsStore.getState().loadedSurfaces['review-queue']).toBe(true));
-    expect(useCustomViewsStore.getState().activeViewIdBySurface['review-queue']).toBe('default');
+    const state = useCustomViewsStore.getState();
+    expect(state.activeViewIdBySurface['review-queue']).toBe('default');
+    expect(state.viewsBySurface['review-queue']).toEqual([]);
+    expect(state.widgets).toEqual([]);
     release();
+    errorSpy.mockRestore();
   });
 });
 

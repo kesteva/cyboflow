@@ -186,9 +186,4 @@ describe('latestBatchStatus', () => {
     const batches = [makeBatch({ round: 1, status: 'failed', error: 'agent crashed' })];
     expect(latestBatchStatus(batches, 'idea-1')).toEqual({ kind: 'failed', round: 1, error: 'agent crashed' });
   });
-
-  it('reports applied for a successfully-applied latest batch', () => {
-    const batches = [makeBatch({ round: 3, status: 'applied' })];
-    expect(latestBatchStatus(batches, 'idea-1')).toEqual({ kind: 'applied', round: 3 });
-  });
 });

@@ -358,19 +358,6 @@ describe('ArtifactRouter', () => {
     expect(events.some((e) => e.action === 'deleted' && e.artifactId === ephemeral.artifactId)).toBe(true);
   });
 
-  it('accepts the approve-ideas atype (IDEA-009 multi-idea approve gate)', async () => {
-    const db = buildDb();
-    seedRun(db, 'run-1');
-    const router = ArtifactRouter.initialize(dbAdapter(db));
-
-    const { artifactId } = await router.apply(1, {
-      op: 'create', runId: 'run-1', atype: 'approve-ideas', label: '3 ideas seeded', actor: 'orchestrator',
-    });
-
-    const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as Record<string, unknown>;
-    expect(row).toMatchObject({ run_id: 'run-1', atype: 'approve-ideas', label: '3 ideas seeded', mode: 'template' });
-  });
-
   it('rejects an invalid atype and an unknown run', async () => {
     const db = buildDb();
     seedRun(db, 'run-1');
@@ -401,10 +388,12 @@ describe('ArtifactRouter', () => {
       // avoids the UNIQUE(run_id, atype) upsert path so each is a fresh insert.
       const runId = `run-${atype}`;
       seedRun(db, runId);
-      await expect(
-        router.apply(1, { op: 'create', runId, atype, label: atype, actor: 'orchestrator' }),
-        `atype '${atype}' must be accepted by the router`,
-      ).resolves.toMatchObject({ artifactId: expect.any(String) });
+      const { artifactId } = await router.apply(1, {
+        op: 'create', runId, atype, label: atype, actor: 'orchestrator',
+      });
+      expect(artifactId, `atype '${atype}' must be accepted by the router`).toEqual(expect.any(String));
+      const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as Record<string, unknown>;
+      expect(row).toMatchObject({ run_id: runId, atype, label: atype, mode: ARTIFACT_RENDER_MODE[atype] });
     }
   });
 

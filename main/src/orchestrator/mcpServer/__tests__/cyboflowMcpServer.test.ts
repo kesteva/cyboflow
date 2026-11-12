@@ -366,7 +366,7 @@ describe('cyboflowMcpServer CallTool cyboflow_add_task_dependency validation', (
     });
     // The net mock reports destroyed:true so sendQuery rejects immediately; the
     // point is that arg validation PASSED (no 'invalid_arguments').
-    expect(res.error).not.toBe('invalid_arguments');
+    expect(res.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -430,7 +430,7 @@ describe('cyboflowMcpServer CallTool cyboflow_report_finding validation', () => 
       entity_id: 'tsk_abc',
       payload_json: JSON.stringify({ kind: 'finding', category: 'perf' }),
     });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -502,7 +502,7 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
     // socket double never reaches a real orchestrator, so there is nothing
     // server-side to assert against in this file.
     const res = await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'deploy' });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('rejects an empty current_step', async () => {
@@ -520,7 +520,7 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
       task_id: 'tsk_a',
       current_step: 'awaiting-verify',
     });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('rejects a call with NEITHER status nor current_step', async () => {
@@ -548,20 +548,20 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
       task_id: 'tsk_a',
       status: 'integrated',
     });
-    expect(statusOnly['error']).not.toBe('invalid_arguments');
+    expect(statusOnly['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const stepOnly = await callTool('cyboflow_update_sprint_task', {
       task_id: 'tsk_a',
       current_step: 'write-tests',
     });
-    expect(stepOnly['error']).not.toBe('invalid_arguments');
+    expect(stepOnly['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const withAttempt = await callTool('cyboflow_update_sprint_task', {
       task_id: 'tsk_a',
       current_step: 'implement',
       attempt: 2,
     });
-    expect(withAttempt['error']).not.toBe('invalid_arguments');
+    expect(withAttempt['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -652,7 +652,7 @@ describe('cyboflowMcpServer CallTool cyboflow_resolve_finding validation', () =>
     });
     // The net mock reports destroyed:true so sendQuery rejects immediately; the
     // point is that arg validation PASSED (no 'invalid_arguments').
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -733,14 +733,14 @@ describe('cyboflowMcpServer CallTool cyboflow_list_tasks validation', () => {
 
   it('passes validation with no args and with every optional field set, reaching the dispatch path', async () => {
     const empty = await callTool('cyboflow_list_tasks', {});
-    expect(empty['error']).not.toBe('invalid_arguments');
+    expect(empty['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const full = await callTool('cyboflow_list_tasks', {
       task_type: 'task',
       include_archived: true,
       include_done: true,
     });
-    expect(full['error']).not.toBe('invalid_arguments');
+    expect(full['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -754,10 +754,10 @@ describe('cyboflowMcpServer CallTool cyboflow_get_task validation', () => {
 
   it('passes validation with a valid task_id (opaque id or ref) and reaches the dispatch path', async () => {
     const byId = await callTool('cyboflow_get_task', { task_id: 'tsk_abc' });
-    expect(byId['error']).not.toBe('invalid_arguments');
+    expect(byId['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const byRef = await callTool('cyboflow_get_task', { task_id: 'TASK-014' });
-    expect(byRef['error']).not.toBe('invalid_arguments');
+    expect(byRef['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -788,13 +788,13 @@ describe('cyboflowMcpServer create/update task body param', () => {
       summary: 'caption',
       body: '## Idea spec\n\n- detail',
     });
-    expect(created['error']).not.toBe('invalid_arguments');
+    expect(created['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const updated = await callTool('cyboflow_update_task', {
       task_id: 'tsk_a',
       body: '## Idea spec\n\n- folded',
     });
-    expect(updated['error']).not.toBe('invalid_arguments');
+    expect(updated['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -826,10 +826,10 @@ describe('cyboflowMcpServer create/update task category param', () => {
 
   it('passes validation with a valid category and reaches dispatch (mocked connection error)', async () => {
     const created = await callTool('cyboflow_create_task', { title: 'A bug', category: 'bug' });
-    expect(created['error']).not.toBe('invalid_arguments');
+    expect(created['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const updated = await callTool('cyboflow_update_task', { task_id: 'tsk_a', category: 'chore' });
-    expect(updated['error']).not.toBe('invalid_arguments');
+    expect(updated['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -856,10 +856,10 @@ describe('cyboflowMcpServer create/update task scope param', () => {
 
   it('passes validation when scope is a valid enum value and reaches dispatch (mocked connection error)', async () => {
     const created = await callTool('cyboflow_create_task', { title: 'Small idea', scope: 'small' });
-    expect(created['error']).not.toBe('invalid_arguments');
+    expect(created['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const updated = await callTool('cyboflow_update_task', { task_id: 'tsk_a', scope: 'large' });
-    expect(updated['error']).not.toBe('invalid_arguments');
+    expect(updated['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -915,7 +915,7 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
 
   it('cyboflow_await_verification passes validation with valid args (mocked connection error)', async () => {
     const res = await callTool('cyboflow_await_verification', { request_id: 'vr_1', timeout_ms: 60000 });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('cyboflow_register_verify_runbook rejects a missing/out-of-enum modality and non-string bindings', async () => {
@@ -933,12 +933,12 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
       modality: 'cdp-app',
       bindings_json: '{"dataDirLever":"CYBOFLOW_DIR"}',
     });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('cyboflow_register_verify_runbook passes validation for the mobile modality (mocked connection error)', async () => {
     const res = await callTool('cyboflow_register_verify_runbook', { modality: 'mobile' });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('cyboflow_request_verification rejects malformed setup-proof fields', async () => {
@@ -960,7 +960,7 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
       runbook_hash: 'hash-abc',
       runbook_local_version: 2,
     });
-    expect(res['error']).not.toBe('invalid_arguments');
+    expect(res['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 
@@ -1001,10 +1001,10 @@ describe('cyboflowMcpServer CallTool cyboflow_get_verifications validation', () 
 
   it('passes validation with no arguments and with a valid request_id, reaching the dispatch path', async () => {
     const empty = await callTool('cyboflow_get_verifications', {});
-    expect(empty['error']).not.toBe('invalid_arguments');
+    expect(empty['error']).toBe('[Cyboflow MCP] IPC client not connected');
 
     const withId = await callTool('cyboflow_get_verifications', { request_id: 'vr_1' });
-    expect(withId['error']).not.toBe('invalid_arguments');
+    expect(withId['error']).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });
 

@@ -65,15 +65,11 @@ const frontendPath = getDevDebugLogPath('frontend');
 const backendPath = getDevDebugLogPath('backend');
 
 describe('getDevDebugLogPath', () => {
-  it('returns the frontend debug log path under process.cwd()', () => {
-    expect(frontendPath).toBe(path.join(process.cwd(), path.basename(frontendPath)));
-    expect(path.basename(frontendPath)).toMatch(/^cyboflow-.*-debug\.log$/);
-    expect(path.dirname(frontendPath)).toBe(process.cwd());
-  });
-  it('returns the backend debug log path under process.cwd()', () => {
-    expect(backendPath).toBe(path.join(process.cwd(), path.basename(backendPath)));
-    expect(path.basename(backendPath)).toMatch(/^cyboflow-.*-debug\.log$/);
-    expect(path.dirname(backendPath)).toBe(process.cwd());
+  it.each(['frontend', 'backend'] as const)('returns the %s debug log path under process.cwd()', (kind) => {
+    const logPath = getDevDebugLogPath(kind);
+    expect(logPath).toBe(path.join(process.cwd(), path.basename(logPath)));
+    expect(path.basename(logPath)).toMatch(/^cyboflow-.*-debug\.log$/);
+    expect(path.dirname(logPath)).toBe(process.cwd());
   });
   it('frontend and backend paths are distinct', () => {
     expect(frontendPath).not.toBe(backendPath);

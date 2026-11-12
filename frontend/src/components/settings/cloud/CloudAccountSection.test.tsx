@@ -391,14 +391,28 @@ describe('CloudAccountSection: badges, devices, errors', () => {
 });
 
 describe('cloudCopy', () => {
-  const codes: CloudSignInFailureCode[] = [
-    'cancelled', 'timed_out', 'browser_open_failed', 'loopback_failed', 'invalid_callback', 'browser_error',
-    'invalid_code', 'bad_request', 'ref_code_taken', 'upgrade_required', 'rate_limited', 'service_unavailable',
-    'network', 'bad_response', 'secrets_unavailable', 'not_available', 'unexpected',
+  const expectedCopy: [CloudSignInFailureCode, string][] = [
+    ['cancelled', 'Sign-in was cancelled.'],
+    ['timed_out', "Sign-in timed out. Start again when you're ready."],
+    ['browser_open_failed', "cyboflow couldn't open your browser. Check that a default browser is set, then try again."],
+    ['loopback_failed', "cyboflow couldn't start the local sign-in listener. Try again."],
+    ['invalid_callback', 'The browser returned an unexpected response. Start signing in again from here.'],
+    ['browser_error', 'The browser returned an unexpected response. Start signing in again from here.'],
+    ['invalid_code', 'The sign-in link expired or was already used. Start again.'],
+    ['bad_request', 'Something went wrong while registering this computer. Try again.'],
+    ['ref_code_taken', 'That ref code was just taken by another computer. Sign in again and choose another code.'],
+    ['upgrade_required', 'Update cyboflow to sign in.'],
+    ['rate_limited', 'Too many sign-in attempts. Wait a minute and try again.'],
+    ['service_unavailable', 'cyboflow cloud is unavailable right now. Try again in a few minutes.'],
+    ['network', "Couldn't reach cyboflow cloud. Check your connection and try again."],
+    ['bad_response', 'Something went wrong while registering this computer. Try again.'],
+    ['secrets_unavailable', "Your OS keychain isn't available, so the sign-in can't be stored securely."],
+    ['not_available', 'Turn on Agents & Environments to use cyboflow cloud.'],
+    ['unexpected', 'Something went wrong while registering this computer. Try again.'],
   ];
 
-  it.each(codes)('signInFailureCopy(%s) is non-empty fixed text', (code) => {
-    expect(signInFailureCopy(code).length).toBeGreaterThan(10);
+  it.each(expectedCopy)('signInFailureCopy(%s) is its fixed text', (code, expected) => {
+    expect(signInFailureCopy(code)).toBe(expected);
   });
 
   it('the browser-open copy tells the user to check the default browser', () => {

@@ -3,7 +3,6 @@
  * the static-mockup ui-prototype/generic HTML loader (artifacts:load-html).
  *
  * Covers:
- *   - registers the channel;
  *   - reads the canonical run-subtree prototype/index.html and injects the CSP
  *     <meta> as the first <head> child;
  *   - synthesizes a <head> when the document has none;
@@ -202,15 +201,6 @@ describe('injectAfterLeadingDoctype', () => {
 });
 
 describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
-  it('registers the channel', () => {
-    const { ipcMain, handlers } = makeHandlerCapture();
-    registerArtifactHtmlHandlers(
-      ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
-      emptyServices(),
-    );
-    expect(handlers.has('artifacts:load-html')).toBe(true);
-  });
-
   it('reads the run-subtree prototype and injects the CSP meta', async () => {
     await writeRunProto(RUN_ID, '<html><head></head><body>mock</body></html>');
     const { ipcMain, handlers } = makeHandlerCapture();

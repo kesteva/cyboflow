@@ -274,19 +274,6 @@ describe('RunDiffFileList grouped rendering', () => {
     expect(within(unstagedSection).getAllByTestId('run-diff-file-row')).toHaveLength(2);
   });
 
-  it('still shows the file count and rollup numbers at a narrow (240px) width', () => {
-    render(
-      <div style={{ width: 240 }}>
-        <RunDiffFileList diff={GROUPED_DIFF} groups={GROUPS} onOpenFile={vi.fn()} />
-      </div>,
-    );
-
-    const unstagedHeader = screen.getByTestId('run-diff-group-header-unstaged');
-    expect(within(unstagedHeader).getByText('2 files')).toBeInTheDocument();
-    expect(within(unstagedHeader).getByText('+5')).toBeInTheDocument();
-    expect(within(unstagedHeader).getByText('−2')).toBeInTheDocument();
-  });
-
   it('still shows the file count and rollup numbers at the rail ceiling (640px) width, with the header sized to its container', () => {
     const { container } = render(
       <div data-testid="rail-640" style={{ width: 640 }}>

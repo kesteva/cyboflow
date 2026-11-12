@@ -496,25 +496,10 @@ describe('InteractiveClaudeManager', () => {
       const idx = args.indexOf('--permission-mode');
       expect(idx).toBeGreaterThanOrEqual(0);
       expect(args[idx + 1]).toBe('auto');
-    });
-
-    it('emits "--permission-mode auto" BEFORE any end-of-options "--" separator', () => {
       // buildCommandArgs does NOT push the "--" / positional prompt itself (that
-      // happens in spawnCliProcess), but the flag must precede where it lands.
-      const args = mgr.callBuildCommandArgs({
-        panelId: 'p1',
-        sessionId: 's1',
-        worktreePath: '/tmp/wt',
-        prompt: 'hi',
-        agentPermissionMode: 'auto',
-      });
+      // happens in spawnCliProcess); if one ever were, the flag must precede it.
       const sepIdx = args.indexOf('--');
-      const flagIdx = args.indexOf('--permission-mode');
-      expect(flagIdx).toBeGreaterThanOrEqual(0);
-      // No separator emitted by buildCommandArgs; if one ever were, the flag must precede it.
-      if (sepIdx >= 0) {
-        expect(flagIdx).toBeLessThan(sepIdx);
-      }
+      if (sepIdx >= 0) expect(idx).toBeLessThan(sepIdx);
     });
 
     it('omits "--permission-mode" for non-auto agentPermissionMode values', () => {
@@ -637,7 +622,12 @@ describe('InteractiveClaudeManager', () => {
         prompt: 'hi',
         agentPermissionMode: 'acceptEdits',
       });
-      expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeDefined();
+      const preToolUse = inlineSettingsOf(args).hooks?.PreToolUse as
+        | Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>
+        | undefined;
+      expect(
+        preToolUse?.some((g) => g.matcher === '*' && g.hooks?.[0]?.command?.includes('preToolUseShellHook')),
+      ).toBe(true);
       expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
     });
 
@@ -831,12 +821,14 @@ describe('InteractiveClaudeManager', () => {
     let db: Database.Database;
     let mgr: TestableInteractiveClaudeManager;
     let repo: string;
+    let logger: LoggerSpy;
 
     beforeEach(() => {
       db = makeRawEventsDb();
+      logger = createLoggerSpy();
       mgr = new TestableInteractiveClaudeManager(
         createMockSessionManager(),
-        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        logger as unknown as import('../../../../utils/logger').Logger,
         createMockConfigManager(),
         db,
       );
@@ -871,8 +863,11 @@ describe('InteractiveClaudeManager', () => {
       expect(second.split('\n').filter((l) => l.trim() === '.cyboflow/')).toHaveLength(1);
     });
 
-    it('fail-soft on a non-git directory — warns, does not throw', () => {
+    it('fail-soft on a non-git directory — silent no-op (debug-level only), does not throw', () => {
       expect(() => mgr.callEnsureWorktreeExcludes(repo)).not.toThrow();
+      expect(fs.existsSync(path.join(repo, '.git'))).toBe(false);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.info).not.toHaveBeenCalled();
     });
   });
 

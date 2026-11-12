@@ -15,10 +15,6 @@ import {
 const HEADING = `## ${ARCH_DESIGN_SECTION_HEADING}`;
 
 describe('extractArchDesignSection', () => {
-  it('exports the canonical heading text', () => {
-    expect(ARCH_DESIGN_SECTION_HEADING).toBe('Architecture design');
-  });
-
   it('extracts the section when the heading is present', () => {
     const body = '# Idea\n\nIntro.\n\n## Architecture design\n\nUse a queue.\n\n- item one\n';
     expect(extractArchDesignSection(body)).toBe('Use a queue.\n\n- item one');

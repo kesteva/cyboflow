@@ -351,7 +351,7 @@ describe('setFilterProject', () => {
 
 describe('search / membership filter / sort view state', () => {
   it('defaults: empty search, no membership selections, manual sort', () => {
-    const s = useBacklogStore.getState();
+    const s = useBacklogStore.getInitialState();
     expect(s.searchQuery).toBe('');
     expect(s.selectedSprintIds).toEqual([]);
     expect(s.selectedExperimentIds).toEqual([]);
