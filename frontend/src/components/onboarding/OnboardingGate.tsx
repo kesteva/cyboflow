@@ -521,6 +521,14 @@ export function OnboardingGate(): React.JSX.Element | null {
     if (window.electronAPI) void window.electronAPI.openExternal('https://claude.ai/code');
   }, []);
 
+  // An in-app sign-in just completed on the Connect step: re-probe (the CLI
+  // has written its credentials by the time it reports success) and switch
+  // the Claude toggle on — signing in is the consent the toggle asks for.
+  const handleClaudeSignedIn = useCallback(() => {
+    setConnected(true);
+    void runDetect();
+  }, [runDetect, setConnected]);
+
   const handleLocate = useCallback(async () => {
     const res = await API.dialog.openFile();
     if (res.success && typeof res.data === 'string' && res.data) {
@@ -873,6 +881,7 @@ export function OnboardingGate(): React.JSX.Element | null {
             onRecheck={() => void runDetect()}
             onLocate={() => void handleLocate()}
             onInstall={handleInstall}
+            onClaudeSignedIn={handleClaudeSignedIn}
           />
         );
       case ONBOARDING_DEFAULT_RUNTIME_STEP:

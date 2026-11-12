@@ -23,7 +23,7 @@
  * touches ~/.cyboflow), the shared dbAdapter + orchestratorTestDb fixtures, and
  * a vi.fn()-backed LoggerLike spy.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { EventEmitter } from 'events';
 import * as net from 'net';
 import * as fs from 'fs';
@@ -73,10 +73,10 @@ vi.mock('net', async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 interface SpyLogger extends LoggerLike {
-  info: ReturnType<typeof vi.fn>;
-  warn: ReturnType<typeof vi.fn>;
-  error: ReturnType<typeof vi.fn>;
-  debug: ReturnType<typeof vi.fn>;
+  info: Mock;
+  warn: Mock;
+  error: Mock;
+  debug: Mock;
 }
 
 function makeSpyLogger(): SpyLogger {
@@ -642,21 +642,6 @@ describe('OrchSocketServer', () => {
     // afterEach's stop() targets `server`, which this test never assigned.
     },
   );
-
-  // -------------------------------------------------------------------------
-  // Public accessors
-  // -------------------------------------------------------------------------
-
-  it('exposes getSocketPath and hasClientForRun', async () => {
-    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
-    await server.start();
-
-    expect(server.getSocketPath()).toBe(socketPath);
-    // hasClientForRun survives as a diagnostic (its PermissionServerLike
-    // contract retired with the stale_socket rung), so pin it directly rather
-    // than through an interface no longer worth declaring.
-    expect(server.hasClientForRun('nope')).toBe(false);
-  });
 
   // -------------------------------------------------------------------------
   // Peer authentication (per-run bearer tokens)

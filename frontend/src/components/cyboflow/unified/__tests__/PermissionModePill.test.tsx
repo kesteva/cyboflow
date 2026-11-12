@@ -1,10 +1,10 @@
 import '@testing-library/jest-dom';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { PermissionModePill } from '../PermissionModePill';
 
 describe('PermissionModePill', () => {
-  let persist: ReturnType<typeof vi.fn>;
+  let persist: Mock;
 
   beforeEach(() => {
     persist = vi.fn().mockResolvedValue({ success: true });

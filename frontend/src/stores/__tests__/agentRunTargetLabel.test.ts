@@ -77,6 +77,6 @@ describe('agentRunTargetLabel', () => {
   it('still shows a legacy model-without-runtime pin', () => {
     // Pre-gating rows can carry a model with runtime NULL; the chip must not
     // hide the pin even though the editor no longer lets you create that state.
-    expect(agentRunTargetLabel({ runtime: null, model: 'fable', providerModel: null })).toBe('Fable 5.1');
+    expect(agentRunTargetLabel({ runtime: null, model: 'fable', providerModel: null })).toBe('Fable 5.2');
   });
 });

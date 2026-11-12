@@ -94,7 +94,7 @@ export interface UnifiedComposerProps {
   /** read-only model label (e.g. "Sonnet 4.5"), SDK only. Used only when
    *  `modelSlot` is absent (e.g. a flow run, or a running quick turn). */
   modelLabel?: string | null;
-  /** optional tooltip override for the read-only model pill (e.g. "Fable 5.1 is
+  /** optional tooltip override for the read-only model pill (e.g. "Fable 5.2 is
    *  unavailable — this run uses Opus 4.8"); defaults to the generic lock hint. */
   modelLabelTitle?: string;
   /** interactive model selector (quick SDK, idle) — host supplies the node;

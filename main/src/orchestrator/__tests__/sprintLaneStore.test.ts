@@ -237,7 +237,7 @@ describe('SprintLaneStore', () => {
     // (SPRINT_BATCH_MAX_TASKS_DEFAULTS).
     // -------------------------------------------------------------------------
 
-    it('throws batch_too_large when the ELIGIBLE selection exceeds the default sdk cap (15)', () => {
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default sdk cap (15), even with no getSprintMaxTasks getter (cap is never optional)', () => {
       const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
       expect(() => store.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
       try {
@@ -280,14 +280,6 @@ describe('SprintLaneStore', () => {
         .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
         .get(batchId) as { n: number };
       expect(count.n).toBe(2);
-    });
-
-    it('with no getter, falls back to the built-in default rather than treating the cap as optional', () => {
-      // No deps passed at all (mirrors most of this file's `store`) — the cap
-      // must still apply, never silently disable.
-      const bareStore = SprintLaneStore.initialize(dbAdapter(db));
-      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
-      expect(() => bareStore.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
     });
   });
 

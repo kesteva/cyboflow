@@ -17,8 +17,6 @@
  *    NO other pending blocking item (aggregate-unblock).
  *  - Aggregate-blocking: a permission AND a decision both pending keep the run
  *    paused until BOTH resolve, then it auto-resumes.
- *  - permission-mode 'dontAsk' installs NO hook, so NO permission review_item is
- *    created (mode=ignore short-circuits before requestApproval).
  *
  * The fold writes review_items DIRECTLY in the router transaction (NOT via the
  * async ReviewItemRouter PQueue) — these tests assert the synchronous co-write.
@@ -30,7 +28,6 @@ import { join } from 'node:path';
 import { ApprovalRouter } from '../approvalRouter';
 import { QuestionRouter } from '../questionRouter';
 import { HumanStepManager } from '../humanStepManager';
-import { buildPreToolUseHook } from '../permissionModeMapper';
 import { resolvePermissionReviewItem } from '../reviewItemListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { handleEntityWrite } from '../autoMintArtifacts';
@@ -441,24 +438,5 @@ describe('HumanStepManager human gate (run-pause + aggregate-unblock)', () => {
     expect(r2.resolved).toBe(true);
     expect(r2.resumed).toBe(true);
     expect(runStatus(db, 'run-h')).toBe('running');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// permission-mode 'dontAsk' (the workflow analogue of 'ignore') → NO review_item
-// ---------------------------------------------------------------------------
-
-describe("permission-mode 'dontAsk' (ignore) creates NO permission review_item", () => {
-  it('installs no PreToolUse hook, so requestApproval is never reached and no review_item is written', () => {
-    const db = buildDb();
-    ApprovalRouter.initialize(dbAdapter(db));
-    seedRun(db, 'run-ignore');
-
-    // 'dontAsk' returns undefined — there is no hook, so the SDK never routes a
-    // PreToolUse through ApprovalRouter, so no permission review_item is created.
-    const hook = buildPreToolUseHook('dontAsk', 'run-ignore');
-    expect(hook).toBeUndefined();
-
-    expect(db.prepare('SELECT COUNT(*) AS n FROM review_items WHERE run_id = ?').get('run-ignore')).toEqual({ n: 0 });
   });
 });

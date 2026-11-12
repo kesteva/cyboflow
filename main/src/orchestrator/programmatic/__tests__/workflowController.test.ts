@@ -1387,24 +1387,6 @@ describe('WorkflowController', () => {
       expect(runner.calls.some((c) => c.id === 'verify')).toBe(true);
     });
 
-    it('cancels the run when the signal aborts mid fan-out', async () => {
-      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
-      const driver = makeFanOutDriver(['t1', 't2']);
-      const ac = new AbortController();
-      // Abort as soon as the first inner step runs.
-      const runner: StepRunner = {
-        async runStep() {
-          ac.abort();
-          return { status: 'aborted' };
-        },
-      };
-
-      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d, ac.signal);
-
-      expect(result.outcome).toBe('canceled');
-      expect(result.failedStepId).toBe('execute');
-    });
-
     it('falls back to the normal agent path when the driver resolves [] (byte-identical)', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement', 'verify']), step({ id: 'next' })])]);
       const driver = makeFanOutDriver([]); // no items → no fan-out

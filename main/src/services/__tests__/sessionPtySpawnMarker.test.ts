@@ -86,6 +86,7 @@ describe('session/terminal PTY spawns carry the spawn marker', () => {
     expect(opts.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
     expect(opts.env.CYBOFLOW_WORKTREE).toBe(WORKTREE);
     expect(opts.env.CYBOFLOW_PANEL_ID).toBe('panel-1');
+    expect(opts.env.CYBOFLOW_SESSION_ID).toBe('sess-2');
   });
 
   it.skipIf(process.platform === 'win32')(

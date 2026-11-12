@@ -350,17 +350,4 @@ describe('sessionOps.getStatistics — file statistics', () => {
     expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, BASE_COMMIT);
     expect(result.data.files.totalFilesChanged).toBe(177);
   });
-
-  it('with no baseRef supplied, behaves exactly as before (diffs against base_commit)', async () => {
-    const getDiffStatsAgainstRef = vi.fn(async () => ({
-      stats: { additions: 15443, deletions: 745, filesChanged: 177 },
-      changedFiles: ['CHANGELOG.md', 'docs/ARCHITECTURE.md'],
-    }));
-    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
-
-    const result = await invoke(ops);
-
-    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, BASE_COMMIT);
-    expect(result.data.files.totalFilesChanged).toBe(177);
-  });
 });

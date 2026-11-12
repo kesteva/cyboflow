@@ -22,7 +22,7 @@ vi.mock('../../orchestrator/dynamicWorkflows', () => ({
 }));
 vi.mock('../../services/telemetry', () => ({ trackUsage: vi.fn() }));
 vi.mock('../../services/worktreeChangeNotifier', () => ({
-  WorktreeChangeNotifier: vi.fn().mockImplementation(() => ({ subscribe: vi.fn() })),
+  WorktreeChangeNotifier: vi.fn().mockImplementation(function () { return { subscribe: vi.fn() }; }),
 }));
 vi.mock('../../orchestrator/artifactRouter', () => ({
   ArtifactRouter: { getInstance: vi.fn(() => ({ reapForRun: vi.fn() })) },

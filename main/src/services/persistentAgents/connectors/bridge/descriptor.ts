@@ -21,7 +21,7 @@ export const BRIDGE_DEFINITION: ConnectorDefinition = {
   id: BRIDGE_CONNECTOR_ID,
   kind: 'bridge',
   version: BRIDGE_CONNECTOR_VERSION,
-  vendors: ['openai-dots', 'meta-muse', 'other'],
+  vendors: ['anthropic-duet', 'openai-dots', 'meta-muse', 'other'],
   displayName: 'cyboflow Bridge',
   connectsVia: 'bridge',
   capabilities: BRIDGE_CAPABILITIES,
@@ -31,7 +31,8 @@ export const BRIDGE_DEFINITION: ConnectorDefinition = {
 };
 
 /** Default transport per vendor (the dialog may override). */
-export const BRIDGE_DEFAULT_TRANSPORT: Record<'openai-dots' | 'meta-muse' | 'other', RelayTransport> = {
+export const BRIDGE_DEFAULT_TRANSPORT: Record<'anthropic-duet' | 'openai-dots' | 'meta-muse' | 'other', RelayTransport> = {
+  'anthropic-duet': 'relay-mcp',
   'openai-dots': 'relay-mcp',
   'meta-muse': 'relay-http',
   other: 'relay-mcp',

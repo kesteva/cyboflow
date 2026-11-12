@@ -1,5 +1,5 @@
 // Test setup file for Vitest
-import { vi } from 'vitest';
+import { beforeEach, vi } from 'vitest';
 
 import { startOrphanWatchdog } from '../../../vitestOrphanWatchdog';
 
@@ -81,3 +81,13 @@ global.console = {
   warn: vi.fn(),
   error: vi.fn(),
 };
+
+// vitest 3+ no longer resets mock state in vi.restoreAllMocks(), and vi.spyOn on an
+// already-mocked method returns that same mock. Tests that `vi.spyOn(console, 'error')`
+// therefore inherit every call made by earlier tests in the file; clear the shared
+// console mocks between tests to keep the per-test isolation these suites assumed.
+beforeEach(() => {
+  for (const method of ['log', 'debug', 'info', 'warn', 'error'] as const) {
+    vi.mocked(console[method]).mockClear();
+  }
+});

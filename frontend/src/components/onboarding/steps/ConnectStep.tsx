@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { ProviderDetectionResult } from '../../../../../shared/types/onboarding';
+import { ClaudeSignInFlow } from '../../session/ClaudeSignInCard';
 
 interface ConnectStepProps {
   claudeDetection: ProviderDetectionResult<'claude'> | null;
@@ -19,6 +21,11 @@ interface ConnectStepProps {
   onRecheck: () => void;
   onLocate: () => void;
   onInstall: () => void;
+  /**
+   * A Claude sign-in finished inside the step (the in-app `claude auth login`
+   * flow). The gate re-probes and switches the Claude toggle on.
+   */
+  onClaudeSignedIn: () => void;
 }
 
 interface ProviderRowProps {
@@ -87,7 +94,9 @@ function ProviderRow({
 
 function claudeDetail(detection: ProviderDetectionResult<'claude'>): string {
   if (detection.state === 'loggedOut') return 'Installed · sign in required';
-  if (detection.state === 'missing') return 'Not found on this machine';
+  // 'missing' = no login AND no external CLI. The SDK runtime is bundled, so a
+  // sign-in is all that is missing — not an install.
+  if (detection.state === 'missing') return 'Sign in required';
   const version = detection.binary.version ? ` · ${detection.binary.version}` : '';
   const account = detection.credentials.account ? ` · ${detection.credentials.account}` : '';
   return `${detection.binary.found ? 'Detected' : 'SDK ready'}${version}${account}`;
@@ -127,7 +136,9 @@ export function ConnectStep({
   onRecheck,
   onLocate,
   onInstall,
+  onClaudeSignedIn,
 }: ConnectStepProps): React.JSX.Element {
+  const [claudeSigningIn, setClaudeSigningIn] = useState(false);
   const loading =
     checking || claudeDetection === null || codexDetection === null || ompDetection === null;
   const claudeReady = claudeDetection?.state === 'detected';
@@ -202,23 +213,56 @@ export function ConnectStep({
 
           {(claudeDetection.state !== 'detected' || codexDetection.state !== 'detected') && (
             <div className="border border-border-primary bg-[var(--paper-3)] px-3.5 py-2.5 text-[10px] leading-[1.55] text-text-secondary">
-              {claudeDetection.state === 'loggedOut' && (
-                <div>Claude: run <code className="border border-border-primary bg-bg-primary px-1">claude</code> and sign in.</div>
-              )}
-              {claudeDetection.state === 'missing' && (
-                <div>Claude Code is not installed. Install it or locate an existing binary.</div>
+              {claudeDetection.state !== 'detected' && (
+                <div data-testid="onboarding-claude-sign-in">
+                  {claudeSigningIn ? (
+                    <div className="border border-border-primary bg-bg-primary p-3 text-text-primary">
+                      {/* Unmount the flow BEFORE the gate re-probes: the probe's
+                          loading state replaces this panel, and a remount would
+                          start a second `claude auth login`. */}
+                      <ClaudeSignInFlow
+                        onSignedIn={() => {
+                          setClaudeSigningIn(false);
+                          onClaudeSignedIn();
+                        }}
+                        onClose={() => setClaudeSigningIn(false)}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        Claude: sign in with your Claude account. Cyboflow ships its own Claude Code runtime, so
+                        there is nothing to install.
+                      </div>
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setClaudeSigningIn(true)}
+                          data-testid="onboarding-claude-sign-in-start"
+                          className="border border-interactive bg-interactive px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[.1em] text-white transition-opacity hover:opacity-90"
+                        >
+                          Sign in to Claude
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
               {codexDetection.state === 'loggedOut' && (
-                <div>Codex: run <code className="border border-border-primary bg-bg-primary px-1">codex login</code> with ChatGPT auth.</div>
+                <div className={claudeDetection.state !== 'detected' ? 'mt-2' : undefined}>
+                  Codex: run <code className="border border-border-primary bg-bg-primary px-1">codex login</code> with ChatGPT auth.
+                </div>
               )}
               {codexDetection.state === 'unavailable' && (
-                <div>Codex could not start its bundled runtime. You can continue with Claude.</div>
+                <div className={claudeDetection.state !== 'detected' ? 'mt-2' : undefined}>
+                  Codex could not start its bundled runtime. You can continue with Claude.
+                </div>
               )}
               <div className="mt-2 flex flex-wrap gap-2">
                 <GhostButton label="↻ Check again" onClick={onRecheck} />
                 {claudeDetection.state === 'missing' && (
                   <>
-                    <GhostButton label="Install Claude" onClick={onInstall} />
+                    <GhostButton label="Install Claude CLI" onClick={onInstall} />
                     <GhostButton label="Locate binary…" onClick={onLocate} />
                   </>
                 )}

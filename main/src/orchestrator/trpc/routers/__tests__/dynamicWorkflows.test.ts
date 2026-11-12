@@ -28,24 +28,17 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('cyboflow.dynamicWorkflows.list — uninitialized-tracker fallback', () => {
-  it('returns [] when DynamicWorkflowTracker has not been initialized', async () => {
-    // Fresh module state: tryGetInstance() returns null.
-    const { appRouter } = await import('../../router');
-    const { createContext } = await import('../../context');
+  it.each([{}, { sessionId: 'session-1' }])(
+    'returns [] when DynamicWorkflowTracker has not been initialized (input %j)',
+    async (input) => {
+      // Fresh module state: tryGetInstance() returns null.
+      const { appRouter } = await import('../../router');
+      const { createContext } = await import('../../context');
 
-    const caller = appRouter.createCaller(createContext());
-    const result = await caller.cyboflow.dynamicWorkflows.list({});
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.dynamicWorkflows.list(input);
 
-    expect(result).toEqual([]);
-  });
-
-  it('returns [] for a sessionId-filtered query when uninitialized', async () => {
-    const { appRouter } = await import('../../router');
-    const { createContext } = await import('../../context');
-
-    const caller = appRouter.createCaller(createContext());
-    const result = await caller.cyboflow.dynamicWorkflows.list({ sessionId: 'session-1' });
-
-    expect(result).toEqual([]);
-  });
+      expect(result).toEqual([]);
+    },
+  );
 });

@@ -371,12 +371,6 @@ describe('runAgentPreflight — mobile task shape (no serve, driverPort: null)',
     expect(result.checks.map((c) => c.id).sort()).toEqual(['driver-cli', 'node'].sort());
     expect(result.ok).toBe(true);
   });
-
-  it('a web task with a numeric driverPort still has driver-port-free', async () => {
-    const task = makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}' } });
-    const result = await runAgentPreflight(happyDeps(), { task, ...ARGS });
-    expect(checkFor(result, 'driver-port-free')).toBeDefined();
-  });
 });
 
 describe("runAgentPreflight — 'data-dir' (conditional, affirmative on throw)", () => {

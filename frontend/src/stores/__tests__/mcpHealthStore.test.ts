@@ -79,7 +79,6 @@ async function flushInitialPoll() {
 
 describe('mcpHealthStore — initial state', () => {
   it('starts with status=starting, lastCheckedAt=null, lastError=null, pid=null', () => {
-    resetStore();
     const state = useMcpHealthStore.getState();
     expect(state.status).toBe('starting');
     expect(state.lastCheckedAt).toBeNull();
@@ -114,10 +113,15 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     const startingHealth: McpServerHealth = { status: 'starting', restartAttempts: 0 };
     mockMcpServerQuery.mockResolvedValue(startingHealth);
 
+    const now = 2_000_000;
+    vi.setSystemTime(now);
+
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
 
+    expect(mockMcpServerQuery).toHaveBeenCalled();
     expect(useMcpHealthStore.getState().status).toBe('starting');
+    expect(useMcpHealthStore.getState().lastCheckedAt).toBe(now);
     unsubscribe();
   });
 
@@ -141,20 +145,6 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     await flushInitialPoll();
 
     expect(useMcpHealthStore.getState().status).toBe('error');
-    unsubscribe();
-  });
-
-  it('updates lastCheckedAt on the first tick', async () => {
-    const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
-    mockMcpServerQuery.mockResolvedValue(runningHealth);
-
-    const now = 1000000;
-    vi.setSystemTime(now);
-
-    const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
-    await flushInitialPoll();
-
-    expect(useMcpHealthStore.getState().lastCheckedAt).toBe(now);
     unsubscribe();
   });
 

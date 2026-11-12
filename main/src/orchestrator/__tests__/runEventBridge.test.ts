@@ -524,25 +524,6 @@ describe('runEventBridge', () => {
     const SP_RUN_ID = 'run-skip-persistence-001';
 
     // -----------------------------------------------------------------------
-    // (a) skipPersistence: true — bridge never calls new EventRouter / new RawEventsSink
-    //     Verified by a stub db whose `prepare` throws — if the bridge tried to
-    //     construct a RawEventsSink it would call db.prepare and the test would fail.
-    // -----------------------------------------------------------------------
-    it('(a) skipPersistence: true skips router/sink construction — db may be omitted entirely', () => {
-      const { asPublisher } = makePublisher();
-      const source = new EventEmitter();
-
-      expect(() => {
-        bridgeEvents({
-          runId: SP_RUN_ID,
-          source,
-          publisher: asPublisher,
-          skipPersistence: true,
-        });
-      }).not.toThrow();
-    });
-
-    // -----------------------------------------------------------------------
     // (b) skipPersistence: true — onFirstMessage still fires exactly once
     // -----------------------------------------------------------------------
     it('(b) skipPersistence: true still fires onFirstMessage exactly once', () => {
@@ -592,18 +573,20 @@ describe('runEventBridge', () => {
     //     5 events → 4 rows (stream_event is skipped by the default sink) and
     //     5 publish calls
     // -----------------------------------------------------------------------
-    it('(d) skipPersistence: false/absent preserves legacy behaviour — 4 INSERTs (stream_event skipped), 5 publishes', () => {
+    it.each([
+      ['false', false],
+      ['absent', undefined],
+    ])('(d) skipPersistence: %s preserves legacy behaviour — 4 INSERTs (stream_event skipped), 5 publishes', (_label, skipPersistence) => {
       const realDb = makeRawEventsDb();
       const { publish, asPublisher } = makePublisher();
       const src = new EventEmitter();
 
-      // Test both: one with explicit false, one with absent (handled by two emissions each)
       bridgeEvents({
         runId: SP_RUN_ID,
         source: src,
         publisher: asPublisher,
         db: realDb,
-        skipPersistence: false,
+        skipPersistence,
       });
 
       const events = [systemEvent, assistantEvent, userEvent, resultEvent, streamEvent];

@@ -113,13 +113,6 @@ function seedPreMigrationRows(db: Database.Database): void {
 const MIGRATION = '059_entity_category.sql';
 
 describe('Migration 059: entity category (feature|bug|chore)', () => {
-  it('(a) applies cleanly through the production transaction wrapper', () => {
-    const db = buildDb();
-    seedPreMigrationRows(db);
-    expect(() => runMigrationViaProductionPath(db, readMigration(MIGRATION))).not.toThrow();
-    db.close();
-  });
-
   it("(b) backfills every pre-existing row's category to the DEFAULT 'feature' on all three tables", () => {
     const db = buildDb();
     seedPreMigrationRows(db);

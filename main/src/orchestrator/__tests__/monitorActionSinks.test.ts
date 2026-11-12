@@ -14,7 +14,7 @@
  * consult forever with the whole suite still green. Its SQL text and bound
  * arguments are therefore asserted directly.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import {
   buildGateEscalationSinks,
   buildLaneTriageActions,
@@ -263,7 +263,7 @@ function recordingDb(rows: unknown[]): {
 }
 
 /** A LoggerLike whose four methods are spies. */
-function makeLogger(): LoggerLike & { warn: ReturnType<typeof vi.fn> } {
+function makeLogger(): LoggerLike & { warn: Mock } {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 

@@ -20,7 +20,7 @@
  *      a project-load failure degrading to "All projects" alone.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type {
@@ -294,80 +294,4 @@ describe('InsightsView', () => {
     // Content stays — the error is non-fatal.
     expect(screen.getByTestId('stats-section')).toBeInTheDocument();
   });
-
-  it('renders a workflow stats card merging run-stats + usage by workflowId', () => {
-    mockWorkflowStats = [
-      buildRunStats({ workflowId: 'wf-sprint', workflowName: 'Sprint', totalRuns: 12, errorRatePct: 8.3 }),
-    ];
-    mockWorkflowUsage = [
-      { workflowId: 'wf-sprint', workflowName: 'Sprint', runsWithUsage: 10, avgTotalTokens: 184000, totalTokens: 1840000, totalCacheTokens: 9000000, totalCostUsd: 4.2, avgCostUsd: 0.42 },
-    ];
-    render(<InsightsView />);
-    const card = screen.getByTestId('stats-card-wf-sprint');
-    expect(card).toBeInTheDocument();
-    // Headline is the TOTAL (m-tier compact: 1840000 → '1.8m'); the per-run
-    // average rides beside it in k-form (184000 → '184k').
-    expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('1.8m');
-    expect(screen.getByTestId('stats-avg-tokens')).toHaveTextContent('avg 184k');
-    // Meta line: error % · runs · cost (2dp).
-    expect(screen.getByTestId('stats-meta')).toHaveTextContent('error 8.3% · runs 12 · cost $4.20');
-  });
-
-  it('surfaces the null-outcome integrity hint when any workflow has nullOutcomeRuns', () => {
-    mockWorkflowStats = [buildRunStats({ workflowId: 'wf-a', nullOutcomeRuns: 3 })];
-    render(<InsightsView />);
-    expect(screen.getByTestId('stats-integrity-hint')).toHaveTextContent('3 runs missing outcome');
-  });
-
-  it('renders the token-by-step panel after a workflow card is selected', () => {
-    mockWorkflowStats = [
-      buildRunStats({ workflowId: 'wf-busy', workflowName: 'Busy', totalRuns: 20 }),
-      buildRunStats({ workflowId: 'wf-quiet', workflowName: 'Quiet', totalRuns: 2 }),
-    ];
-    mockStepTokens = {
-      'wf-busy': [
-        { stepId: 'execute', totalTokens: 64000, assistantMessageCount: 9 },
-        { stepId: 'verify', totalTokens: 12000, assistantMessageCount: 3 },
-      ],
-    };
-    render(<InsightsView />);
-    // Default (no selection) state shows the by-flow panel, never by-step.
-    expect(screen.queryByTestId('stats-token-by-step')).not.toBeInTheDocument();
-    // Drill in: selecting a card switches the panel to that flow's steps.
-    fireEvent.click(screen.getByTestId('stats-card-wf-busy'));
-    const panel = screen.getByTestId('stats-token-by-step');
-    expect(panel).toBeInTheDocument();
-    // BarRow stub renders its label; both step ids present. Scoped to the
-    // panel — CodeQualitySection (section 03) also renders BarRow instances
-    // (category/severity/source tallies) elsewhere on this same page.
-    expect(within(panel).getAllByTestId('bar-row').map((n) => n.textContent)).toEqual([
-      'execute',
-      'verify',
-    ]);
-  });
 });
-
-// ---------------------------------------------------------------------------
-// Fixture builder
-// ---------------------------------------------------------------------------
-
-function buildRunStats(over: Partial<WorkflowRunStats> = {}): WorkflowRunStats {
-  return {
-    workflowId: 'wf',
-    workflowName: 'WF',
-    projectId: 1,
-    totalRuns: 1,
-    activeRuns: 0,
-    completedRuns: 1,
-    failedRuns: 0,
-    canceledRuns: 0,
-    mergedRuns: 1,
-    dismissedRuns: 0,
-    nullOutcomeRuns: 0,
-    interruptedRuns: 0,
-    errorRatePct: 0,
-    avgDurationMs: null,
-    lastRunAt: null,
-    ...over,
-  };
-}

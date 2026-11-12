@@ -11,7 +11,7 @@
  *     an already-live panel;
  *   - SDK / demo panels are NOT handled (returns false → caller keeps its path).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import {
   relayOrSpawnPtyPanel,
   type PtyPanelDispatchDeps,
@@ -31,9 +31,9 @@ interface DbSessionStub {
 
 /** The three PTY managers are stubbed identically; only the routing differs. */
 interface PtyManagerStub {
-  isPanelRunning: ReturnType<typeof vi.fn>;
-  relayUserTurn: ReturnType<typeof vi.fn>;
-  startPanel: ReturnType<typeof vi.fn>;
+  isPanelRunning: Mock;
+  relayUserTurn: Mock;
+  startPanel: Mock;
 }
 
 function makeDeps(
@@ -49,10 +49,10 @@ function makeDeps(
   interactive: PtyManagerStub;
   codex: PtyManagerStub;
   omp: PtyManagerStub;
-  registerLivePanel: ReturnType<typeof vi.fn>;
-  registerCodexPtyPanel: ReturnType<typeof vi.fn>;
-  registerOmpPtyPanel: ReturnType<typeof vi.fn>;
-  updateSession: ReturnType<typeof vi.fn>;
+  registerLivePanel: Mock;
+  registerCodexPtyPanel: Mock;
+  registerOmpPtyPanel: Mock;
+  updateSession: Mock;
 } {
   const running = overrides.running ?? new Set<string>();
   const makeManager = (): PtyManagerStub => ({

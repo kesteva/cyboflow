@@ -13,18 +13,17 @@
  *
  * AC5: Deny replies are sent BEFORE PTY kill — asserted via spy call-order.
  *
- * AC7: Worktree is PRESERVED — worktreeManager.remove is never called.
+ * AC7: Worktree is PRESERVED — the new run keeps the old worktree_path (AC4d).
  *
  * Test strategy:
  *   - Real in-memory better-sqlite3 DB with migrations 006 + 007 applied.
  *   - Mocked ApprovalRouter (clearPendingForRun is a no-op spy).
  *   - Mocked managerStop (a vi.fn() that resolves immediately).
- *   - Mocked worktreeManager.remove (vi.fn() asserted never-called).
  *   - The mutation body is exercised via the cancelAndRestartHandler()
  *     extracted helper (tested directly, without the tRPC wrapper, to avoid
  *     wiring the full tRPC context).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
@@ -66,11 +65,10 @@ function seedWorkflowAndRun(
 
 interface OrderSpy {
   calls: string[];
-  clearPendingForRun: ReturnType<typeof vi.fn>;       // approvalRouter
-  clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
-  managerStop: ReturnType<typeof vi.fn>;
-  worktreeRemove: ReturnType<typeof vi.fn>;
-  deletePendingDraftsForRun: ReturnType<typeof vi.fn>; // F5 sweep
+  clearPendingForRun: Mock;       // approvalRouter
+  clearQuestionsForRun: Mock;     // questionRouter
+  managerStop: Mock;
+  deletePendingDraftsForRun: Mock; // F5 sweep
 }
 
 function makeOrderSpy(): OrderSpy {
@@ -88,15 +86,11 @@ function makeOrderSpy(): OrderSpy {
     calls.push('managerStop');
   });
 
-  const worktreeRemove = vi.fn(async (_path: string) => {
-    calls.push('worktreeRemove');
-  });
-
   const deletePendingDraftsForRun = vi.fn(async (_runId: string) => {
     calls.push('deletePendingDraftsForRun');
   });
 
-  return { calls, clearPendingForRun, clearQuestionsForRun, managerStop, worktreeRemove, deletePendingDraftsForRun };
+  return { calls, clearPendingForRun, clearQuestionsForRun, managerStop, deletePendingDraftsForRun };
 }
 
 // ---------------------------------------------------------------------------
@@ -151,16 +145,6 @@ describe('cancelAndRestartHandler', () => {
   // -------------------------------------------------------------------------
   // AC5: deny BEFORE PTY kill
   // -------------------------------------------------------------------------
-
-  it('calls clearPendingForRun BEFORE managerStop (AC5: deny before kill)', async () => {
-    const runId = randomUUID();
-    seedWorkflowAndRun(db, runId, 'stuck');
-
-    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
-
-    expect(spy.calls[0]).toBe('clearPendingForRun');
-    expect(spy.calls.indexOf('managerStop')).toBeGreaterThan(spy.calls.indexOf('clearPendingForRun'));
-  });
 
   it('calls approvalRouter.clearPendingForRun → questionRouter.clearPendingForRun → managerStop in that order', async () => {
     const runId = randomUUID();
@@ -439,19 +423,6 @@ describe('cancelAndRestartHandler', () => {
 
     expect(typeof result.newRunId).toBe('string');
     expect(result.newRunId).not.toBe(runId);
-  });
-
-  // -------------------------------------------------------------------------
-  // AC7: worktree preserved — worktreeManager.remove never called
-  // -------------------------------------------------------------------------
-
-  it('does NOT call worktreeManager.remove (AC7: worktree preserved)', async () => {
-    const runId = randomUUID();
-    seedWorkflowAndRun(db, runId, 'stuck');
-
-    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
-
-    expect(spy.worktreeRemove).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------

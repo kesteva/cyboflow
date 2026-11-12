@@ -22,8 +22,8 @@ const termMock = {
   options: {} as Record<string, unknown>,
 };
 
-vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(() => termMock) }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn(() => ({ fit: vi.fn(), dispose: vi.fn() })) }));
+vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(function () { return termMock; }) })); // function: vitest 4 `new` needs a constructable impl
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn(function () { return { fit: vi.fn(), dispose: vi.fn() }; }) }));
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 vi.mock('../../../contexts/ThemeContext', () => ({ useTheme: () => ({ theme: 'paper', setTheme: vi.fn() }) }));
 vi.mock('../../../utils/terminalLinks', () => ({ attachTerminalLinks: vi.fn() }));

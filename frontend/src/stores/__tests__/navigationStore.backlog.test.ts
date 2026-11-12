@@ -17,10 +17,6 @@ function reset(): void {
 describe('navigationStore — backlogOpen', () => {
   beforeEach(reset);
 
-  it('defaults to closed', () => {
-    expect(useNavigationStore.getState().backlogOpen).toBe(false);
-  });
-
   it('openBacklog / closeBacklog set the flag', () => {
     useNavigationStore.getState().openBacklog();
     expect(useNavigationStore.getState().backlogOpen).toBe(true);

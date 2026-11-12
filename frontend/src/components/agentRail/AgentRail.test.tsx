@@ -108,19 +108,12 @@ describe('AgentRail — collapse', () => {
     render(<AgentRail />);
 
     expect(screen.getByTestId('agent-rail-collapsed')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-rail')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('agent-rail-expand'));
 
     expect(screen.getByTestId('agent-rail')).toBeInTheDocument();
     expect(localStorage.getItem(COLLAPSED_KEY)).toBe('false');
-  });
-
-  it('renders collapsed when layoutStore says the rail is collapsed', () => {
-    useLayoutStore.setState({ agentRailCollapsed: true });
-    render(<AgentRail />);
-
-    expect(screen.getByTestId('agent-rail-collapsed')).toBeInTheDocument();
-    expect(screen.queryByTestId('agent-rail')).not.toBeInTheDocument();
   });
 });
 
@@ -179,10 +172,10 @@ describe('AgentRail — width resize', () => {
     expect(railWidth()).toBe(360);
   });
 
-  it('honours a width the user actually chose', () => {
-    localStorage.setItem(WIDTH_KEY, '420');
+  it.each([420, 450])('honours a persisted in-range width the user actually chose (%i)', (stored) => {
+    localStorage.setItem(WIDTH_KEY, String(stored));
     render(<AgentRail />);
-    expect(railWidth()).toBe(420);
+    expect(railWidth()).toBe(stored);
   });
 
   it('grows the rail on a leftward drag and persists the width', () => {
@@ -197,12 +190,6 @@ describe('AgentRail — width resize', () => {
     dragHandle(400); // 400px RIGHT → would shrink below min
     expect(railWidth()).toBe(260);
     expect(localStorage.getItem(WIDTH_KEY)).toBe('260');
-  });
-
-  it('seeds the initial width from a persisted (clamped) value', () => {
-    localStorage.setItem(WIDTH_KEY, '450');
-    render(<AgentRail />);
-    expect(railWidth()).toBe(450);
   });
 
   it('seeds an out-of-range persisted value clamped into range', () => {

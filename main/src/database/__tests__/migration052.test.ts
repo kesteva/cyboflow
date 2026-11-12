@@ -63,14 +63,6 @@ function buildDb(): Database.Database {
 }
 
 describe('Migration 052: experiments.promoted_variant_id/promoted_arm/promoted_at', () => {
-  it('applies cleanly', () => {
-    const db = buildDb();
-    expect(() =>
-      runMigrationViaProductionPath(db, readMigration('052_experiment_promoted_variant.sql')),
-    ).not.toThrow();
-    db.close();
-  });
-
   it('adds all three columns (PRAGMA table_info)', () => {
     const db = buildDb();
     runMigrationViaProductionPath(db, readMigration('052_experiment_promoted_variant.sql'));

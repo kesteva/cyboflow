@@ -564,25 +564,14 @@ describe('DartAdapter.listIssues', () => {
       archivedAt: null,
       // The fixture task carries neither key — Dart's omit-when-null shape —
       // and both read back as null.
+      // MEASURED (probe D2/D8): clearing a priority makes the key VANISH from
+      // every payload rather than come back as `priority: null`, so "absent" is
+      // the only spelling of unset and the adapter must not confuse it with a
+      // field it forgot to read.
       priority: null,
       category: null,
       recoveryClientKey: null,
     });
-  });
-
-  it('reads an ABSENT priority/type key as null — Dart omits null fields entirely', async () => {
-    // MEASURED (probe D2/D8): clearing a priority makes the key VANISH from
-    // every payload rather than come back as `priority: null`, so "absent" is
-    // the only spelling of unset and the adapter must not confuse it with a
-    // field it forgot to read.
-    const { fetchImpl } = scriptedFetch([
-      configRoute(),
-      listRoute([concise()]),
-      makeDetailRoute({ AbCdEfGhIjKl: task() }),
-    ]);
-    const [issue] = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues(SELECTION);
-    expect(issue.priority).toBeNull();
-    expect(issue.category).toBeNull();
   });
 
   it("surfaces a present priority/type verbatim, in Dart's Title case", async () => {

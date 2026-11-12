@@ -139,6 +139,8 @@ describe('SessionManager.addPanelOutput', () => {
 
     mgr.addPanelOutput('panel-codex', { type: 'stdout', data: 'hello', timestamp: new Date() });
 
+    expect(db.addPanelOutput).toHaveBeenCalledOnce();
+    expect(available).toHaveBeenCalledTimes(1);
     expect(available).toHaveBeenCalledWith({ sessionId: 's1', panelId: 'panel-codex' });
   });
 

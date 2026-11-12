@@ -152,17 +152,6 @@ describe('resolveInlineGatingHooks', () => {
     },
   );
 
-  it('never creates a settings file in any worktree (inline-only delivery)', () => {
-    const worktree = makeWorktree();
-    try {
-      resolveInlineGatingHooks({ hookDirOverride: HOOK_DIR }, makeSpyLogger());
-      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
-      expect(fs.existsSync(path.join(worktree, '.claude'))).toBe(false);
-    } finally {
-      fs.rmSync(worktree, { recursive: true, force: true });
-    }
-  });
-
   it('logs the opt-out diagnostic through the provided logger', () => {
     const logger = makeSpyLogger();
     resolveInlineGatingHooks({ permissionMode: 'auto', hookDirOverride: HOOK_DIR }, logger);

@@ -26,6 +26,11 @@ import { clearAssistantGreeting, peekAssistantGreeting } from './onboardingGreet
 import { ProposalCardList } from './ProposalCardList';
 import { LiveTail } from '../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
+import { ClaudeSignInCard } from '../session/ClaudeSignInCard';
+import { findClaudeLoginRequired } from '../../utils/findClaudeLoginRequired';
+import { useConfigStore } from '../../stores/configStore';
+import { resolveAssistantRuntimeFromConfig } from '../../utils/assistantRuntime';
+import { assistantRuntimeProvider } from '../../../../shared/types/agentThread';
 
 export interface AgentThreadViewProps {
   /** 'rail' (default) — the AgentRail host: onboarding greeting + suggestion
@@ -115,6 +120,37 @@ export function AgentThreadView({
     ];
   }, [greeting, greetingAt, messages]);
 
+  // Expired / missing Claude login → the same in-app sign-in card the quick
+  // session and run chats show. A failed assistant turn always lands as a
+  // transcript error row (AgentThreadService.recordSpawnFailure), so the
+  // transcript check alone covers both the is_error result and a thrown spawn.
+  // Claude-hosted assistant only: Codex's ChatGPT auth is not this flow's.
+  const config = useConfigStore((s) => s.config);
+  const assistantOnClaude = assistantRuntimeProvider(resolveAssistantRuntimeFromConfig(config)) === 'claude';
+  const claudeLoginRequired = assistantOnClaude && findClaudeLoginRequired(messages);
+  const lastUserPrompt = useMemo((): string | null => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role !== 'user') continue;
+      const text = message.segments
+        .map((segment) => (segment.type === 'text' ? segment.content : ''))
+        .join('\n')
+        .trim();
+      return text.length > 0 ? text : null;
+    }
+    return null;
+  }, [messages]);
+  const restoreLastPrompt = (): void => {
+    if (lastUserPrompt !== null) setComposerDraft(lastUserPrompt);
+  };
+  const claudeSignInSlot = claudeLoginRequired ? (
+    <ClaudeSignInCard
+      onSignedIn={lastUserPrompt !== null ? restoreLastPrompt : undefined}
+      onRetry={lastUserPrompt !== null ? restoreLastPrompt : undefined}
+      retryLabel="Put it back in the composer"
+    />
+  ) : undefined;
+
   const handleSend = (text: string, images?: AgentThreadImageAttachment[]): void => {
     void sendMessage(text, images !== undefined && images.length > 0 ? { images } : undefined);
   };
@@ -141,6 +177,7 @@ export function AgentThreadView({
       loadError={loadError}
       isWaitingForResponse={sending}
       liveTail={liveTail}
+      transcriptEndSlot={claudeSignInSlot}
       transcriptStartSlot={
         hasEarlier ? (
           <div className="flex justify-center">

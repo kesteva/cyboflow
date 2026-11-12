@@ -1,6 +1,8 @@
 import type { ClaudeAuthOpsLike } from '../orchestrator/trpc/contracts/claudeAuthOps';
+import type { ClaudeAuthAccount } from '../../../shared/types/claudeAuth';
 import {
   ClaudeAuthLoginService,
+  probeClaudeAuthStatus,
   resolveClaudeAuthBinary,
   resolveDevBundledClaudePath,
 } from '../services/claudeAuthLogin';
@@ -19,17 +21,34 @@ import { findExecutableInPath, getShellPath } from '../utils/shellPath';
  * the login-shell PATH. The bundled one comes first because it is the binary
  * the sessions actually run, so its credential store is the one that matters.
  */
+function resolveAuthBinary(configuredPath: string | undefined): string | null {
+  return resolveClaudeAuthBinary({
+    bundled: () => resolveClaudeExecutablePath() ?? resolveDevBundledClaudePath(),
+    fallback: () => configuredPath?.trim() || findExecutableInPath('claude') || undefined,
+  });
+}
+
+function authEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: getShellPath() };
+}
+
+/**
+ * The CLI's own verdict on the login (`claude auth status`), from the same
+ * binary the sign-in runs. The onboarding provider probe uses it to catch what
+ * a credential-presence check cannot: a leftover account marker or Keychain
+ * entry for a login the CLI no longer accepts. Null = no answer (unknown).
+ */
+export function probeClaudeLoginStatus(configuredPath: string | undefined): Promise<ClaudeAuthAccount | null> {
+  return probeClaudeAuthStatus(resolveAuthBinary(configuredPath), authEnv());
+}
+
 export function createClaudeAuthOps(deps: {
   getConfiguredClaudePath: () => string | undefined;
   log?: (message: string) => void;
 }): ClaudeAuthOpsLike & { dispose(): void } {
   const service = new ClaudeAuthLoginService({
-    resolveBinary: () =>
-      resolveClaudeAuthBinary({
-        bundled: () => resolveClaudeExecutablePath() ?? resolveDevBundledClaudePath(),
-        fallback: () => deps.getConfiguredClaudePath()?.trim() || findExecutableInPath('claude') || undefined,
-      }),
-    env: () => ({ ...process.env, PATH: getShellPath() }),
+    resolveBinary: () => resolveAuthBinary(deps.getConfiguredClaudePath()),
+    env: authEnv,
     log: deps.log,
   });
   return {

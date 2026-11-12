@@ -410,6 +410,12 @@ describe('OnboardingGate — Model step (3), Codex', () => {
     expect(configUpdate).not.toHaveBeenCalledWith(
       expect.objectContaining({ assistantModel: expect.anything() }),
     );
+    await waitFor(() =>
+      expect(configApplyRunTypeDefault).toHaveBeenCalledWith('quick', {
+        kind: 'merge',
+        value: { reasoningEffort: 'medium' },
+      }),
+    );
   });
 
   it('pins the assistant model onto a Codex pick once the assistant resolves to Codex (defaultAgentRuntime already persisted)', async () => {
@@ -444,22 +450,5 @@ describe('OnboardingGate — Model step (3), Codex', () => {
     expect(
       await screen.findByRole('radiogroup', { name: 'Default model' }),
     ).toHaveTextContent('gpt-5.2-codex');
-  });
-
-  it('never persists a Codex model as the chat assistant’s model', async () => {
-    await mountAtModelStep(baseAppConfig(), 'codex');
-    fireEvent.click(await screen.findByRole('radio', { name: /^gpt-5\.2-codex/ }));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
-
-    await waitFor(() =>
-      expect(configUpdate).toHaveBeenCalledWith({ defaultLaunchModel: 'gpt-5.2-codex' }),
-    );
-    await waitFor(() =>
-      expect(configApplyRunTypeDefault).toHaveBeenCalledWith('quick', {
-        kind: 'merge',
-        value: { reasoningEffort: 'medium' },
-      }),
-    );
   });
 });

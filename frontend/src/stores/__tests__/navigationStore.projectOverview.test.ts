@@ -33,10 +33,6 @@ function reset(): void {
 describe('navigationStore — projectOverviewOpen', () => {
   beforeEach(reset);
 
-  it('defaults to closed', () => {
-    expect(useNavigationStore.getState().projectOverviewOpen).toBe(false);
-  });
-
   it('openProjectOverview / closeProjectOverview set the flag and force home', () => {
     useNavigationStore.getState().goToSession();
     useNavigationStore.getState().openProjectOverview();

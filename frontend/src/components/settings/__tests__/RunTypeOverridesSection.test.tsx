@@ -412,15 +412,6 @@ describe('RunTypeOverridesSection — grouped list', () => {
       expect(screen.queryByText('Built-in flows')).not.toBeInTheDocument();
     });
 
-    it('never surfaces the rejection as an unhandled promise rejection', async () => {
-      projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
-      liveConfig = {};
-      await useConfigStore.getState().fetchConfig();
-      // Rendering (and awaiting settlement) must not throw.
-      render(<RunTypeOverridesSection />);
-      await expect(waitForWorkflowsSettled()).resolves.toBeUndefined();
-    });
-
     it('lets the user retry, clearing the error once the retry succeeds', async () => {
       projectsGetAll.mockRejectedValueOnce(new Error('fan-out failed'));
       liveConfig = {};
@@ -692,7 +683,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
     expect(configUpdate).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     // The concurrent write is visible on the list the section returns to.
-    expect(screen.getByTestId('run-type-chip-quick-model')).toHaveTextContent('Model: Fable 5.1 · 1M');
+    expect(screen.getByTestId('run-type-chip-quick-model')).toHaveTextContent('Model: Fable 5.2 · 1M');
   });
 
   // AC 2 — Reset is the other write path, and is held to the same rule.
@@ -935,7 +926,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
 
       expect(optionText()).toEqual([
         'Follow defaults',
-        'Fable 5.1 · 1M',
+        'Fable 5.2 · 1M',
         'Opus 5.5 · 1M',
         'Sonnet 5.5 · 1M',
         'Haiku 4.5 · 200K',

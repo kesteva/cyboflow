@@ -5,7 +5,6 @@
  * numbering, the guided-step test, and the analytics slug table's bounds.
  */
 import { describe, it, expect } from 'vitest';
-import type { OnboardingStatus } from '../stores/onboardingStore';
 import {
   ONBOARDING_ADD_PROJECT_STEP,
   ONBOARDING_ASSISTANT_STEPS,
@@ -59,15 +58,6 @@ describe('isOnboardingShellHidden', () => {
     for (const status of ['idle', 'skipped', 'completed'] as const) {
       expect(isOnboardingShellHidden({ hydrated: true, status, step: 3 })).toBe(false);
     }
-  });
-
-  it('accepts the store slice shape verbatim', () => {
-    const state: { hydrated: boolean; status: OnboardingStatus; step: number } = {
-      hydrated: true,
-      status: 'skipped',
-      step: 4,
-    };
-    expect(isOnboardingShellHidden(state)).toBe(false);
   });
 });
 

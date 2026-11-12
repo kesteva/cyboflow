@@ -374,13 +374,6 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
     expect(screen.getByTestId('ab-test-submit')).not.toBeDisabled();
   });
 
-  it('two identical REAL variants still block submit and show the hint (unchanged non-quick behavior)', () => {
-    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
-    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: 'a' } });
-    expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
-    expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
-  });
-
   it('submit sends quickConfigA (and not quickConfigB) when only arm A is quick', async () => {
     render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });

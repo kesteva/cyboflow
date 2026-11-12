@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { makeAgent, makeMessage, makeStatus } from './fixtures';
+import { makeAgent, makeMessage } from './fixtures';
 import type { ThreadEvent } from '../types';
 
 let getThreadQuery: ReturnType<typeof vi.fn>;
@@ -128,9 +128,5 @@ describe('PersistentAgentThreadView', () => {
     getThreadQuery.mockResolvedValue({ agentId: 'a1', messages: [mk(1)], hasMore: false });
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByText('body 1');
-  });
-
-  it('keeps the feature status helper in the fixture honest', () => {
-    expect(makeStatus().running).toBe(true);
   });
 });

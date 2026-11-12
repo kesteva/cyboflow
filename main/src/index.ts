@@ -4,6 +4,11 @@
 import { installTimerCensus } from './services/timerCensus';
 installTimerCensus();
 
+// Before any service can issue a fetch: Electron's bundled Node predates the
+// CVE-2026-111497 Brotli fix (see brotliFetchGuard.ts).
+import { installBrotliFetchGuard } from './utils/brotliFetchGuard';
+installBrotliFetchGuard();
+
 import { app, BrowserWindow, ipcMain, screen, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
 import { TaskQueue } from './services/taskQueue';
@@ -1941,7 +1946,7 @@ async function initializeServices(): Promise<boolean> {
     getMainWindow: () => mainWindow,
   });
 
-  // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically
+  // Guarded-model availability (Fable 5.2). Seeds the guarded set as optimistically
   // usable; the spawn seam falls back to Opus and the pickers grey a model out
   // when it's marked unavailable. refresh() is a best-effort Models-API probe that
   // no-ops without an Anthropic credential in the environment (most users

@@ -43,6 +43,7 @@ describe('cyboflow.system wiring', () => {
     expect(snap.worktrees).toEqual([]);
     expect(snap.ports.orchSocket).toEqual({ connectionCount: 0, runBindings: {} });
     expect(snap.ports.tcp).toEqual([]);
+    expect(snap.capabilities.diskSizing.supported).toBe(process.platform !== 'win32');
   });
 });
 
@@ -229,12 +230,6 @@ describe('cyboflow.system.snapshot — platform gating', () => {
       expect(snap.worktrees[0].usage).toEqual({ status: 'queued' });
       expect(getDiskUsage).toHaveBeenCalledWith('/wt/a');
     }
-  });
-
-  it('the starting fallback still resolves, with a capabilities entry', async () => {
-    const snap = await caller().snapshot({ projectId: 1 });
-    expect(snap.status).toBe('starting');
-    expect(typeof snap.capabilities.diskSizing.supported).toBe('boolean');
   });
 });
 

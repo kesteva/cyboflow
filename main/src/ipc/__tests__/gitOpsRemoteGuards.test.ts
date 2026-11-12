@@ -23,7 +23,7 @@ vi.mock('../../services/telemetry', () => ({ trackUsage: vi.fn() }));
 
 const subscribe = vi.fn((..._args: unknown[]) => () => {});
 vi.mock('../../services/worktreeChangeNotifier', () => ({
-  WorktreeChangeNotifier: vi.fn().mockImplementation(() => ({ subscribe })),
+  WorktreeChangeNotifier: vi.fn().mockImplementation(function () { return { subscribe }; }),
 }));
 vi.mock('../../utils/runGit', async () => {
   const actual = await vi.importActual<typeof import('../../utils/runGit')>('../../utils/runGit');

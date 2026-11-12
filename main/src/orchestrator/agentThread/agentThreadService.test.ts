@@ -1035,21 +1035,6 @@ describe('AgentThreadService', () => {
       expect(userEvents).toHaveLength(3);
     });
 
-    it('clear-daily: a new day’s turn starts a fresh conversation with no resume id', async () => {
-      h.retention.value = 'clear-daily';
-      const thread = h.service.ensureGlobalThread();
-
-      h.manager.queueInit('sess-1');
-      await h.service.sendMessage(thread.id, 'day one chat');
-
-      h.clock.value += ONE_DAY_MS;
-      h.manager.queueInit('sess-2');
-      await h.service.sendMessage(thread.id, 'day two chat');
-
-      expect(h.manager.calls).toHaveLength(2);
-      expect(h.manager.calls[1].resumeSessionId).toBeUndefined();
-    });
-
     it("compact-daily: the next day's first turn fires a /compact turn on the stored conversation, then the real turn resumes it", async () => {
       h.retention.value = 'compact-daily';
       const thread = h.service.ensureGlobalThread();

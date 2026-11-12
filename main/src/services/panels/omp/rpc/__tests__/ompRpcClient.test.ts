@@ -188,6 +188,7 @@ describe('OmpRpcClient — framing', () => {
     child.stdout.write(encoded.subarray(splitAt));
 
     await expect(client.handshake()).resolves.toBeDefined();
+    expect(client.ready).toMatchObject({ note: 'café' });
   });
 
   it('handles several frames arriving in one data event', async () => {

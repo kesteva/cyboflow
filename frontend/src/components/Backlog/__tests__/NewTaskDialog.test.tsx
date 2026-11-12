@@ -197,11 +197,15 @@ describe('NewTaskDialog — draft persistence across an accidental close', () =>
 
   it('degrades silently to blank defaults on a corrupt or shape-invalid persisted draft', () => {
     localStorage.setItem(NEW_TASK_DIALOG_DRAFT_KEY, '{not valid json');
-    expect(() => render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />)).not.toThrow();
+    let first!: ReturnType<typeof render>;
+    expect(() => { first = render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />); }).not.toThrow();
     expect((screen.getByLabelText('Task title') as HTMLInputElement).value).toBe('');
+    first.unmount();
 
     localStorage.setItem(NEW_TASK_DIALOG_DRAFT_KEY, JSON.stringify({ title: 'ok', body: 42 }));
     expect(() => render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />)).not.toThrow();
+    expect((screen.getByLabelText('Task title') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Task summary') as HTMLTextAreaElement).value).toBe('');
   });
 
   it('persists attachments under the pending key and restores them as `initial` on reopen', () => {

@@ -44,6 +44,8 @@ describe('OmpFleetIndicator — Aria gating', () => {
   it('renders nothing on a cold mount, before any probe has answered', () => {
     // The store floors ariaMode to false, so there is no frame where a
     // non-fleet install flashes an OMP chip.
+    expect(useOmpFleetStore.getInitialState().ariaMode).toBe(false);
+    useOmpFleetStore.setState(useOmpFleetStore.getInitialState(), true);
     const { container } = render(<OmpFleetIndicator />);
     expect(container).toBeEmptyDOMElement();
   });

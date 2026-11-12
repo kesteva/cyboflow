@@ -130,13 +130,6 @@ describe('reduceLiveTail', () => {
     expect(reduceLiveTail(events).activeBlocks).toEqual([{ index: 0, kind: 'text', text: 'second turn' }]);
   });
 
-  it('replaying the SAME array twice is idempotent (pure function, no hidden state)', () => {
-    const events = [messageStart(), blockStart(0, 'text'), textDelta(0, 'abc')];
-    const first = reduceLiveTail(events);
-    const second = reduceLiveTail(events);
-    expect(second).toEqual(first);
-  });
-
   it('ignores malformed events without throwing: missing event, non-numeric index, unknown delta type', () => {
     const malformed: StreamEvent[] = [
       { type: 'stream_event', payload: {} } as unknown as StreamEvent, // no `event` at all

@@ -209,14 +209,6 @@ describe('migration 128: workflow runtime mix', () => {
     svc.close();
   });
 
-  it('(d) a fresh-install DB (schema.sql + every migration from scratch) carries both columns', () => {
-    const svc = openAt(MIGRATIONS_DIR);
-    const db = svc.getDb();
-    expect(columnInfo(db, 'workflows', 'runtime_mix')).toBeDefined();
-    expect(columnInfo(db, 'workflow_runs', 'runtime_mix')).toBeDefined();
-    svc.close();
-  });
-
   it('(e) re-running the migration on an already-migrated DB is an idempotent no-op', () => {
     const first = openAt(MIGRATIONS_DIR);
     const firstDb = first.getDb();

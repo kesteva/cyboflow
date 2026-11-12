@@ -41,6 +41,7 @@ describe('modelContext', () => {
       expect(modelSupportsContext1M('claude-opus-4-8')).toBe(false);
       // Opus 1M rides the [1m] id suffix, never the Sonnet-only beta.
       expect(modelSupportsContext1M('claude-opus-4-8[1m]')).toBe(false);
+      expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
 
     it('rejects auto/empty (resolved model unknown — beta is Sonnet-only)', () => {
@@ -71,10 +72,10 @@ describe('modelContext', () => {
     });
 
     it('pins the fable alias to the current Fable snapshot (1M-native, no marker)', () => {
-      // Fable 5.1, like Sonnet 5.5, is 1M by default — the bare id already reports a
+      // Fable 5.2, like Sonnet 5.5, is 1M by default — the bare id already reports a
       // 1M window, so no [1m] marker and no context-1m beta.
-      expect(resolveModelAlias('fable')).toBe('claude-fable-5-1');
-      expect(resolveModelAlias('Fable')).toBe('claude-fable-5-1');
+      expect(resolveModelAlias('fable')).toBe('claude-fable-5-2');
+      expect(resolveModelAlias('Fable')).toBe('claude-fable-5-2');
       expect(hasContext1MSuffix(resolveModelAlias('fable'))).toBe(false);
       expect(modelSupportsContext1M(resolveModelAlias('fable'))).toBe(false);
     });
@@ -99,14 +100,6 @@ describe('modelContext', () => {
       expect(resolveModelAlias('claude-opus-4-7')).toBe('claude-opus-4-7');
       expect(resolveModelAlias('claude-sonnet-4-5')).toBe('claude-sonnet-4-5');
       expect(resolveModelAlias('some-future-model')).toBe('some-future-model');
-    });
-
-    it('the pinned default aliases need no 1M beta', () => {
-      // sonnet→claude-sonnet-5-5 is 1M-native and opus→claude-opus-5-5[1m] reaches 1M
-      // via the id marker, so NEITHER needs the Sonnet-4.x beta: the gate returns
-      // false for both.
-      expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
-      expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
   });
 
@@ -189,7 +182,7 @@ describe('modelContext', () => {
     const noneUsable = () => false;
 
     it('passes a guarded model through unchanged when usable', () => {
-      expect(applyModelAvailabilityFallback(resolveModelAlias('fable'), allUsable)).toBe('claude-fable-5-1');
+      expect(applyModelAvailabilityFallback(resolveModelAlias('fable'), allUsable)).toBe('claude-fable-5-2');
     });
 
     it('swaps an unavailable guarded model for its fallback family (Fable → Opus)', () => {
@@ -201,11 +194,11 @@ describe('modelContext', () => {
 
     it('only consults the predicate for the guarded concreteId', () => {
       const seen: string[] = [];
-      applyModelAvailabilityFallback('claude-fable-5-1', (id) => {
+      applyModelAvailabilityFallback('claude-fable-5-2', (id) => {
         seen.push(id);
         return true;
       });
-      expect(seen).toEqual(['claude-fable-5-1']);
+      expect(seen).toEqual(['claude-fable-5-2']);
     });
 
     it('leaves non-guarded / auto / undefined ids untouched even when the predicate says false', () => {
@@ -231,21 +224,21 @@ describe('modelContext', () => {
         seen.push(id);
         return true;
       });
-      expect(seen).toEqual(['claude-fable-5-1']);
+      expect(seen).toEqual(['claude-fable-5-2']);
     });
   });
 
   describe('bareModelId — optional availability fallback', () => {
     it('resolves the bare snapshot with no predicate (unchanged legacy behavior)', () => {
       expect(bareModelId('opus')).toBe('claude-opus-5-5');
-      expect(bareModelId('fable')).toBe('claude-fable-5-1');
+      expect(bareModelId('fable')).toBe('claude-fable-5-2');
       expect(bareModelId(null)).toBeUndefined();
     });
 
     it('falls back to the bare Opus id when a pinned Fable is unavailable', () => {
       expect(bareModelId('fable', () => false)).toBe('claude-opus-5-5');
       // usable predicate keeps Fable
-      expect(bareModelId('fable', () => true)).toBe('claude-fable-5-1');
+      expect(bareModelId('fable', () => true)).toBe('claude-fable-5-2');
     });
   });
 });

@@ -6,6 +6,48 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-11-09
+
+### Added
+
+- **Claude Fable 5.2.** The Fable option in the model pickers now runs Fable 5.2, via an Agent
+  SDK bump to 0.3.321. Fable 5.1 moves to "Other models".
+
+### Fixed
+
+- The session cost meter prices each model at its own rate. It had priced every model in a family
+  the same, so Fable 5.2, Opus 5.5 and Sonnet 5.5 sessions showed costs that were too high, and it
+  now uses each model's own cache-read rate.
+
+## [0.5.2] — 2026-10-29
+
+### Added
+
+- **Sign in to Claude from inside the app.** The onboarding Connect step can sign you in to
+  Claude without a terminal, and a global assistant turn that fails because you are signed out
+  offers the same sign-in. A rejected pasted code returns you to the code field.
+- **Configurable watched ports in the System view.** Choose which ports the Ports & sockets
+  section probes from its gear menu; cyboflow's own dev ports are defaults you can remove. Ports
+  are now probed on both IPv4 and IPv6 loopback.
+- An **Open in IDE** button on the Diff tab header.
+
+### Changed
+
+- On macOS, the System view reads spawn markers, so detached cyboflow processes are listed as
+  owned instead of suspected.
+- The human review queue opens at the top of the page.
+
+### Fixed
+
+- The System view never offers to reap a worktree, or kill a process, that another running
+  cyboflow instance (another variant, or a second copy) still owns.
+- Renderer CPU no longer climbs with uptime: the notification sound closes its audio context
+  after each tone instead of leaking audio threads.
+- Worktrees deleted outside the app no longer cause repeated git errors in the log.
+- A workflow launched before its script finished writing now picks up the script's settings.
+- Security: vulnerable runtime and build dependencies are patched, and Node's `fetch` refuses
+  Brotli-compressed responses until the bundled runtime carries the CVE-2026-111497 fix.
+
 ## [0.5.1] — 2026-10-05
 
 ### Added

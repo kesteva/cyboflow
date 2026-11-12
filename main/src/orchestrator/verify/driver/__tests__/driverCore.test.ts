@@ -1486,20 +1486,18 @@ describe('createDefaultDriverDeps — pid file + process helpers (no browser tou
 // ---------------------------------------------------------------------------
 
 describe('serveShellInvocation', () => {
-  it('keeps sh as the leader by appending a NEWLINE and the no-op builtin', () => {
-    const inv = serveShellInvocation('pnpm run electron-dev', 'darwin');
-    expect(inv.command).toBe('sh');
-    expect(inv.args).toEqual(['-c', 'pnpm run electron-dev\n:']);
-    expect(inv.detached).toBe(true);
-  });
-
   // The whole point of the trailing statement: `sh -c '<one simple command>'`
   // exec-optimizes, the leader's argv becomes the resolved binary, and
   // serveCommandMatches rejects a genuine pass as a wrapper (RC6).
-  it('never leaves a single simple command as the only statement', () => {
-    const inv = serveShellInvocation('sleep 30', 'linux');
-    expect(inv.args[1]).toBe('sleep 30\n:');
+  it.each([
+    ['darwin', 'pnpm run electron-dev'],
+    ['linux', 'sleep 30'],
+  ] as const)('keeps sh as the leader by appending a NEWLINE and the no-op builtin (%s)', (platform, cmd) => {
+    const inv = serveShellInvocation(cmd, platform);
+    expect(inv.command).toBe('sh');
+    expect(inv.args).toEqual(['-c', `${cmd}\n:`]);
     expect(inv.args[1].endsWith('\n:')).toBe(true);
+    expect(inv.detached).toBe(true);
   });
 
   // Codex #10: the `: ; <cmd>` PREFIX form does NOT retain the leader on dash.

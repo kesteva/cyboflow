@@ -127,16 +127,6 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('useQuickSession — start() signature', () => {
-  it('start() takes no arguments and returns a promise', async () => {
-    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
-
-    await act(async () => {
-      await result.current.start();
-    });
-
-    expect(mockCreateQuick).toHaveBeenCalledOnce();
-  });
-
   it('createQuick is called without toolType, permissionMode, or substrate', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
@@ -144,6 +134,7 @@ describe('useQuickSession — start() signature', () => {
       await result.current.start();
     });
 
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
     expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
   });
 
@@ -159,11 +150,6 @@ describe('useQuickSession — start() signature', () => {
       projectId: 1,
       substrate: 'interactive',
     });
-  });
-
-  it('isStarting is boolean (false by default)', () => {
-    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
-    expect(result.current.isStarting).toBe(false);
   });
 });
 

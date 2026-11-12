@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -34,7 +34,7 @@ function fakeRunner(result: Partial<ExecResult> = {}): { runner: ProcessRunner; 
   return { runner, calls };
 }
 
-function logger(): LoggerLike & { warn: ReturnType<typeof vi.fn> } {
+function logger(): LoggerLike & { warn: Mock } {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 

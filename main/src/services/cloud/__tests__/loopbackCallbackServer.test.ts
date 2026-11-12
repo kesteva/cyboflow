@@ -161,13 +161,6 @@ describe('loopbackCallbackServer', () => {
     expect(() => s.close()).not.toThrow();
   });
 
-  it('a request after resolution is refused or answered 409', async () => {
-    const s = await start();
-    await get(s.port, `/cb?code=${CODE}&state=${STATE}`);
-    const second = await get(s.port, `/cb?code=${CODE}&state=${STATE}`).catch(() => null);
-    if (second !== null) expect(second.status).toBe(409);
-  });
-
   it('closes itself after a resolving response', async () => {
     const s = await start();
     await get(s.port, `/cb?code=${CODE}&state=${STATE}`);

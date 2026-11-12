@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { LoggerLike } from '../../../orchestrator/types';
@@ -47,7 +47,7 @@ function hostDb(): Database.Database {
   return db;
 }
 
-function logger(): LoggerLike & { warn: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> } {
+function logger(): LoggerLike & { warn: Mock; debug: Mock } {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 

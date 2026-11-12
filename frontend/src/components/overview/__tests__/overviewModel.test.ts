@@ -168,15 +168,6 @@ describe('selectOverviewPageState', () => {
     expect(selectOverviewPageState({ items, codebaseFresh: null })).toBe('empty-done');
   });
 
-  it('boundary: done tasks exist AND ideas remain ⇒ empty-drained, never empty-done', () => {
-    // Same shape as the empty-done case, but with an open idea added — the
-    // idea backlog being non-empty must route to empty-drained instead.
-    const items = [doneTask(), openIdea()];
-    const result = selectOverviewPageState({ items, codebaseFresh: null });
-    expect(result).toBe('empty-drained');
-    expect(result).not.toBe('empty-done');
-  });
-
   it('normal: a ready task exists alongside a done task and an open idea', () => {
     const items = [doneTask(), openIdea(), readyTask()];
     expect(selectOverviewPageState({ items, codebaseFresh: null })).toBe('normal');

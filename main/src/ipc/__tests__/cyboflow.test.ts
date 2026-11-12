@@ -54,16 +54,7 @@ function makeServices(): AppServices {
 // ---------------------------------------------------------------------------
 
 describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
-  it('registers a handler for the channel', () => {
-    const { ipcMain, handlers } = makeHandlerCapture();
-    registerCyboflowHandlers(
-      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
-      makeServices(),
-    );
-    expect(handlers.has('cyboflow:approveRun')).toBe(true);
-  });
-
-  it('returns success: false with a NOT_IMPLEMENTED error message', async () => {
+  it.each(['allow', 'deny'])('returns success: false with a NOT_IMPLEMENTED error message for decision %s', async (decision) => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
@@ -73,24 +64,7 @@ describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
     const result = await invoke(handlers, 'cyboflow:approveRun', {
       runId: 'any-run',
       approvalId: 'any-approval',
-      decision: 'allow',
-    }) as { success: boolean; error?: string };
-
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/NOT_IMPLEMENTED/i);
-  });
-
-  it('returns NOT_IMPLEMENTED for deny decision as well', async () => {
-    const { ipcMain, handlers } = makeHandlerCapture();
-    registerCyboflowHandlers(
-      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
-      makeServices(),
-    );
-
-    const result = await invoke(handlers, 'cyboflow:approveRun', {
-      runId: 'any-run',
-      approvalId: 'any-approval',
-      decision: 'deny',
+      decision,
     }) as { success: boolean; error?: string };
 
     expect(result.success).toBe(false);

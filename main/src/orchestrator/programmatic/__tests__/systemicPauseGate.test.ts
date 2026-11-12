@@ -245,13 +245,16 @@ describe('ReviewQueueSystemicPauseGate', () => {
     await expect(p).resolves.toBe('retry');
   });
 
-  it('reattaches to an already-pending pause item (findPending hit) instead of creating a duplicate', async () => {
+  it.each([
+    ['no info', undefined],
+    ['with info', { blockedAgentKeys: ['a'], origin: 'step' as const, fanOut: false }],
+  ])('reattaches to an already-pending pause item (findPending hit, %s) instead of creating a duplicate', async (_label, info) => {
     const items = makeItems({ existing: 'rvw_existing' });
     const parker = makeParker();
     const events = new EventEmitter();
     const gate = new ReviewQueueSystemicPauseGate({ items, parker, events, channelFor, now });
 
-    const p = gate.awaitClear({ runId: 'r', projectId: 1, step: step({ id: 'a' }), error: 'rate limit' });
+    const p = gate.awaitClear({ runId: 'r', projectId: 1, step: step({ id: 'a' }), error: 'rate limit', info });
     await flush();
 
     expect(items.createCalls).toHaveLength(0);
@@ -398,28 +401,6 @@ describe('ReviewQueueSystemicPauseGate — pause payload + body (switch runtime 
       errorClass: expect.any(String),
     });
     expect(items.createCalls[0].body).not.toContain('Blocked:');
-  });
-
-  it('a re-attach keeps the existing item (no create, no rewrite)', async () => {
-    const items = makeItems({ existing: 'rvw_old' });
-    const gate = new ReviewQueueSystemicPauseGate({
-      items,
-      parker: makeParker(),
-      events: new EventEmitter(),
-      channelFor,
-      now,
-    });
-
-    void gate.awaitClear({
-      runId: 'r',
-      projectId: 1,
-      step: step({ id: 'a' }),
-      error: 'rate limit',
-      info: { blockedAgentKeys: ['a'], origin: 'step', fanOut: false },
-    });
-    await flush();
-
-    expect(items.createCalls).toHaveLength(0);
   });
 });
 

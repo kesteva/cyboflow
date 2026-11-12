@@ -30,10 +30,6 @@ function reset(): void {
 describe('navigationStore — systemOpen', () => {
   beforeEach(reset);
 
-  it('defaults to closed', () => {
-    expect(useNavigationStore.getState().systemOpen).toBe(false);
-  });
-
   it('openSystem / closeSystem set the flag and force home', () => {
     useNavigationStore.getState().goToSession();
     useNavigationStore.getState().openSystem();

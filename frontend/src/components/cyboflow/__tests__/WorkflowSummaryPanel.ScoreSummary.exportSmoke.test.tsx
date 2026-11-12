@@ -52,14 +52,6 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
 }
 
 describe('WorkflowSummaryPanel — ScoreSummary export smoke', () => {
-  it('is exported and renders the complete-state hero', () => {
-    render(
-      <ScoreSummary runEval={makeEval()} findings={[]} breakdownOpen={false} onToggleBreakdown={vi.fn()} />,
-    );
-    expect(screen.getByTestId('run-summary-eval')).toBeInTheDocument();
-    expect(screen.getByTestId('run-summary-eval-band')).toHaveTextContent(/good/i);
-  });
-
   it('renders the pending state', () => {
     render(
       <ScoreSummary

@@ -883,17 +883,6 @@ describe('resolveReviewItem — approve-designs verdict fold', () => {
     expect(parseDesignVerdictMap(resolvedWith(deps))).toEqual(verdicts);
     expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: null });
   });
-
-  it('does NOT confuse a design gate for an idea gate (distinct fold prefixes)', async () => {
-    const db = buildDb();
-    seedApproveDesignsGate(db, { id: 'rvw_d', runId: 'run-d', designRefs: ['IDEA-1'] });
-    const deps = makeDeps(db);
-
-    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_d', verdicts: { 'IDEA-1': 'approve' } }), deps);
-
-    // The design gate serialized with the DESIGN prefix — an idea-verdict parse misses it.
-    expect(resolvedWith(deps)?.startsWith(RESOLUTION_PREFIX_DESIGN_VERDICTS)).toBe(true);
-  });
 });
 
 describe('DesignVerdictMap serialize/parse + parseApproveDesignsRefs + render', () => {

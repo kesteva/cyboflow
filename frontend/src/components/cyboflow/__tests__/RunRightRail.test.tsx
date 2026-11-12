@@ -290,7 +290,6 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import { trpc } from '../../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
-import type { StreamEvent } from '../../../utils/cyboflowApi';
 import type { RunGitDiff, WorktreeStatusPayload } from '../../../../../shared/types/runFiles';
 
 // ---------------------------------------------------------------------------
@@ -457,12 +456,6 @@ describe('RunRightRail', () => {
     const fileTab = session.tabs.find((t) => t.kind === 'file');
     expect(fileTab).toMatchObject({ id: 'file:src/x.ts', label: 'x.ts', filePath: 'src/x.ts' });
     expect(session.activeTabId).toBe('file:src/x.ts');
-  });
-
-  it('shows empty state in workflow-progress tab when activeRunId is null', () => {
-    renderRail(EMPTY_PHASE_STATE);
-
-    expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
   });
 
   it('mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set', async () => {
@@ -954,9 +947,14 @@ describe('RunRightRail — width resize', () => {
   });
 
   it('seeds the initial width from a persisted (clamped) value', () => {
-    localStorage.setItem(WIDTH_KEY, '420');
+    localStorage.setItem(WIDTH_KEY, '100');
+    const first = renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(240);
+    first.unmount();
+
+    localStorage.setItem(WIDTH_KEY, '9999');
     renderRail(EMPTY_PHASE_STATE);
-    expect(railWidth()).toBe(420);
+    expect(railWidth()).toBe(640);
   });
 });
 
@@ -1198,82 +1196,6 @@ describe('RunRightRail — comparison-base selection persistence (TASK-218)', ()
     expect(screen.getByTestId('session-diff-tab-panel-mock-comparison-ref')).toHaveTextContent(
       'feature/other',
     );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Q3 panel-preservation parity (IDEA-013 / TASK-812)
-//
-// The structured panel renders interactive-substrate runs WITHOUT any change
-// because the S2 transcriptNormalizer makes the interactive `cyboflow:stream:`
-// envelope SHAPE-IDENTICAL to the SDK envelope before it reaches the panel.
-// This proves the render path is substrate-agnostic: the SAME normalized
-// {type,payload,timestamp} envelope (the shape transcriptNormalizer emits for
-// interactive lines, equal to the SDK wire shape) yields identical DOM.
-// ---------------------------------------------------------------------------
-
-const RUN_ID = 'run-parity-rail-001';
-
-/**
- * A normalized assistant envelope as it reaches the panel. transcriptNormalizer
- * reshapes an interactive transcript `assistant` line into THIS exact shape —
- * identical to the SDK wire `assistant` event — so the only difference between
- * the two substrate inputs below is provenance, never structure.
- */
-function makeAssistantEnvelope(): StreamEvent {
-  return {
-    type: 'assistant',
-    payload: {
-      type: 'assistant',
-      message: {
-        id: 'msg_parity_001',
-        model: 'claude-opus-4-5',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'Implementing the change now.' }],
-      },
-      session_id: RUN_ID,
-    },
-    timestamp: '2026-06-01T12:00:00.000Z',
-  } as StreamEvent;
-}
-
-/**
- * Render RunRightRail for an active run after seeding the store with the given
- * stream envelope, and return the rendered HTML of the timeline subtree.
- */
-function renderTimelineHtml(envelope: StreamEvent): string {
-  act(() => {
-    // setActiveRun resets streamEvents:[] — seed AFTER it.
-    useCyboflowStore.getState().setActiveRun(RUN_ID);
-    useCyboflowStore.getState().appendStreamEvent(envelope);
-  });
-  const { container, unmount } = renderRail(LOADED_PHASE_STATE);
-  const html = (container.querySelector('[role="tabpanel"]') as HTMLElement).innerHTML;
-  unmount();
-  return html;
-}
-
-describe('RunRightRail — Q3 panel preservation (substrate parity)', () => {
-  beforeEach(() => {
-    act(() => {
-      useCyboflowStore.getState().clearActiveRun();
-    });
-  });
-
-  it('renders an interactive-substrate-normalized envelope identically to an SDK-sourced one', () => {
-    // SDK-sourced envelope (the wire shape published by ClaudeCodeManager).
-    const sdkHtml = renderTimelineHtml(makeAssistantEnvelope());
-
-    // Interactive-substrate envelope: the normalized shape transcriptNormalizer
-    // emits is byte-identical to the SDK envelope, so an equal object is the
-    // faithful representation of what reaches the panel.
-    const interactiveHtml = renderTimelineHtml(makeAssistantEnvelope());
-
-    // Q3: identical rendered output regardless of substrate — proves the panel
-    // is substrate-agnostic and needs zero modification for interactive runs.
-    expect(interactiveHtml).toBe(sdkHtml);
-    // Sanity: the timeline actually mounted (phase section present in the HTML).
-    expect(sdkHtml).toContain('phase-section-phase-1');
   });
 });
 

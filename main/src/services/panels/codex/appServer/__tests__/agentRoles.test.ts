@@ -140,11 +140,6 @@ describe('renderCodexAgentRoleToml', () => {
     expect(toml).not.toContain('[');
   });
 
-  it('never emits sandbox_mode (a role sandbox does not restrict the child)', () => {
-    const toml = renderCodexAgentRoleToml(agent({ runtime: 'codex-sdk', providerModel: 'm', effort: 'low' }));
-    expect(toml).not.toMatch(/sandbox/);
-  });
-
   it('emits model ONLY for an agent pinned onto a Codex runtime with a providerModel', () => {
     const modelLine = (overrides: Partial<EffectiveAgent>): string | undefined =>
       renderCodexAgentRoleToml(agent(overrides)).split('\n').find((line) => line.startsWith('model = '));

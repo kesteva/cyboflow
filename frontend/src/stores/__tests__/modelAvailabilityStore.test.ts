@@ -1,5 +1,5 @@
 /**
- * modelAvailabilityStore tests — the renderer mirror of guarded-model (Fable 5.1)
+ * modelAvailabilityStore tests — the renderer mirror of guarded-model (Fable 5.2)
  * availability. Covers the optimistic default, the guarded-unavailable grey-out
  * derivation, the app-lifetime once-guard, and live re-derivation on push.
  *
@@ -32,7 +32,7 @@ vi.mock('../../utils/api', () => ({
   },
 }));
 
-const FABLE_ID = 'claude-fable-5-1';
+const FABLE_ID = 'claude-fable-5-2';
 
 function unavailableMap(reason: string | null): ModelAvailabilityMap {
   return { [FABLE_ID]: { concreteId: FABLE_ID, status: 'unavailable', reason, checkedAt: 1 } };

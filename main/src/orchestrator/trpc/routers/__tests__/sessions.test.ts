@@ -80,16 +80,6 @@ describe('cyboflow.sessions', () => {
       expect(sessionOps.getSummary).toHaveBeenCalledWith({ sessionId: 's1', catchUp: false });
     });
 
-    it("getSummary's validation-failure envelope passes through byte-identical", async () => {
-      // createValidationError's string is what the renderer surfaces; a reshape
-      // here would silently change what the user reads.
-      const sessionOps = makeFakeOps();
-      sessionOps.getSummary.mockResolvedValue({ success: false, error: 'Session s1 is archived' });
-      const caller = appRouter.createCaller(createContext({ sessionOps }));
-      const result = await caller.cyboflow.sessions.getSummary({ sessionId: 's1' });
-      expect(result).toEqual({ success: false, error: 'Session s1 is archived' });
-    });
-
     it('rename forwards both fields and echoes the updated row back', async () => {
       const sessionOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionOps }));
@@ -106,18 +96,25 @@ describe('cyboflow.sessions', () => {
       expect(result).toEqual({ success: true });
     });
 
-    it("dismissAsk's validation-failure envelope passes through byte-identical", async () => {
+    it.each([
+      ['getSummary', { sessionId: 's1' }, 'Session s1 is archived'],
+      ['dismissAsk', { sessionId: 's1' }, 'Session s1 not found'],
+      ['get', { sessionId: 's1' }, 'Session not found'],
+    ] as const)('%s failure envelope passes through byte-identical', async (procedure, input, error) => {
+      // createValidationError's string is what the renderer surfaces; a reshape
+      // (or a thrown NOT_FOUND) would silently change what the user reads.
       const sessionOps = makeFakeOps();
-      sessionOps.dismissAsk.mockResolvedValue({ success: false, error: 'Session s1 not found' });
+      sessionOps[procedure].mockResolvedValue({ success: false, error });
       const caller = appRouter.createCaller(createContext({ sessionOps }));
-      const result = await caller.cyboflow.sessions.dismissAsk({ sessionId: 's1' });
-      expect(result).toEqual({ success: false, error: 'Session s1 not found' });
+      const result = await caller.cyboflow.sessions[procedure](input);
+      expect(result).toEqual({ success: false, error });
     });
 
     it('toggleFavorite passes the new favourite state through', async () => {
       const sessionOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionOps }));
       const result = await caller.cyboflow.sessions.toggleFavorite({ sessionId: 's1' });
+      expect(sessionOps.toggleFavorite).toHaveBeenCalledWith({ sessionId: 's1' });
       expect(result).toEqual({ success: true, data: { isFavorite: true } });
     });
 
@@ -172,14 +169,6 @@ describe('cyboflow.sessions', () => {
       const caller = appRouter.createCaller(createContext({ sessionOps }));
       const result = await caller.cyboflow.sessions.getArchiveProgress();
       expect(result).toEqual({ success: true, data: { tasks: [], activeCount: 0, totalCount: 0 } });
-    });
-
-    it('a plain failure envelope also passes through untouched', async () => {
-      const sessionOps = makeFakeOps();
-      sessionOps.get.mockResolvedValue({ success: false, error: 'Session not found' });
-      const caller = appRouter.createCaller(createContext({ sessionOps }));
-      const result = await caller.cyboflow.sessions.get({ sessionId: 's1' });
-      expect(result).toEqual({ success: false, error: 'Session not found' });
     });
   });
 
@@ -240,16 +229,6 @@ describe('cyboflow.sessions', () => {
       const caller = appRouter.createCaller(createContext({ sessionOps }));
       await caller.cyboflow.sessions.listQuick({});
       expect(sessionOps.listQuick).toHaveBeenCalledWith({});
-    });
-
-    it('updateAgentPermissionMode accepts an arbitrary mode string, leaving the verdict to ops', async () => {
-      const sessionOps = makeFakeOps();
-      const caller = appRouter.createCaller(createContext({ sessionOps }));
-      await caller.cyboflow.sessions.updateAgentPermissionMode({ sessionId: 's1', mode: 'nonsense' });
-      expect(sessionOps.updateAgentPermissionMode).toHaveBeenCalledWith({
-        sessionId: 's1',
-        mode: 'nonsense',
-      });
     });
 
     it('updateSessionMcps accepts an empty deny list (the all-servers-load default)', async () => {

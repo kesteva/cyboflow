@@ -9,7 +9,7 @@ import {
 
 /**
  * modelAvailabilityStore — the renderer mirror of the backend
- * ModelAvailabilityService. Holds the guarded-model (Fable 5.1) availability
+ * ModelAvailabilityService. Holds the guarded-model (Fable 5.2) availability
  * snapshot so every model picker can grey out a model that's been pulled from
  * release. Seeded empty (all models usable — the optimistic default) until the
  * first snapshot arrives; updated live via the `model-availability-changed` push.

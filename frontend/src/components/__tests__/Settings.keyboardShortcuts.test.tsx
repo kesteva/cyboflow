@@ -70,8 +70,10 @@ beforeEach(() => {
 describe('Settings — Keyboard shortcuts section', () => {
   it('renders every default binding, formatted, when no overrides are stored', async () => {
     render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
-    const row = await screen.findByTestId('shortcut-record-newSession');
-    expect(row).toHaveTextContent(formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS.newSession, platform));
+    await screen.findByTestId('shortcut-record-newSession');
+    for (const [id, binding] of Object.entries(KEYBOARD_SHORTCUT_DEFAULTS)) {
+      expect(screen.getByTestId(`shortcut-record-${id}`)).toHaveTextContent(formatKeybinding(binding, platform));
+    }
   });
 
   it('renders a loaded override as its formatted binding, not the default', async () => {

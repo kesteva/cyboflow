@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import type { AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { useConfigStore } from '../../stores/configStore';
@@ -79,7 +79,7 @@ const OMP_UNSUPPORTED_VERSION: ProviderDetectionResult<'omp'> = {
   version: '3.0.0',
 };
 
-let updateConfig: ReturnType<typeof vi.fn>;
+let updateConfig: Mock;
 
 beforeEach(() => {
   detectClaude.mockReset().mockResolvedValue({ success: true, data: CLAUDE_CONNECTED });

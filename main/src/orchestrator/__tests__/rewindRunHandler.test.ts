@@ -16,7 +16,7 @@
  * createTestDb wrapped in the DatabaseLike adapter; the executor + queue are
  * lightweight fakes. Style mirrors retryRunHandler.test.ts.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import type Database from 'better-sqlite3';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -113,11 +113,11 @@ function makeFakeExecutor(opts?: {
   activeExecution?: boolean;
   executeRejects?: boolean;
 }): RewindRunExecutorLike & {
-  setPendingResumeStep: ReturnType<typeof vi.fn>;
-  setPendingCompletedSteps: ReturnType<typeof vi.fn>;
-  hasActiveExecution: ReturnType<typeof vi.fn>;
-  requestProgrammaticCancel: ReturnType<typeof vi.fn>;
-  execute: ReturnType<typeof vi.fn>;
+  setPendingResumeStep: Mock;
+  setPendingCompletedSteps: Mock;
+  hasActiveExecution: Mock;
+  requestProgrammaticCancel: Mock;
+  execute: Mock;
 } {
   const setPendingResumeStep = vi.fn<(runId: string, stepId: string) => void>();
   const setPendingCompletedSteps = vi.fn<(runId: string, stepIds: readonly string[]) => void>();
@@ -139,18 +139,18 @@ function makeDeps(
     runQueues?: RunQueueRegistry;
     stopLiveRun?: RewindRunDeps['stopLiveRun'];
     listStepResults?: (runId: string) => Array<{ stepId: string; outcome: string }>;
-    deleteStepResults?: ReturnType<typeof vi.fn>;
-    resetFailedLanes?: ReturnType<typeof vi.fn>;
-    countRedispatchableLanes?: ReturnType<typeof vi.fn>;
-    reopenBatch?: ReturnType<typeof vi.fn>;
-    clearPendingGateItems?: ReturnType<typeof vi.fn>;
-    clearPendingApprovalsForRun?: ReturnType<typeof vi.fn>;
-    clearPendingQuestionsForRun?: ReturnType<typeof vi.fn>;
+    deleteStepResults?: Mock;
+    resetFailedLanes?: Mock;
+    countRedispatchableLanes?: Mock;
+    reopenBatch?: Mock;
+    clearPendingGateItems?: Mock;
+    clearPendingApprovalsForRun?: Mock;
+    clearPendingQuestionsForRun?: Mock;
     logger?: RewindRunDeps['logger'];
   },
 ): RewindRunDeps & {
-  emitRunStatusChanged: ReturnType<typeof vi.fn>;
-  deleteStepResults: ReturnType<typeof vi.fn>;
+  emitRunStatusChanged: Mock;
+  deleteStepResults: Mock;
 } {
   const emitRunStatusChanged = vi.fn<(runId: string, status: 'starting') => void>();
   const deleteStepResults =

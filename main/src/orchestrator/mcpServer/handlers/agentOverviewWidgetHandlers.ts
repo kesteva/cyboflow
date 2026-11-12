@@ -347,7 +347,7 @@ export class AgentOverviewWidgetHandlers {
         this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
         return;
       }
-      const parsedSettings = z.record(scalarSchema).safeParse(rawSettings);
+      const parsedSettings = z.record(z.string(), scalarSchema).safeParse(rawSettings);
       if (!parsedSettings.success) {
         this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
         return;

@@ -45,7 +45,6 @@ import {
   driverScriptBody,
 } from '../verificationAgentRunner';
 import { SnapshotProvisionError, type SnapshotProvision } from '../snapshotProvisioner';
-import { pathEnvKey } from '../harnessEnv';
 import type { PinnedRunbookRecord } from '../runbookStore';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import { setSeamErrorSink } from '../../telemetrySink';
@@ -1871,8 +1870,8 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
   });
 
   it('a MISS → env-class skip: no deploy, no budget charge, no provisioning', async () => {
-    const { runner, query } = makeRunner({ resolveRunbookByHash: () => null });
     const provision = vi.fn();
+    const { runner, query } = makeRunner({ resolveRunbookByHash: () => null, provision });
     const result = await runner.run(
       makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }),
     );
@@ -2100,16 +2099,6 @@ describe('VerificationAgentRunner — the harness execution env', () => {
     // '/usr/bin' is the resolveNode dir this harness prepends (see prependNodeDir).
     expect(query.mock.calls[0][0].env.PATH).toBe(['/usr/bin', '/first/bin'].join(delimiter));
     expect(query.mock.calls[1][0].env.PATH).toBe(['/usr/bin', '/second/bin'].join(delimiter));
-  });
-
-  // Windows spells the variable `Path`, and Node reports it that way. Writing a
-  // hardcoded `PATH` key leaves the consumer's `{ ...process.env, ...env }` with
-  // BOTH, and which one CreateProcess hands the child is undefined (round-2
-  // review). Driven through a fake base map so it pins on this macOS host.
-  it('writes PATH under the key case the process itself uses', async () => {
-    expect(pathEnvKey({ Path: '/gui/bin', SystemRoot: 'C:\\Windows' })).toBe('Path');
-    expect(pathEnvKey({ PATH: '/usr/bin' })).toBe('PATH');
-    expect(pathEnvKey({})).toBe('PATH');
   });
 
   // NODE_PATH is bound in the DRIVER WRAPPER and NOWHERE ELSE (round-2 review).

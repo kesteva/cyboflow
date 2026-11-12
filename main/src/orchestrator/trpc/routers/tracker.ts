@@ -366,12 +366,12 @@ const entityCategorySchema = z.enum(['feature', 'bug', 'chore']);
  * looseness `stateMappingSchema` has.
  */
 const priorityMappingOverlaySchema = z.object({
-  toProvider: z.record(priorityLevelSchema, z.string().nullable()),
+  toProvider: z.partialRecord(priorityLevelSchema, z.string().nullable()),
 });
 
 /** Same shape as {@link priorityMappingOverlaySchema}, for the category mapping. */
 const categoryMappingOverlaySchema = z.object({
-  toProvider: z.record(entityCategorySchema, z.string().nullable()),
+  toProvider: z.partialRecord(entityCategorySchema, z.string().nullable()),
 });
 
 const selectionJsonSchema = z.object({

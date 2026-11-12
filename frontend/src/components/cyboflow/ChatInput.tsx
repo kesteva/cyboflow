@@ -664,7 +664,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   // at launch (workflow_runs.model, migration 037) and never changes mid-run, so
   // it renders as a locked ReadonlyPill via UnifiedComposer's modelLabel path.
   // BUT when that pinned alias is a guarded model the availability guard now
-  // reports UNAVAILABLE (e.g. Fable 5.1 pulled), show the fallback family the run
+  // reports UNAVAILABLE (e.g. Fable 5.2 pulled), show the fallback family the run
   // actually falls back to (Opus) — reactive via useModelAvailability, so the
   // pill stops showing a dead model the moment it's marked unavailable, with a
   // tooltip explaining the swap. NULL/'auto' (no pin → SDK default) omits the

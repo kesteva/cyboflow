@@ -293,8 +293,14 @@ describe('BacklogPane', () => {
     mockLoaded = false;
     mockProjects = [];
     mockBoards = [];
-    render(<BacklogPane projectId={null} />);
+    const { unmount } = render(<BacklogPane projectId={null} />);
     expect(screen.queryByTestId('empty-backlog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('backlog-loading')).toBeInTheDocument();
+    unmount();
+
+    // Same loading placeholder with a populated project list and a selected project.
+    mockProjects = [...PROJECTS];
+    render(<BacklogPane projectId={1} />);
     expect(screen.getByTestId('backlog-loading')).toBeInTheDocument();
   });
 
@@ -626,13 +632,6 @@ describe('BacklogPane', () => {
     expect(screen.getByText('New idea')).toBeInTheDocument();
   });
 
-  it('renders a loading placeholder until the global sync resolves', () => {
-    mockLoaded = false;
-    mockBoards = [];
-    render(<BacklogPane projectId={1} />);
-    expect(screen.getByTestId('backlog-loading')).toBeInTheDocument();
-  });
-
   it('shows the in-flow and awaiting-review chips when present', () => {
     mockTasks = [
       task({
@@ -848,7 +847,22 @@ describe('BacklogPane', () => {
       mockSearchQuery = 'parser';
       mockSelectedSprintIds = ['sprint-1'];
       mockSortMode = 'priority';
+      mockTasks = [
+        task({
+          id: 't1',
+          stage_id: 's-ready',
+          memberships: [{ kind: 'sprint', id: 'sprint-1', label: 'Sprint Alpha', status: 'running' }],
+        }),
+      ];
       render(<BacklogPane projectId={1} />);
+      fireEvent.change(screen.getByTestId('backlog-search-input'), { target: { value: 'retry guard' } });
+      fireEvent.click(screen.getByTestId('membership-filter-sprint-trigger'));
+      fireEvent.click(screen.getByText('Sprint Alpha'));
+      fireEvent.click(screen.getByTestId('sort-mode-trigger'));
+      fireEvent.click(screen.getByText('Title (A–Z)'));
+      expect(mockSetSearchQuery).toHaveBeenCalledWith('retry guard');
+      expect(mockToggleSprintFilter).toHaveBeenCalledWith('sprint-1');
+      expect(mockSetSortMode).toHaveBeenCalledWith('title');
       expect(mockCreate).not.toHaveBeenCalled();
       expect(mockTaskUpdate).not.toHaveBeenCalled();
     });

@@ -2,7 +2,7 @@
  * Regression tests for the native auto-mode classifier hardening (2026-07-01).
  *
  * A planner run launched with permission mode `auto` and model NULL had EVERY
- * `mcp__cyboflow__*` tool denied because the bundled CLI's default model (Fable 5.1,
+ * `mcp__cyboflow__*` tool denied because the bundled CLI's default model (Fable 5.2,
  * pulled from availability) is what the auto classifier uses, and an unavailable
  * classifier model denies every tool ("cannot determine the safety"). That
  * soft-bricked the flow: `cyboflow_report_step` denied → current_step_id never
@@ -13,7 +13,7 @@
  *       orchestration surface is never model-gated. Non-first-party tools STILL
  *       defer to the classifier (fail-closed preserved — no fail-open).
  *   (b) When the run has no explicit model pin (NULL/'auto') and the guarded
- *       default (Fable 5.1) is unavailable, buildSdkOptions pins the guarded model's
+ *       default (Fable 5.2) is unavailable, buildSdkOptions pins the guarded model's
  *       fallback family (Opus) so the classifier runs on an available model rather
  *       than denying. When the default is available, no pin is added (CLI default
  *       retained).
@@ -33,7 +33,7 @@ import { ModelAvailabilityService } from '../../../modelAvailabilityService';
 import type { SessionManager } from '../../../sessionManager';
 import type { Options, HookCallback, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
 
-const FABLE = 'claude-fable-5-1';
+const FABLE = 'claude-fable-5-2';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn(async function* () {
@@ -237,7 +237,7 @@ describe('ClaudeCodeManager buildSdkOptions — auto-mode classifier model fallb
     seedRunSession(db, runId, sessionUuid, 'auto');
     return mgr.publicBuildSdkOptions({
       panelId: 'panel', sessionId: sessionUuid, worktreePath: '/tmp/w', prompt: 'go', runId,
-      // model omitted → NULL/'auto' run model → SDK/CLI default (Fable 5.1).
+      // model omitted → NULL/'auto' run model → SDK/CLI default (Fable 5.2).
     });
   }
 

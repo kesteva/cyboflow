@@ -35,12 +35,6 @@ function reset(): void {
 describe('navigationStore — view state machine', () => {
   beforeEach(reset);
 
-  it('defaults to the home view with no wizard opts', () => {
-    const s = useNavigationStore.getState();
-    expect(s.view).toBe('home');
-    expect(s.wizardOpts).toBeNull();
-  });
-
   it('goToWizard stores opts, switches to wizard, and clears the overlays', () => {
     // Overlays open first so we can assert the wizard clears them.
     useNavigationStore.getState().openHumanReview();
@@ -124,10 +118,6 @@ describe('navigationStore — view state machine', () => {
 
 describe('navigationStore — humanReviewOpen', () => {
   beforeEach(reset);
-
-  it('defaults to closed', () => {
-    expect(useNavigationStore.getState().humanReviewOpen).toBe(false);
-  });
 
   it('openHumanReview / closeHumanReview set the flag', () => {
     useNavigationStore.getState().openHumanReview();

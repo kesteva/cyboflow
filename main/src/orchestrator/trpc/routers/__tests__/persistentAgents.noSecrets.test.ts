@@ -7,7 +7,7 @@
  * one-time token and its instruction brief appear ONLY in the responses of connect / switchConnection /
  * repairPairing — never in getPairing, listAgents, getThread, listCredentials or any other procedure.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import { appRouter } from '../../router';
@@ -80,7 +80,7 @@ let comp: PersistentAgentsComposition;
 let bridge: FakeConnector;
 let native: FakeConnector;
 let logger: ReturnType<typeof makeLogger>;
-let capture: ReturnType<typeof vi.fn>;
+let capture: Mock;
 let events: unknown[];
 let emitSpy: { mockRestore(): void };
 

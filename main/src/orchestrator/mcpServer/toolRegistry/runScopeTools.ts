@@ -60,9 +60,9 @@ const PRIORITY_EXPECTED = "priority: 'P0'..'P6' (optional)";
  * The arm's blank check, as a REFINE rather than `.trim()` — trimming would
  * mutate the value that goes on the wire. Takes the already-described base so
  * the description stays on the ZodString, which is where `toInputSchema` reads
- * it from (it looks THROUGH the effects wrapper).
+ * it from (zod 4 refines in place, so the refined schema keeps it).
  */
-function nonBlank(base: z.ZodString): z.ZodEffects<z.ZodString, string, string> {
+function nonBlank(base: z.ZodString): z.ZodString {
   return base.refine((value) => value.trim().length > 0);
 }
 
@@ -72,7 +72,7 @@ function nonBlank(base: z.ZodString): z.ZodEffects<z.ZodString, string, string> 
  * description-on-the-base rule as {@link nonBlank}; pair it with an `expected`
  * override to restore the arm's `integer >= N` phrasing.
  */
-function integerAtLeast(base: z.ZodNumber, min: number): z.ZodEffects<z.ZodNumber, number, number> {
+function integerAtLeast(base: z.ZodNumber, min: number): z.ZodNumber {
   return base.refine((value) => Number.isInteger(value) && value >= min);
 }
 

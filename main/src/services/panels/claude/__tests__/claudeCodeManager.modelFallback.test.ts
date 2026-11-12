@@ -1,12 +1,12 @@
 /**
- * Mid-call graceful model fallback (Fable 5.1 pulled from release).
+ * Mid-call graceful model fallback (Fable 5.2 pulled from release).
  *
  * The Claude Code CLI reports an unusable `--model` NOT as a thrown error but as
  * a terminal `result` event with `is_error: true` — so it arrives inside
  * runSdkQuery's `for await` iterator, never its catch. This suite pins the
  * behavior the reactive guard must provide on that path:
  *
- *   (a) a guarded model (Fable 5.1) that fails mid-call is marked unavailable AND
+ *   (a) a guarded model (Fable 5.2) that fails mid-call is marked unavailable AND
  *       the SAME turn is retried ONCE on the fallback family (Opus) — query() is
  *       invoked a second time with the fallback model, the Fable error result is
  *       SUPPRESSED (never emitted to the UI / no 'error' event), and the fallback
@@ -30,9 +30,9 @@ import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchest
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import { ModelAvailabilityService } from '../../../modelAvailabilityService';
 
-const FABLE = 'claude-fable-5-1';
+const FABLE = 'claude-fable-5-2';
 const FABLE_ERROR =
-  "There's an issue with the selected model (claude-fable-5-1). It may not exist or you may not have access to it. Run --model to pick a different model.";
+  "There's an issue with the selected model (claude-fable-5-2). It may not exist or you may not have access to it. Run --model to pick a different model.";
 
 // ---------------------------------------------------------------------------
 // Stateful SDK mock — shared with the hoisted vi.mock factory via vi.hoisted().
@@ -201,7 +201,7 @@ describe('ClaudeCodeManager — mid-call model fallback', () => {
       panelId: 'p-fallback',
       sessionId: 'p-fallback',
       unavailableAlias: 'fable',
-      unavailableLabel: 'Fable 5.1',
+      unavailableLabel: 'Fable 5.2',
       fallbackAlias: 'opus',
     });
   });

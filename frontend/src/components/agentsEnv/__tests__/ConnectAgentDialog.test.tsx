@@ -127,7 +127,7 @@ function open(props: Partial<React.ComponentProps<typeof ConnectAgentDialog>> = 
   return { onClose, onOpenThread };
 }
 
-async function pickVendor(vendor: 'openai-dots' | 'meta-muse' | 'other'): Promise<void> {
+async function pickVendor(vendor: 'anthropic-duet' | 'openai-dots' | 'meta-muse' | 'other'): Promise<void> {
   fireEvent.click(await screen.findByTestId(`connect-vendor-${vendor}`));
 }
 
@@ -136,6 +136,7 @@ describe('ConnectAgentDialog: vendor step', () => {
     open();
     const rows = await screen.findAllByTestId(/^connect-vendor-/);
     expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual([
+      'connect-vendor-anthropic-duet',
       'connect-vendor-openai-dots',
       'connect-vendor-meta-muse',
       'connect-vendor-other',
@@ -268,6 +269,9 @@ describe('ConnectAgentDialog: bridge setup form', () => {
     fireEvent.click(screen.getByTestId('connect-back'));
     await pickVendor('meta-muse');
     expect(await screen.findByTestId('connect-transport-http')).toBeChecked();
+    fireEvent.click(screen.getByTestId('connect-back'));
+    await pickVendor('anthropic-duet');
+    expect(await screen.findByTestId('connect-transport-mcp')).toBeChecked();
   });
 
   it('the handle follows the name until it is edited; an invalid handle disables submit', async () => {
@@ -363,6 +367,15 @@ describe('ConnectAgentDialog: pairing', () => {
     fireEvent.click(screen.getByTestId('pairing-new-code'));
     await waitFor(() => expect(repairMutate).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
     await waitFor(() => expect(screen.getByTestId('pairing-code')).toHaveTextContent('NEXT-OTTER-0007'));
+  });
+
+  it('Claude Duet pairing points at the Claude account connectors', async () => {
+    open();
+    await pickVendor('anthropic-duet');
+    expect(await screen.findByTestId('connect-name')).toHaveValue('Duet');
+    fireEvent.click(screen.getByTestId('connect-submit'));
+    await screen.findByTestId('pairing-code');
+    expect(screen.getByText(/In Claude, open Settings → Connectors, add a custom connector/)).toBeInTheDocument();
   });
 
   it('a paired client appears as labelled facts and the code row goes away', async () => {

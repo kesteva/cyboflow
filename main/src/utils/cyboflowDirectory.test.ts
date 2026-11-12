@@ -172,7 +172,7 @@ describe('cyboflowDirectory', () => {
   it('getCyboflowSubdirectory() appends subpaths to the cyboflow directory', async () => {
     const { getCyboflowSubdirectory } = await import('./cyboflowDirectory');
     const socketsDir = getCyboflowSubdirectory('sockets');
-    expect(socketsDir).toContain('.cyboflow');
-    expect(socketsDir).toMatch(/sockets$/);
+    expect(socketsDir).toBe(join(homedir(), '.cyboflow_dev', 'sockets'));
+    expect(getCyboflowSubdirectory('a', 'b')).toBe(join(homedir(), '.cyboflow_dev', 'a', 'b'));
   });
 });

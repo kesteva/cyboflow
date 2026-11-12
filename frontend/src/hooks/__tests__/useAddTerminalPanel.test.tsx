@@ -130,18 +130,11 @@ describe('useAddTerminalPanel — happy path without onAfterActivate', () => {
     mockSetActivePanel.mockResolvedValue(undefined);
   });
 
-  it('completes without error when onAfterActivate is omitted', async () => {
-    const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'TestView' })
-    );
-    await expect(act(async () => { await result.current(); })).resolves.toBeUndefined();
-  });
-
   it('still calls createPanel, addPanel, setActivePanelInStore, and setActivePanel', async () => {
     const { result } = renderHook(() =>
       useAddTerminalPanel(MOCK_SESSION, { logTag: 'TestView' })
     );
-    await act(async () => { await result.current(); });
+    await expect(act(async () => { await result.current(); })).resolves.toBeUndefined();
 
     expect(mockCreatePanel).toHaveBeenCalledTimes(1);
     expect(mockAddPanel).toHaveBeenCalledTimes(1);

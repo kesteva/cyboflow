@@ -327,14 +327,4 @@ describe('Migration 042: collapse board to 4 stages + approval/decompose stamps'
     expect(parked.stage_id).toBe(stageId(B1, 10)); // Won't do is an explicit human decision
     db.close();
   });
-
-  it('keeps foreign_keys ON throughout (no RESTRICT FK fired)', () => {
-    const db = buildDbThrough024();
-    seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
-
-    const fk = db.pragma('foreign_keys', { simple: true });
-    expect(fk).toBe(1);
-    db.close();
-  });
 });

@@ -3,7 +3,7 @@
  * "Install cyboflow tools" action (gates, coalescing, progress, telemetry, follow-up preflight) and the prelaunch
  * gate (reuse window, judges, never persisted). Real HostStore on in-memory SQLite; fake hosts / toolchain / link.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -126,7 +126,7 @@ let hosts: Map<string, ReturnType<typeof fakeHost>>;
 let env: NodeJS.ProcessEnv;
 let enabled: boolean;
 let logger: LoggerLike;
-let captureError: ReturnType<typeof vi.fn>;
+let captureError: Mock;
 let toolchain: HostsToolchainDeps & {
   resolveSources: ReturnType<typeof vi.fn>;
   buildManifest: ReturnType<typeof vi.fn>;

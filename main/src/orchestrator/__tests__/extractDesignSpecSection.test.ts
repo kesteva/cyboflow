@@ -19,10 +19,8 @@ import {
   extractDesignSpecSection,
   replaceDesignSpecSection,
   DESIGN_SPEC_SECTION_HEADING,
-  DESIGN_SPEC_HEADING_LINE_RE,
   extractArchDesignSection,
   replaceArchDesignSection,
-  ARCH_DESIGN_HEADING_LINE_RE,
 } from '../../../../shared/types/artifacts';
 
 const DESIGN_HEADING = `## ${DESIGN_SPEC_SECTION_HEADING}`;
@@ -209,23 +207,5 @@ describe('extractSection / replaceSection (the shared generalized engine)', () =
     const out = replaceSection(body, CUSTOM_HEADING_RE, '## Custom Section\n\nreplaced.');
     expect(out).toBe('# Doc\n\n## Custom Section\n\nreplaced.\n\n## Next\n\nx');
     expect(extractSection(out, CUSTOM_HEADING_RE)).toBe('replaced.');
-  });
-
-  it('extractArchDesignSection/replaceArchDesignSection are behaviorally identical to extractSection/replaceSection bound to ARCH_DESIGN_HEADING_LINE_RE', () => {
-    const body = '# Idea\n\n## Architecture design\n\ncontent.\n\n## Next\n\nx';
-    expect(extractArchDesignSection(body)).toBe(extractSection(body, ARCH_DESIGN_HEADING_LINE_RE));
-    const newSection = '## Architecture design\n\nreplaced.';
-    expect(replaceArchDesignSection(body, newSection)).toBe(
-      replaceSection(body, ARCH_DESIGN_HEADING_LINE_RE, newSection),
-    );
-  });
-
-  it('extractDesignSpecSection/replaceDesignSpecSection are behaviorally identical to extractSection/replaceSection bound to DESIGN_SPEC_HEADING_LINE_RE', () => {
-    const body = '# Idea\n\n## Design spec\n\ncontent.\n\n## Next\n\nx';
-    expect(extractDesignSpecSection(body)).toBe(extractSection(body, DESIGN_SPEC_HEADING_LINE_RE));
-    const newSection = '## Design spec\n\nreplaced.';
-    expect(replaceDesignSpecSection(body, newSection)).toBe(
-      replaceSection(body, DESIGN_SPEC_HEADING_LINE_RE, newSection),
-    );
   });
 });

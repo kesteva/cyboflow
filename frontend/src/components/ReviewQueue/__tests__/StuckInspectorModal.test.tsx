@@ -104,30 +104,12 @@ describe('StuckInspectorModal — loading state', () => {
     expect(mockGetStuckInspectionQuery).toHaveBeenCalledOnce();
     expect(mockGetStuckInspectionQuery).toHaveBeenCalledWith({ runId: 'run-stuck-001' });
   });
-
-  it('passes runId through to the query', () => {
-    mockGetStuckInspectionQuery.mockReturnValue(new Promise(() => undefined));
-
-    renderModal('run-other-xyz');
-
-    expect(mockGetStuckInspectionQuery).toHaveBeenCalledWith({ runId: 'run-other-xyz' });
-  });
 });
 
 describe('StuckInspectorModal — loaded state', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetStuckInspectionQuery.mockResolvedValue(FIXTURE_INSPECTION);
-  });
-
-  it('renders all three section headings after data loads', async () => {
-    renderModal();
-
-    await waitFor(() => {
-      expect(screen.getByText('Detected reason')).toBeInTheDocument();
-    });
-    expect(screen.getByText('Pending approval')).toBeInTheDocument();
-    expect(screen.getByText('Recent events')).toBeInTheDocument();
   });
 
   it('renders three section headings in correct DOM order', async () => {
@@ -147,24 +129,6 @@ describe('StuckInspectorModal — loaded state', () => {
     expect(sectionHeadings[0].textContent).toBe('Detected reason');
     expect(sectionHeadings[1].textContent).toBe('Pending approval');
     expect(sectionHeadings[2].textContent).toBe('Recent events');
-  });
-
-  it('renders the human-readable stuck reason', async () => {
-    renderModal();
-
-    await waitFor(() => {
-      expect(screen.getByText('Detected reason')).toBeInTheDocument();
-    });
-
-    // 'no_progress' should be mapped to a human-readable string.
-    // The exact text depends on the reason map in StuckInspectorModal.
-    // We check for the key word 'progress' or 'self_deadlock' to be present.
-    // The fixture uses 'no_progress' but the map may not have that key — check
-    // that a non-empty label is rendered.
-    const reasonSection = screen.getByText('Detected reason').closest('section');
-    expect(reasonSection).not.toBeNull();
-    // The section should contain some text (reason label).
-    expect(reasonSection?.textContent?.length).toBeGreaterThan('Detected reason'.length);
   });
 
   it('renders pending approval tool name in monospace', async () => {
@@ -191,36 +155,18 @@ describe('StuckInspectorModal — loaded state', () => {
     expect(eventTypeEls).toHaveLength(10);
   });
 
-  it('read-only invariant: no Approve button inside the modal', async () => {
+  it.each([
+    ['Approve', /approve/i],
+    ['Reject', /reject/i],
+    ['Cancel and restart', /cancel and restart/i],
+  ])('read-only invariant: no %s button inside the modal', async (_label, name) => {
     renderModal();
 
     await waitFor(() => {
       expect(screen.getByText('Detected reason')).toBeInTheDocument();
     });
 
-    expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument();
-  });
-
-  it('read-only invariant: no Reject button inside the modal', async () => {
-    renderModal();
-
-    await waitFor(() => {
-      expect(screen.getByText('Detected reason')).toBeInTheDocument();
-    });
-
-    expect(screen.queryByRole('button', { name: /reject/i })).not.toBeInTheDocument();
-  });
-
-  it('read-only invariant: no Cancel and restart button inside the modal', async () => {
-    renderModal();
-
-    await waitFor(() => {
-      expect(screen.getByText('Detected reason')).toBeInTheDocument();
-    });
-
-    expect(
-      screen.queryByRole('button', { name: /cancel and restart/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
   });
 });
 
@@ -402,10 +348,15 @@ describe('StuckInspectorModal — event row expand/collapse', () => {
     // The first button with aria-expanded=false in the recent-events section.
     const firstEventButton = eventButtons[0];
 
+    // Pretty-printed payload is absent before the click.
+    expect(screen.queryByText(/"index": 10/)).not.toBeInTheDocument();
+
     fireEvent.click(firstEventButton);
 
     // After click the aria-expanded attribute becomes "true".
     expect(firstEventButton.getAttribute('aria-expanded')).toBe('true');
+    // ...and the pretty-printed payload (indented, unlike the compact preview) is rendered.
+    expect(screen.getByText(/"index": 10/)).toBeInTheDocument();
   });
 
   it('clicking an expanded event row collapses it', async () => {

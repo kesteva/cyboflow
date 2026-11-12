@@ -47,26 +47,6 @@ interface WorktreeManagerWithPrivates {
 
 describe('WorktreeManager.createDeterministicWorktree', () => {
   describe('path matches scheme', () => {
-    it('worktreePath ends with .cyboflow/worktrees/<workflowName>/<runId8>', async () => {
-      await withTempDir('worktree-unit-', async (tmpDir) => {
-        const manager = new WorktreeManager();
-        const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
-        const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
-
-        const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
-          worktreePath: expectedWorktreePath,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        });
-
-        const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
-
-        expect(result.worktreePath).toMatch(/\.cyboflow[/\\]worktrees[/\\]sprint[/\\]a3f2b1c0$/);
-
-        stub.mockRestore();
-      });
-    });
-
     it('branchName matches cyboflow/<workflowName>/<runId8>', async () => {
       await withTempDir('worktree-unit-', async (tmpDir) => {
         const manager = new WorktreeManager();

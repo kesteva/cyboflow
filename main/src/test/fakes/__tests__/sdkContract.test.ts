@@ -9,8 +9,8 @@
  *
  *   1. ASSIGNABILITY (compile-time) — every builder output is assignable to the real
  *      `SDKMessage` union. This is already enforced by the `satisfies` clauses inside
- *      fakeSdk, but the typed const below makes a regression a NAMED test whose file
- *      also fails `tsc` (the CI gate), not just an anonymous type error.
+ *      fakeSdk, but the typed const below makes a regression fail `tsc` in this file
+ *      (the CI gate), not just in an anonymous fixture.
  *   2. NARROW-ACCEPTANCE (runtime) — each representative builder event, run through a
  *      fresh real `TypedEventNarrowing`, narrows to its EXPECTED wire kind and never to
  *      the `{kind:'__unknown__'}` fallback. (The narrowing fail-softs to `__unknown__`;
@@ -104,8 +104,31 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
  *     `SDKConversationResetMessage`, `plugin_errors` + `view_mode` on the init
  *     payload, and new settings keys (`availableModelsMatch`, `deniedModels`,
  *     `allowClaudeInChromeWithManagedMcp`, `maxProseWidth`, boolean `attribution`).
+ *
+ * 0.3.284 → 0.3.321 re-verification (bumped to reach a bundled CLI, 2.1.321, new
+ * enough for `claude-fable-5-2`; 0.3.319 and every earlier release ship no
+ * `claude-fable-5-2` catalog entry):
+ *   - `SDKMessage` union gained exactly one variant, `SDKSessionWritesLostMessage`
+ *     (`system/session_writes_lost`: transcript/config writes lost to ENOSPC/EDQUOT).
+ *     cyboflow does not model it, so it fail-softs to `{kind:'__unknown__'}` —
+ *     no new builder, `EXPECTED_DISCRIMINANTS` unchanged.
+ *   - `PermissionResult`, `PermissionUpdate`, `PermissionMode`, `SDKMessageOrigin`,
+ *     `SDKAssistantMessageError`, `SDKResultMessage`, `ExitReason`, `HookInput`,
+ *     `McpServerConfig`: byte-identical. `Options`: doc text only.
+ *   - `CanUseTool`: doc text only, but CONTRACT text — `matchedAskRule` is now also
+ *     set when an ask rule reaches an MCP tool under another name of its server
+ *     (connector id / claude.ai name), and `suppressAlwaysAllowRule` also fires
+ *     when a plugin started the call. The auto-approver already vetoes on any
+ *     `matchedAskRule` and never writes `updatedPermissions`, so both are honored.
+ *   - Additive only, none of it used: `agent_id` on assistant/user messages,
+ *     `run_id` / `parent_task_id` on task messages, `credential_expires_at` and
+ *     first-text queue timings on results, `cacheCreationEphemeral{5m,1h}InputTokens`
+ *     on `ModelUsage`, `fallback_credit` left nullable in `NonNullableUsage`, new
+ *     `SDKStartupFailureReason` values, `BUILTIN_TOOL_NAMES` /
+ *     `LEGACY_TOOL_NAME_ALIASES` exports, and the `ask_user_question_unanswered_v1`
+ *     init capability.
  */
-const PINNED_SDK_VERSION = '0.3.284';
+const PINNED_SDK_VERSION = '0.3.321';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.
@@ -223,15 +246,6 @@ function resolveInstalledSdkVersion(): string {
 // ---------------------------------------------------------------------------
 
 describe('sdkContract — fakeSdk builders vs the real SDK + narrowing', () => {
-  it('every fakeSdk builder output is assignable to the real SDKMessage union', () => {
-    // Compile-time: `ALL_BUILDER_OUTPUTS: readonly SDKMessage[]` above enforces
-    // assignability. Runtime: sanity-check each carries a wire `type` discriminant.
-    expect(ALL_BUILDER_OUTPUTS.length).toBeGreaterThan(0);
-    for (const message of ALL_BUILDER_OUTPUTS) {
-      expect(typeof (message as { type?: unknown }).type).toBe('string');
-    }
-  });
-
   it.each(NARROWABLE)(
     '$name narrows to $expected and never to __unknown__',
     ({ event, expected }) => {

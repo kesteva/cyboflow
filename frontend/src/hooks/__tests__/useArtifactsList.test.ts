@@ -18,7 +18,7 @@
  * lifecycle but seeds from `artifacts.listBySession` and filters the shared
  * subscription by `event.sessionId` instead of `event.runId`.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Artifact, ArtifactChangedEvent } from '../../../../shared/types/artifacts';
 
@@ -44,14 +44,14 @@ function deferSeed(): DeferredSeed {
 // Mutable handles the tests reach into.
 let seedDeferred: DeferredSeed;
 let lastOnData: OnDataFn | null;
-let unsubscribeSpy: ReturnType<typeof vi.fn>;
-let subscribeSpy: ReturnType<typeof vi.fn>;
-let listQuerySpy: ReturnType<typeof vi.fn>;
+let unsubscribeSpy: Mock;
+let subscribeSpy: Mock;
+let listQuerySpy: Mock;
 // Separate deferred/spies for useSessionArtifactsList's listBySession seed —
 // kept independent so its own describe block below doesn't fight over the
 // same handles as the run-scoped `list` tests above.
 let sessionSeedDeferred: DeferredSeed;
-let listBySessionQuerySpy: ReturnType<typeof vi.fn>;
+let listBySessionQuerySpy: Mock;
 
 vi.mock('../../trpc/client', () => {
   return {

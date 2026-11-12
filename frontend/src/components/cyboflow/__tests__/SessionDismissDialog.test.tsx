@@ -67,6 +67,7 @@ describe('SessionDismissDialog', () => {
       fireEvent.click(dismissButton);
     });
 
+    expect(API.sessions.markComplete).not.toHaveBeenCalled();
     expect(API.sessions.delete).toHaveBeenCalledWith('sess-dismiss-1');
     expect(defaultProps.onClose).toHaveBeenCalled();
   });
@@ -338,19 +339,6 @@ describe('SessionDismissDialog', () => {
   });
 
   describe('non-delivered / probe-failure fallback', () => {
-    it('a non-delivered session keeps the plain confirm and calls delete directly', async () => {
-      render(<SessionDismissDialog {...defaultProps} />);
-
-      const dismissButton = await screen.findByText('Dismiss');
-
-      await act(async () => {
-        fireEvent.click(dismissButton);
-      });
-
-      expect(API.sessions.markComplete).not.toHaveBeenCalled();
-      expect(API.sessions.delete).toHaveBeenCalledWith('sess-dismiss-1');
-    });
-
     it('a failing delivery probe falls back to the plain confirm', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockRejectedValue(new Error('probe down'));
 

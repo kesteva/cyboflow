@@ -120,8 +120,23 @@ describe('makeSdkStructuredQuery', () => {
     expect(observedAbort).toBe(true);
   });
 
-  it('defaults the timeout to SUPERVISOR_QUERY_TIMEOUT_MS', () => {
+  it('defaults the timeout to SUPERVISOR_QUERY_TIMEOUT_MS', async () => {
     expect(SUPERVISOR_QUERY_TIMEOUT_MS).toBe(120_000);
+    vi.useFakeTimers();
+    try {
+      install(makeBlockUntilAbortQuery());
+      const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+      let settled = false;
+      const p = fn({ prompt: 'p', schema: {}, cwd: '/wt' });
+      const assertion = expect(p).rejects.toThrow(/timed out after 120000ms/);
+      p.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(SUPERVISOR_QUERY_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -803,38 +803,6 @@ describe('queueTurn / interruptAndSend (TASK-301)', () => {
     });
   });
 
-  it('proof of failure: attempt 2\'s overwrite reducer drops the first queued message (negative control for the test above)', () => {
-    // The exact pre-fix `queueTurn` body from attempt 2 (agentThreadStore.ts,
-    // before this attempt's fix): `set({ queuedTurn: { text, ...images } })`,
-    // an unconditional replace with no accumulation. Reproduced here verbatim
-    // (not by editing the production file — this worktree is shared with
-    // sibling lanes) to prove the assertion above is discriminating: run it
-    // through the SAME two-call sequence and the SAME assertion, and it fails.
-    let queuedTurn: { text: string; images?: Array<{ name: string; mediaType: string; base64: string }> } | null =
-      null;
-    const preFixQueueTurn = (
-      text: string,
-      images?: Array<{ name: string; mediaType: string; base64: string }>,
-    ): void => {
-      queuedTurn = { text, ...(images !== undefined ? { images } : {}) };
-    };
-    const imageA = { name: 'a.png', mediaType: 'image/png' as const, base64: 'aaaa' };
-    const imageB = { name: 'b.png', mediaType: 'image/png' as const, base64: 'bbbb' };
-
-    preFixQueueTurn('first message', [imageA]);
-    preFixQueueTurn('second message', [imageB]);
-
-    // Against the pre-fix reducer this is FALSE — `queuedTurn` is just
-    // `{ text: 'second message', images: [imageB] }`, silently discarding
-    // "first message" + imageA. This assertion documents that failure so the
-    // reducer's discriminating power (and this attempt's fix) is on record.
-    expect(queuedTurn).not.toEqual({
-      text: 'first message\n\nsecond message',
-      images: [imageA, imageB],
-    });
-    expect(queuedTurn).toEqual({ text: 'second message', images: [imageB] });
-  });
-
   it('cancelQueuedTurn clears a pending queue without ever sending it', () => {
     useAgentThreadStore.setState({ thread: makeThread() });
     useAgentThreadStore.getState().queueTurn('never mind');

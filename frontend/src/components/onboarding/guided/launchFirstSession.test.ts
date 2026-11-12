@@ -34,7 +34,7 @@ vi.mock('../../Backlog/useTaskRunLauncher', () => ({
   MAX_PLANNER_SEED_IDEAS: 4,
 }));
 
-import { launchFirstFlow, MAX_PLANNER_SEED_IDEAS } from './launchFirstSession';
+import { launchFirstFlow } from './launchFirstSession';
 
 const DEFAULTS = { model: 'opus', permissionMode: 'auto' as const, substrate: 'sdk' as const };
 
@@ -49,10 +49,6 @@ describe('launchFirstSession', () => {
     ensureSessionForLaunch.mockResolvedValue('session-1');
     resolveLaunchDefaults.mockReturnValue(DEFAULTS);
     runsStartMutate.mockResolvedValue({ runId: 'run-1' });
-  });
-
-  it('re-exports MAX_PLANNER_SEED_IDEAS from useTaskRunLauncher', () => {
-    expect(MAX_PLANNER_SEED_IDEAS).toBe(4);
   });
 
   it('planner resolves the planner workflow by name and passes truncated ideaIds + defaults', async () => {

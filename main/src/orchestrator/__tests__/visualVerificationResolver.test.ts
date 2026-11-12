@@ -320,12 +320,4 @@ describe('resolveVisualVerification — default AGENT engine stamp (redesign §5
       expect(r.type).toBe(type);
     }
   });
-
-  it('a disabled run stamps no chain', () => {
-    expect(resolveVisualVerification({ globalDefaultEnabled: false })).toEqual({
-      enabled: false,
-      type: null,
-      chain: [],
-    });
-  });
 });
