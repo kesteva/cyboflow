@@ -23,6 +23,7 @@ import {
   type PreflightCheckResult,
   type PreflightResult,
   type PreflightProgressEvent,
+  type ToolchainProgressEvent,
   type HostsChangedEvent,
 } from '../../../shared/types/hosts';
 
@@ -38,6 +39,8 @@ export interface HostsState {
   hostsError: string | null;
   /** Checks decided so far for a preflight that is running right now, by host id. */
   preflightLive: Record<string, PreflightCheckResult[]>;
+  /** The latest "Install cyboflow tools" progress frame for a push that is running right now, by host id. */
+  toolchainLive: Record<string, ToolchainProgressEvent>;
 
   /** Idempotent; returns the teardown. Called once from App. */
   init: () => () => void;
@@ -45,6 +48,9 @@ export interface HostsState {
   refreshHosts: () => Promise<void>;
   /** Ref-counted: the first watcher subscribes; returns an idempotent release fn. */
   watchPreflight: (hostId: string) => () => void;
+  /** Ref-counted like watchPreflight, for the install progress stream. */
+  watchToolchain: (hostId: string) => () => void;
+  installToolchain: (id: string) => Promise<HostsResult<object> | HostsLocalFailure>;
   add: (input: { label: string; sshTarget: string }) => Promise<HostsResult<{ id: string }> | HostsLocalFailure>;
   update: (
     id: string,
@@ -78,6 +84,7 @@ export const useHostsStore = create<HostsState>((set, get) => {
   let statusSeq = 0;
   let hostsSeq = 0;
   const preflightRt = new Map<string, PreflightRuntime>();
+  const toolchainRt = new Map<string, PreflightRuntime>();
 
   const closeHostsSub = (): void => {
     hostsSub?.close();
@@ -88,6 +95,13 @@ export const useHostsStore = create<HostsState>((set, get) => {
 
   const closePreflightSubs = (): void => {
     for (const r of preflightRt.values()) {
+      r.sub?.close();
+      r.sub = null;
+    }
+  };
+
+  const closeToolchainSubs = (): void => {
+    for (const r of toolchainRt.values()) {
       r.sub?.close();
       r.sub = null;
     }
@@ -149,6 +163,28 @@ export const useHostsStore = create<HostsState>((set, get) => {
     );
   };
 
+  const onToolchain = (hostId: string, ev: ToolchainProgressEvent): void => {
+    if (ev.phase === 'done' || ev.phase === 'failed') {
+      // The terminal frame ends the install: drop the live bar and let the refreshed host row carry the result.
+      set((s) => ({ toolchainLive: withoutKey(s.toolchainLive, hostId) }));
+      scheduleHostsRefresh();
+    } else {
+      set((s) => ({ toolchainLive: { ...s.toolchainLive, [hostId]: ev } }));
+    }
+  };
+
+  const openToolchainSub = (hostId: string, r: PreflightRuntime): void => {
+    r.sub = openResilientSubscription<ToolchainProgressEvent>(
+      `hosts.onToolchainProgress:${hostId}`,
+      (h) => {
+        // A (re)opened stream starts clean: a stale frame would show a bar for an install that already ended.
+        set((s) => ({ toolchainLive: withoutKey(s.toolchainLive, hostId) }));
+        return trpc.cyboflow.hosts.onToolchainProgress.subscribe({ id: hostId }, h);
+      },
+      { onData: (ev) => onToolchain(hostId, ev) },
+    );
+  };
+
   /** Run a mutation; on any server answer re-list (state may have moved); a throw becomes a local failure. */
   const mutate = async <T extends { ok: boolean }>(
     call: () => Promise<T>,
@@ -169,6 +205,7 @@ export const useHostsStore = create<HostsState>((set, get) => {
     hostsStatus: 'idle',
     hostsError: null,
     preflightLive: {},
+    toolchainLive: {},
 
     init: () => {
       if (initialized && cachedTeardown) return cachedTeardown;
@@ -182,7 +219,9 @@ export const useHostsStore = create<HostsState>((set, get) => {
         tornDown = true;
         closeHostsSub();
         closePreflightSubs();
+        closeToolchainSubs();
         preflightRt.clear();
+        toolchainRt.clear();
         configUnsub?.();
         configUnsub = null;
         initialized = false;
@@ -207,10 +246,14 @@ export const useHostsStore = create<HostsState>((set, get) => {
         for (const [hostId, r] of preflightRt) {
           if (r.refs > 0 && r.sub === null) openPreflightSub(hostId, r);
         }
+        for (const [hostId, r] of toolchainRt) {
+          if (r.refs > 0 && r.sub === null) openToolchainSub(hostId, r);
+        }
       } else if (hostsSub !== null || get().hosts.length > 0) {
         closeHostsSub();
         closePreflightSubs();
-        set({ hosts: [], hostsStatus: 'idle', hostsError: null, preflightLive: {} });
+        closeToolchainSubs();
+        set({ hosts: [], hostsStatus: 'idle', hostsError: null, preflightLive: {}, toolchainLive: {} });
       }
     },
 
@@ -253,6 +296,31 @@ export const useHostsStore = create<HostsState>((set, get) => {
         }
       };
     },
+
+    watchToolchain: (hostId) => {
+      let r = toolchainRt.get(hostId);
+      if (!r) {
+        r = { refs: 0, sub: null };
+        toolchainRt.set(hostId, r);
+      }
+      r.refs++;
+      if (r.refs === 1 && !tornDown && get().featureStatus?.running === true) openToolchainSub(hostId, r);
+      const rt = r;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        rt.refs--;
+        if (rt.refs <= 0) {
+          rt.sub?.close();
+          rt.sub = null;
+          toolchainRt.delete(hostId);
+          set((s) => ({ toolchainLive: withoutKey(s.toolchainLive, hostId) }));
+        }
+      };
+    },
+    installToolchain: (id) =>
+      mutate(() => trpc.cyboflow.hosts.installToolchain.mutate({ id }), 'Could not install the cyboflow tools.'),
 
     add: (input) => mutate(() => trpc.cyboflow.hosts.add.mutate(input), 'Could not add the environment.'),
     update: (id, patch) =>

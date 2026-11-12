@@ -4,14 +4,20 @@
  *
  * Tier impact (spec table): ssh-reachable blocks-cli; arch, git, node22, sdk-binary-hash, mcp-roundtrip and
  * repo-root-tcc block full; the rest are informational, except a disk-free FAIL which blocks full.
+ *
+ * The three M2 checks that observe a remote round trip (mcp-roundtrip, the live claude-auth) are judged here from
+ * the engine's observation (exit code, stdout) — the I/O itself lives in preflightEngine.ts.
  */
-import type {
-  PreflightCheckId,
-  PreflightCheckResult,
-  TierImpact,
+import {
+  redactSecrets,
+  type PreflightCheckId,
+  type PreflightCheckResult,
+  type TierImpact,
 } from '../../../../../shared/types/hosts';
+import type { ExecResult } from '../../../orchestrator/trpc/contracts/executionHost';
 import type { ProbeRecord } from '../remoteProbe';
 import type { SshFailure } from '../sshTransport';
+import { TOOLCHAIN_CLAUDE_REL, TOOLCHAIN_MCP_REL } from '../toolchain/types';
 
 export type CheckOutcome = Omit<PreflightCheckResult, 'durationMs'>;
 
@@ -120,12 +126,113 @@ export function checkNode22(p: ProbeRecord): CheckOutcome {
   return outcome('node22', 'fail', `${p.nodeVersion} is older than Node.js 22`, fix);
 }
 
-export function checkSdkBinaryHash(): CheckOutcome {
-  return skippedCheck('sdk-binary-hash', ARRIVES_LATER_DETAIL);
+export const TOOLCHAIN_FIX = 'Install cyboflow tools';
+export const TOOLCHAIN_NOT_INSTALLED_DETAIL = 'Not installed';
+export const TOOLCHAIN_DAMAGED_DETAIL = 'Installed tools are damaged';
+export const TOOLCHAIN_UNCHECKED_DETAIL = 'Could not check the installed tools';
+
+/** One file of the expected toolchain whose installed size the probe reports. */
+export interface ExpectedToolchainFile {
+  rel: string;
+  size: number;
 }
 
-export function checkMcpRoundtrip(): CheckOutcome {
-  return skippedCheck('mcp-roundtrip', ARRIVES_LATER_DETAIL);
+/**
+ * This Mac's toolchain for the machine's arch (spec A6): what an install of it must look like on the machine.
+ * `expectedHash` is null exactly when this build cannot produce one (`unavailableReason` says why).
+ */
+export interface ExpectedToolchain {
+  expectedHash: string | null;
+  /** The claude binary, the MCP bundle and (when included) the codex entrypoint, with their sizes. */
+  files: ExpectedToolchainFile[];
+  codexIncluded: boolean;
+  unavailableReason: string | null;
+}
+
+/** The codex entrypoint among the expected files (`codex/<target>/bin/codex`), or null. */
+export function codexBinFile(expected: Pick<ExpectedToolchain, 'files'>): ExpectedToolchainFile | null {
+  return expected.files.find((f) => /^codex\/[^/]+\/bin\/codex$/.test(f.rel)) ?? null;
+}
+
+const shortHash = (h: string): string => h.slice(0, 12);
+
+/**
+ * `expected` undefined = the toolchain is not wired (the M1 shape: skipped). Otherwise: unavailable for this
+ * build → fail; no manifest → warn "Not installed"; a manifest without the hash or a size mismatch → fail
+ * "damaged"; else pass. Every non-pass blocks full (CHECK_TIER_IMPACT), so the tier is full only on a pass.
+ */
+export function checkSdkBinaryHash(p: ProbeRecord, expected: ExpectedToolchain | null | undefined): CheckOutcome {
+  if (expected === undefined) return skippedCheck('sdk-binary-hash', ARRIVES_LATER_DETAIL);
+  if (expected === null) return skippedCheck('sdk-binary-hash', TOOLCHAIN_UNCHECKED_DETAIL);
+  if (expected.expectedHash === null) {
+    return outcome('sdk-binary-hash', 'fail', expected.unavailableReason ?? 'This build of cyboflow has no tools for this machine');
+  }
+  const hash = expected.expectedHash;
+  if (p.tcHash !== hash || p.tcManifest === null) return skippedCheck('sdk-binary-hash', TOOLCHAIN_UNCHECKED_DETAIL);
+  if (p.tcManifest === false) return outcome('sdk-binary-hash', 'warn', TOOLCHAIN_NOT_INSTALLED_DETAIL, TOOLCHAIN_FIX);
+  const sizeOf = (rel: string): number | null => expected.files.find((f) => f.rel === rel)?.size ?? null;
+  const codex = codexBinFile(expected);
+  const matches =
+    p.tcManifestHash === true &&
+    p.tcClaudeSize !== null && p.tcClaudeSize === sizeOf(TOOLCHAIN_CLAUDE_REL) &&
+    p.tcMcpSize !== null && p.tcMcpSize === sizeOf(TOOLCHAIN_MCP_REL) &&
+    (!expected.codexIncluded || (codex !== null && p.tcCodexSize === codex.size));
+  if (!matches) return outcome('sdk-binary-hash', 'fail', TOOLCHAIN_DAMAGED_DETAIL, TOOLCHAIN_FIX);
+  return outcome('sdk-binary-hash', 'pass', `Installed (${shortHash(hash)})`);
+}
+
+export const NEEDS_NODE_DETAIL = 'Needs Node.js 22';
+export const NO_ORCH_LINK_DETAIL = 'Orchestrator link not running';
+export const MCP_ROUNDTRIP_PASS_DETAIL = 'cyboflow answered through the link';
+export const LINK_UP_DETAIL = 'Link up';
+
+/** What the engine saw when it pinged this Mac's orch socket through the machine's forward. */
+export type McpRoundtripObservation =
+  | { kind: 'no-node' }
+  | { kind: 'no-orch-socket' }
+  | { kind: 'link-failed'; message: string }
+  /** prelaunch: the forward could be joined (no ping). */
+  | { kind: 'link-up' }
+  | { kind: 'reply'; requestId: string; result: ExecResult };
+
+function lastLine(s: string): string {
+  const lines = redactSecrets(s).split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const line = lines[lines.length - 1] ?? '';
+  return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+}
+
+/** Pass iff the first stdout line is JSON with the same requestId and `ok: true`. */
+export function checkMcpRoundtrip(obs: McpRoundtripObservation): CheckOutcome {
+  switch (obs.kind) {
+    case 'no-node':
+      return skippedCheck('mcp-roundtrip', NEEDS_NODE_DETAIL);
+    case 'no-orch-socket':
+      return skippedCheck('mcp-roundtrip', NO_ORCH_LINK_DETAIL);
+    case 'link-failed':
+      return outcome('mcp-roundtrip', 'fail', `Could not open the link: ${redactSecrets(obs.message)}`, 'Run the check again');
+    case 'link-up':
+      return outcome('mcp-roundtrip', 'pass', LINK_UP_DETAIL);
+    case 'reply': {
+      const r = obs.result;
+      if (r.timedOut) return outcome('mcp-roundtrip', 'fail', 'No answer through the link (timed out)', 'Run the check again');
+      const first = r.stdout.split('\n')[0]?.trim() ?? '';
+      let reply: unknown = null;
+      try {
+        reply = first ? JSON.parse(first) : null;
+      } catch {
+        reply = null;
+      }
+      if (
+        reply !== null && typeof reply === 'object' &&
+        (reply as { requestId?: unknown }).requestId === obs.requestId &&
+        (reply as { ok?: unknown }).ok === true
+      ) {
+        return outcome('mcp-roundtrip', 'pass', MCP_ROUNDTRIP_PASS_DETAIL);
+      }
+      const why = r.code !== 0 ? lastLine(r.stderr) || lastLine(r.stdout) || `exit ${r.code ?? 'unknown'}` : 'unexpected answer';
+      return outcome('mcp-roundtrip', 'fail', `No answer through the link: ${why}`, 'Run the check again');
+    }
+  }
 }
 
 /** `remoteRoot` is shown as configured (e.g. `~/cf-remote/<id>`), so the fix is copyable on the machine. */
@@ -146,7 +253,31 @@ export function checkClaudeAuth(p: ProbeRecord, remoteRoot: string): CheckOutcom
       `Edit ${envPath} so it holds exactly one CLAUDE_CODE_OAUTH_TOKEN=sk-ant-… line`,
     );
   }
-  return outcome('claude-auth', 'pass', 'Token present; validated when remote flows arrive');
+  return outcome('claude-auth', 'pass', 'Token present');
+}
+
+export const CLAUDE_AUTH_LIVE_PASS_DETAIL = 'Signed in (checked with one request)';
+
+/** 401 / revoked / expired / invalid key in the CLI's answer (stdout JSON or stderr). */
+const AUTH_REJECTED_RE = /\b401\b|authentication_error|revoked|invalid (api key|bearer token|x-api-key)|oauth token (has )?expired|token (has )?expired|please run \/login/i;
+
+/**
+ * The live sign-in check (full mode, toolchain installed): `claude -p ok` run on the machine with the env-file
+ * token. Exit 0 → pass; an auth rejection → fail with the re-issue fix; anything else → warn with the redacted
+ * last line. Never echoes the token (redactSecrets on everything shown).
+ */
+export function checkClaudeAuthLive(r: ExecResult, remoteRoot: string): CheckOutcome {
+  if (r.code === 0 && !r.timedOut) return outcome('claude-auth', 'pass', CLAUDE_AUTH_LIVE_PASS_DETAIL);
+  const envPath = `${remoteRoot.replace(/\/+$/, '')}/env`;
+  const text = `${r.stdout}\n${r.stderr}`;
+  if (!r.timedOut && AUTH_REJECTED_RE.test(text)) {
+    return outcome(
+      'claude-auth', 'fail', 'The Claude token was rejected',
+      `Create a new token with claude setup-token on that Mac and save it to ${envPath}`,
+    );
+  }
+  const tail = r.timedOut ? 'timed out' : lastLine(r.stderr) || lastLine(r.stdout) || `exit ${r.code ?? 'unknown'}`;
+  return outcome('claude-auth', 'warn', `Could not confirm the Claude sign-in: ${tail}`);
 }
 
 export function checkCodexAuth(p: ProbeRecord): CheckOutcome {

@@ -205,3 +205,21 @@ describe('makeSdkTextQuery', () => {
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow(/timed out/);
   });
 });
+
+// A REMOTE run's monitor (spec M2 §5 D3) passes no cwd: its worktree path names a
+// directory on the environment, so the local SDK query runs in a local temp dir.
+describe('monitor queries without a cwd (remote run)', () => {
+  it('the structured query runs in the local temp dir', async () => {
+    const { tmpdir } = await import('os');
+    yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
+    await makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH)({ prompt: 'p', schema: { type: 'object' } });
+    expect((lastOptions as Record<string, unknown>).cwd).toBe(tmpdir());
+  });
+
+  it('the text query runs in the local temp dir', async () => {
+    const { tmpdir } = await import('os');
+    yieldsMessages([sdkAssistantText('hi')]);
+    await makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH)({ prompt: 'p' });
+    expect((lastOptions as Record<string, unknown>).cwd).toBe(tmpdir());
+  });
+});

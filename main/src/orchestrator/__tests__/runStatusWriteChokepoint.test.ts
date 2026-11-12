@@ -163,9 +163,9 @@ const FROZEN_RAW_WRITERS: ReadonlyMap<string, { count: number; reason: string }>
   [
     'orchestrator/runRecovery.ts',
     {
-      count: 5,
+      count: 6,
       reason:
-        'Four boot-sweep writes (sanctioned revival path #1: force-fail stranded orphans, reset programmatic runs to starting, cancel abandoned ones) plus stampSessionRunsPrOpen, a SET-wide close-out whose WHERE is derived via allowedSourcesSqlIn(completed).',
+        'Five boot-sweep writes (sanctioned revival path #1: force-fail stranded orphans, force-fail remote-environment orphans that cannot resume (M2), reset programmatic runs to starting, cancel abandoned ones) plus stampSessionRunsPrOpen, a SET-wide close-out whose WHERE is derived via allowedSourcesSqlIn(completed).',
     },
   ],
   [

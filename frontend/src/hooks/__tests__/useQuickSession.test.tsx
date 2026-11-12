@@ -1131,3 +1131,28 @@ describe('useQuickSession — source guard: start() signature is unexpanded (TAS
     expect(params[0]).toBe('key: string');
   });
 });
+
+describe('useQuickSession — environment (hostId)', () => {
+  async function startWith(hostId?: string | null) {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1, ...(hostId !== undefined ? { hostId } : {}) }));
+    await act(async () => {
+      await result.current.start();
+    });
+    return mockCreateQuick.mock.calls[0][0] as Record<string, unknown>;
+  }
+
+  it('sends hostId only for a remote environment', async () => {
+    expect(await startWith('h2')).toMatchObject({ hostId: 'h2' });
+  });
+
+  it('omits hostId entirely when no environment choice was offered (undefined)', async () => {
+    expect(await startWith()).not.toHaveProperty('hostId');
+  });
+
+  it("sends an explicit hostId: null for an explicit This Mac pick (null or 'local')", async () => {
+    // An omitted hostId means "project default" to main; an explicit local pick must not be overridden by it.
+    expect(await startWith(null)).toHaveProperty('hostId', null);
+    mockCreateQuick.mockClear();
+    expect(await startWith('local')).toHaveProperty('hostId', null);
+  });
+});

@@ -61,7 +61,7 @@ import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { DecisionPayload } from '../../../../shared/types/reviews';
 import type { LoggerLike } from '../types';
 import type { SystemicPauseInfo, SystemicPauseVerdict } from './types';
-import { classifyErrorPattern, parseLimitResetDelayMs } from './systemicError';
+import { classifyErrorPattern, HOST_UNREACHABLE_PATTERN, parseLimitResetDelayMs } from './systemicError';
 
 /** Provenance prefix stamped on a systemic-pause decision review_item. */
 export const SYSTEMIC_PAUSE_SOURCE = 'gate:systemic-pause';
@@ -174,11 +174,14 @@ function errMessage(e: unknown): string {
 /**
  * Short noun phrase for the pause item's title, bucketed off the error text so a
  * limit-like failure reads "usage limit" and everything else gets neutral,
- * non-limit phrasing. Buckets: /limit|rate|quota|credit/ → usage limit,
- * /overload/ → provider overload, /auth/ → authentication issue, else systemic
- * failure.
+ * non-limit phrasing. Buckets: a remote-host outage (HOST_UNREACHABLE_PATTERN) →
+ * environment unreachable — checked FIRST, since ssh's wording can carry "auth" or
+ * "rate" ("authenticity of host", "operation") — then /limit|rate|quota|credit/ →
+ * usage limit, /overload/ → provider overload, /auth/ → authentication issue, else
+ * systemic failure.
  */
-function describeSystemicReason(error: string | undefined): string {
+export function describeSystemicReason(error: string | undefined): string {
+  if (HOST_UNREACHABLE_PATTERN.test(error ?? '')) return 'environment unreachable';
   const e = (error ?? '').toLowerCase();
   if (/limit|rate|quota|credit/.test(e)) return 'usage limit';
   if (/overload/.test(e)) return 'provider overload';

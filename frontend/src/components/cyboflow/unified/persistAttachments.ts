@@ -22,22 +22,37 @@ import type { ComposerAttachments } from './attachments';
 
 const PREAMBLE = 'Please look at these files which may provide additional instructions or context:';
 
+/**
+ * The main process's own message from a rejected `ipcRenderer.invoke` (Electron wraps a handler's throw as
+ * "Error invoking remote method '<channel>': Error: <message>"), so a refusal such as "Attachments is not
+ * available on remote environments." reads as itself in the composer error line.
+ */
+export function ipcErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const m = /^Error invoking remote method '[^']*': (?:\w*Error: )?([\s\S]*)$/.exec(raw);
+  return m ? m[1] : raw;
+}
+
 /** Save the attachments and return their absolute on-disk paths (in order). */
 export async function persistAttachments(
   ownerId: string,
   atts: ComposerAttachments,
 ): Promise<string[]> {
   const paths: string[] = [];
-  for (const t of atts.texts) {
-    paths.push(await window.electronAPI.sessions.saveLargeText(ownerId, t.content));
-  }
-  if (atts.images.length > 0) {
-    paths.push(
-      ...(await window.electronAPI.sessions.saveImages(
-        ownerId,
-        atts.images.map((img) => ({ name: img.name, dataUrl: img.dataUrl, type: img.type })),
-      )),
-    );
+  try {
+    for (const t of atts.texts) {
+      paths.push(await window.electronAPI.sessions.saveLargeText(ownerId, t.content));
+    }
+    if (atts.images.length > 0) {
+      paths.push(
+        ...(await window.electronAPI.sessions.saveImages(
+          ownerId,
+          atts.images.map((img) => ({ name: img.name, dataUrl: img.dataUrl, type: img.type })),
+        )),
+      );
+    }
+  } catch (err: unknown) {
+    throw new Error(ipcErrorMessage(err));
   }
   return paths;
 }

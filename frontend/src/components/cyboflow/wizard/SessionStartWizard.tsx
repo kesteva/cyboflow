@@ -105,6 +105,8 @@ import { LaunchPromptModal } from '../LaunchPromptModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
+import { EnvironmentPicker, useEnvironmentSelection } from '../EnvironmentPicker';
+import { isRemoteLaunchRuntime } from '../../agentsEnv/hostLaunchability';
 import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_OMP_LAUNCH_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
@@ -985,6 +987,27 @@ export default function SessionStartWizard(): React.JSX.Element {
    * empty while locked).
    */
   const selectedProject: Project | null = banner.project;
+  // Environment (where the session/run executes). Only quick sessions and workflows can run remotely —
+  // Ultracode (PTY) and Design are pinned to This Mac, so they never carry a host.
+  const envSelection = useEnvironmentSelection({
+    projectId: selectedProjectId,
+    projectDefaultHostId: selectedProject?.default_host_id,
+    runtime: agentRuntime,
+    kind: selection?.kind === 'quick' ? 'session' : 'workflow',
+  });
+  const remoteHostId =
+    selection?.kind === 'quick' || selection?.kind === 'workflow' ? envSelection.remoteHostId : null;
+  // What launch requests carry: undefined (omit) while the picker is hidden or the launch kind cannot run
+  // remotely, else the explicit pick — null for This Mac, so a remote project default cannot override it.
+  const requestHostId =
+    selection?.kind === 'quick' || selection?.kind === 'workflow' ? envSelection.requestHostId : undefined;
+  // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
+  const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
+  const remoteEnvironmentLabel =
+    remoteHostId !== null ? (envSelection.hosts.find((h) => h.id === remoteHostId)?.label ?? 'this environment') : null;
+  useEffect(() => {
+    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
+  }, [runtimeNeedsRemoteCoercion, reseedAgentRuntime]);
   /**
    * The level the wizard DISPLAYS absent an explicit per-run override (Tier 2,
    * item 13c, [C8]): project's solution-thoroughness stamp -> workflow's own
@@ -1016,6 +1039,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     error: quickError,
   } = useQuickSession({
     projectId: allowQuick ? selectedProjectId : null,
+    hostId: requestHostId,
     onSuccess: () => {
       setToast(`Starting quick session on ${banner.name}`);
       // CyboflowRoot reads navigationStore.activeProjectId as its `projectId`
@@ -1254,6 +1278,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentModel: model,
             // Advanced base-branch pick — '' = project default (omit).
             ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
+            ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1347,7 +1372,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, requestHostId],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1386,6 +1411,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentModel: model,
             // Advanced base-branch pick — '' = project default (omit).
             ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
+            ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1449,7 +1475,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride, requestHostId],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1894,6 +1920,12 @@ export default function SessionStartWizard(): React.JSX.Element {
     runtimeMixOverride !== null;
 
   const combinedError = launchError ?? quickError ?? designLaunchError;
+  // The error sits under the CTA at the bottom of a long card, so a failed launch scrolls it into view —
+  // otherwise a refusal (e.g. an environment check) reads as the wizard silently doing nothing.
+  const launchErrorRef = useRef<HTMLParagraphElement | null>(null);
+  useEffect(() => {
+    if (combinedError) launchErrorRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [combinedError]);
 
   // Advanced: per-launch base branch (shared by the quick and workflow Advanced
   // bodies). '' = project default — the launch omits `baseBranch` and the
@@ -2140,6 +2172,15 @@ export default function SessionStartWizard(): React.JSX.Element {
                 the MCP scope mechanism that limits a design session's toolset
                 exists only on the SDK path). */}
             {selection.kind !== 'ultracode' && selection.kind !== 'design' && (
+              <EnvironmentPicker
+                selection={envSelection}
+                projectId={selectedProjectId}
+                kind={selection.kind === 'quick' ? 'session' : 'workflow'}
+                runtime={agentRuntime}
+                id="wizard-environment"
+              />
+            )}
+            {selection.kind !== 'ultracode' && selection.kind !== 'design' && (
               <SubstrateSelector
                 value={agentRuntime}
                 // A real per-launch pick — latches THIS key touched, so the
@@ -2151,6 +2192,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 id="wizard-substrate"
                 caveatsTestId="wizard-substrate-caveats"
                 runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
+                remoteEnvironment={remoteEnvironmentLabel}
               />
             )}
 
@@ -2660,7 +2702,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Launch CTA — last element inside the card. */}
             <div className="flex flex-col gap-2 pt-1">
               {combinedError !== null && combinedError !== undefined && (
-                <p className="text-xs text-status-error" role="alert">
+                <p ref={launchErrorRef} className="text-xs text-status-error" role="alert" data-testid="wizard-launch-error">
                   {combinedError}
                 </p>
               )}

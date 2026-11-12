@@ -1,7 +1,7 @@
 /** hostsStore: init idempotency, gating, subscribe-then-seed, debounced signals, stale drops, preflight watch, mutations. */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import { DISABLED_HOSTS_STATUS, type HostsChangedEvent, type PreflightProgressEvent } from '../../../../shared/types/hosts';
+import { DISABLED_HOSTS_STATUS, type HostsChangedEvent, type PreflightProgressEvent, type ToolchainProgressEvent } from '../../../../shared/types/hosts';
 import { makeCheck, makeHost, makeHostsStatus, makeLocalHost } from '../../components/agentsEnv/__tests__/fixtures';
 
 type Handlers<T> = { onData: (v: T) => void; onError: (e: unknown) => void };
@@ -12,6 +12,10 @@ let listQuery: ReturnType<typeof vi.fn>;
 let addMutate: ReturnType<typeof vi.fn>;
 let runPreflightMutate: ReturnType<typeof vi.fn>;
 let hostsSubscribe: ReturnType<typeof vi.fn>;
+let toolchainSubscribe: ReturnType<typeof vi.fn>;
+let toolchainUnsub: ReturnType<typeof vi.fn>;
+let toolchainHandlers: Handlers<ToolchainProgressEvent> | null;
+let installMutate: ReturnType<typeof vi.fn>;
 let preflightSubscribe: ReturnType<typeof vi.fn>;
 let hostsUnsub: ReturnType<typeof vi.fn>;
 let preflightUnsub: ReturnType<typeof vi.fn>;
@@ -28,6 +32,8 @@ vi.mock('../../trpc/client', () => ({
         runPreflight: { get mutate() { return runPreflightMutate; } },
         onHostsChanged: { get subscribe() { return hostsSubscribe; } },
         onPreflightProgress: { get subscribe() { return preflightSubscribe; } },
+        onToolchainProgress: { get subscribe() { return toolchainSubscribe; } },
+        installToolchain: { get mutate() { return installMutate; } },
       },
     },
   },
@@ -48,6 +54,13 @@ beforeEach(() => {
   preflightHandlers = null;
   hostsUnsub = vi.fn();
   preflightUnsub = vi.fn();
+  toolchainUnsub = vi.fn();
+  toolchainHandlers = null;
+  installMutate = vi.fn().mockResolvedValue({ ok: true });
+  toolchainSubscribe = vi.fn().mockImplementation((_i: { id: string }, h: Handlers<ToolchainProgressEvent>) => {
+    toolchainHandlers = h;
+    return { unsubscribe: toolchainUnsub };
+  });
   statusQuery = vi.fn().mockResolvedValue(makeHostsStatus());
   listQuery = vi.fn().mockImplementation(async () => {
     order.push('list');
@@ -64,7 +77,7 @@ beforeEach(() => {
     preflightHandlers = h;
     return { unsubscribe: preflightUnsub };
   });
-  store.setState({ featureStatus: null, hosts: [], hostsStatus: 'idle', hostsError: null, preflightLive: {} });
+  store.setState({ featureStatus: null, hosts: [], hostsStatus: 'idle', hostsError: null, preflightLive: {}, toolchainLive: {} });
 });
 
 afterEach(() => {
@@ -219,5 +232,38 @@ describe('hostsStore', () => {
     expect(renderHook(() => useHostLookup('h2')).result.current?.label).toBe('Build box');
     expect(renderHook(() => useHostLookup(null)).result.current).toBeUndefined();
     expect(renderHook(() => useHostLookup('nope')).result.current).toBeUndefined();
+  });
+});
+
+describe('hostsStore toolchain watch', () => {
+  const frame = (over: Partial<ToolchainProgressEvent> = {}): ToolchainProgressEvent => ({
+    hostId: 'h2', phase: 'uploading', bytesSent: 10, bytesTotal: 100, message: null, ...over,
+  });
+
+  it('keeps the latest frame, clears on done, and clears on release', async () => {
+    teardown = store.getState().init();
+    await advance(0);
+    const release = store.getState().watchToolchain('h2');
+    expect(toolchainSubscribe).toHaveBeenCalledTimes(1);
+    toolchainHandlers?.onData(frame());
+    expect(store.getState().toolchainLive.h2.bytesSent).toBe(10);
+    toolchainHandlers?.onData(frame({ phase: 'done' }));
+    expect(store.getState().toolchainLive.h2).toBeUndefined();
+    toolchainHandlers?.onData(frame());
+    release();
+    expect(toolchainUnsub).toHaveBeenCalled();
+    expect(store.getState().toolchainLive.h2).toBeUndefined();
+  });
+
+  it('is ref-counted: the second watcher shares the subscription', async () => {
+    teardown = store.getState().init();
+    await advance(0);
+    const a = store.getState().watchToolchain('h2');
+    const b = store.getState().watchToolchain('h2');
+    expect(toolchainSubscribe).toHaveBeenCalledTimes(1);
+    a();
+    expect(toolchainUnsub).not.toHaveBeenCalled();
+    b();
+    expect(toolchainUnsub).toHaveBeenCalledTimes(1);
   });
 });

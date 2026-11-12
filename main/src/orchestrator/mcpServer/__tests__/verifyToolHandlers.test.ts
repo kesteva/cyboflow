@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import type * as net from 'net';
-import { VerifyToolHandlers, type VerifyToolContext } from '../handlers/verifyToolHandlers';
+import { REMOTE_HOST_VERIFY_SKIP_REASON, VerifyToolHandlers, type VerifyToolContext } from '../handlers/verifyToolHandlers';
 import type { McpQueryResponse } from '../mcpQueryMessages';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 
@@ -78,5 +78,64 @@ describe('VerifyToolHandlers — context seam', () => {
       'verification_request_not_found',
       'invalid_arguments: request_id must be a non-empty verification request id',
     ]);
+  });
+});
+
+describe('VerifyToolHandlers — remote environment skip (M2)', () => {
+  function withRunsTable(db: Database.Database, hostId: string | null): void {
+    db.exec(`CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, host_id TEXT, verify_enabled INTEGER, verify_type TEXT)`);
+    db.prepare(`INSERT INTO workflow_runs (id, host_id, verify_enabled, verify_type) VALUES ('run-ok', ?, 1, 'static-render-snapshot')`).run(hostId);
+  }
+
+  it('a run on a remote host skips with the remote-host reason before any worktree, config or execution-model read', async () => {
+    const resolveRunWorktree = vi.fn(() => '/home/u/cf-remote/wt/k');
+    const resolveProjectPath = vi.fn(() => '/Users/me/proj');
+    const readExecutionModel = vi.fn(() => 'programmatic');
+    const { ctx, writes, db } = makeCtx({ resolveRunWorktree, resolveProjectPath, readExecutionModel });
+    withRunsTable(db, 'h-remote');
+    const tools = new VerifyToolHandlers(ctx);
+
+    await tools.handleRequestVerification(
+      { type: 'mcp-request-verification', requestId: 'r5', runId: 'run-ok', intent: 'the page renders' },
+      client,
+    );
+
+    expect(writes).toEqual([
+      { type: 'mcp-query-response', requestId: 'r5', ok: true, data: { skipped: true, reason: REMOTE_HOST_VERIFY_SKIP_REASON } },
+    ]);
+    expect(REMOTE_HOST_VERIFY_SKIP_REASON.startsWith('remote-host: ')).toBe(true);
+    expect(resolveRunWorktree).not.toHaveBeenCalled();
+    expect(resolveProjectPath).not.toHaveBeenCalled();
+    expect(readExecutionModel).not.toHaveBeenCalled();
+  });
+
+  it.each([[null], ['local']])('a local run (host_id %s) is not skipped as remote', async (hostId) => {
+    const readExecutionModel = vi.fn(() => null);
+    const { ctx, writes, db } = makeCtx({ readExecutionModel });
+    withRunsTable(db, hostId);
+    db.prepare(`UPDATE workflow_runs SET verify_enabled = 0`).run();
+    const tools = new VerifyToolHandlers(ctx);
+
+    await tools.handleRequestVerification(
+      { type: 'mcp-request-verification', requestId: 'r6', runId: 'run-ok', intent: 'the page renders' },
+      client,
+    );
+
+    expect(readExecutionModel).toHaveBeenCalledWith('run-ok');
+    expect(writes).toHaveLength(1);
+    const data = writes[0].ok ? (writes[0].data as { skipped: boolean; reason: string }) : null;
+    expect(data?.skipped).toBe(true);
+    expect(data?.reason).not.toMatch(/^remote-host/);
+  });
+
+  it('a run-context rejection still wins over the host check', async () => {
+    const { ctx, writes, db } = makeCtx();
+    withRunsTable(db, 'h-remote');
+    const tools = new VerifyToolHandlers(ctx);
+    await tools.handleRequestVerification(
+      { type: 'mcp-request-verification', requestId: 'r7', runId: 'run-x', intent: 'x' },
+      client,
+    );
+    expect(writes).toEqual([{ type: 'mcp-query-response', requestId: 'r7', ok: false, error: 'run_not_active:run-x' }]);
   });
 });

@@ -239,6 +239,8 @@ import { useConfigStore } from '../../../../stores/configStore';
 import { useNavigationStore } from '../../../../stores/navigationStore';
 import { useDesignModeStore } from '../../../../stores/designModeStore';
 import { useVariantsStore } from '../../../../stores/variantsStore';
+import { useHostsStore } from '../../../../stores/hostsStore';
+import { makeHost, makeHostsStatus, makeLocalHost, makePreflight } from '../../../agentsEnv/__tests__/fixtures';
 import { DESIGN_KICKOFF_PROMPT } from '../../design/designKickoff';
 import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
@@ -4355,5 +4357,142 @@ describe('SessionStartWizard — base-branch picker (Advanced)', () => {
       1,
       expect.objectContaining({ baseBranch: 'develop' }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Environment picker (M2 C4)
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — environment picker', () => {
+  const readyHost = makeHost({
+    id: 'h2',
+    label: 'm2-studio',
+    effectiveTier: 'full',
+    detectedTier: 'full',
+    remoteReady: true,
+    preflight: makePreflight({ runtimes: { claudeSdk: true, codexSdk: true, claudeCli: true, codexCli: true } }),
+  });
+
+  function seedHosts(hosts = [makeLocalHost(), readyHost]): void {
+    act(() => {
+      useHostsStore.setState({ hosts, featureStatus: makeHostsStatus() });
+    });
+  }
+
+  afterEach(() => {
+    act(() => {
+      useHostsStore.setState({ hosts: [], featureStatus: null });
+    });
+  });
+
+  it('renders nothing and sends no hostId when there is no remote environment', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(screen.queryByTestId('wizard-environment')).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('hostId');
+  });
+
+  it('a local pick (picker visible) sends an explicit hostId: null', async () => {
+    seedHosts();
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(screen.getByTestId('wizard-environment')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toHaveProperty('hostId', null);
+  });
+
+  describe('explicit This Mac pick over a remote project default (LC-1)', () => {
+    const mockGetAllProjects = vi.mocked(API.projects.getAll);
+    beforeEach(() => {
+      mockGetAllProjects.mockResolvedValue({ success: true, data: [makeProjectRow({ default_host_id: 'h2' })] });
+    });
+    afterEach(() => {
+      mockGetAllProjects.mockResolvedValue({ success: true, data: [makeProjectRow()] });
+    });
+
+    it('a quick launch carries hostId: null, not an omitted field main would resolve to the default', async () => {
+      seedHosts();
+      await renderLockedWizard();
+      await selectQuickAndConfigure();
+      // The remote project default is pre-selected…
+      await waitFor(() =>
+        expect(screen.getByTestId('wizard-environment-option-h2')).toHaveAttribute('aria-checked', 'true'),
+      );
+      // …and the user explicitly picks This Mac.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-environment-option-local'));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-cta'));
+      });
+      expect(mockCreateQuick).toHaveBeenCalledOnce();
+      expect(mockCreateQuick.mock.calls[0]?.[0]).toHaveProperty('hostId', null);
+    });
+
+    it('a workflow launch threads hostId: null into ensureSessionForLaunch', async () => {
+      seedHosts();
+      await renderLockedWizard();
+      await selectWorkflowAndConfigure();
+      await waitFor(() =>
+        expect(screen.getByTestId('wizard-environment-option-h2')).toHaveAttribute('aria-checked', 'true'),
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-environment-option-local'));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('wizard-cta'));
+      });
+      expect(mockEnsureSession).toHaveBeenCalledWith(1, expect.objectContaining({ forceNew: true, hostId: null }));
+    });
+  });
+
+  it('a remote quick launch carries hostId with an SDK runtime, coercing a non-SDK pick', async () => {
+    seedHosts();
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await chooseRuntime('claude-interactive');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-environment-option-h2'));
+    });
+    await waitFor(() => expect(runtimeValue()).toBe('claude-sdk'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ hostId: 'h2', agentRuntime: 'claude-sdk', substrate: 'sdk' }),
+    );
+  });
+
+  it('a remote workflow launch threads hostId into ensureSessionForLaunch', async () => {
+    seedHosts();
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-environment-option-h2'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockEnsureSession).toHaveBeenCalledWith(1, expect.objectContaining({ forceNew: true, hostId: 'h2' }));
+  });
+
+  it('a refused remote launch surfaces main\'s message', async () => {
+    seedHosts();
+    mockCreateQuick.mockResolvedValueOnce({ success: false, error: 'Environment m2-studio is unreachable' });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-environment-option-h2'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(await screen.findByText(/Environment m2-studio is unreachable/)).toBeInTheDocument();
   });
 });

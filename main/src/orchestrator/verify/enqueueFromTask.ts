@@ -44,6 +44,7 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import type { DatabaseLike, LoggerLike } from '../types';
+import { isRemoteHostId } from '../../../../shared/types/hosts';
 import type { TaskEnqueueResult } from '../programmatic/types';
 
 export type { TaskEnqueueResult };
@@ -962,6 +963,18 @@ export function laneEnqueueKeyFor(
   return laneEnqueueKey(runId, taskRef, lane.attempts);
 }
 
+/** `workflow_runs.host_id`, read fail-soft (missing column / row ⇒ local). */
+function readRunHostId(db: DatabaseLike, runId: string): string | null {
+  try {
+    const row = db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(runId) as
+      | { host_id?: unknown }
+      | undefined;
+    return typeof row?.host_id === 'string' ? row.host_id : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function enqueueTaskVerification(
   opts: EnqueueTaskVerificationOptions,
 ): Promise<TaskEnqueueResult> {
@@ -996,6 +1009,15 @@ export async function enqueueTaskVerification(
     });
     // Likewise distinct (F8): an unreadable stamp is a fault, not an off switch.
     return { outcome: 'skipped', reason: 'run-stamp-unreadable' };
+  }
+
+  // (1b) REMOTE ENVIRONMENT (M2): visual verification is local-only, so a run on
+  // a remote host declines here — ahead of the enabled check, so the reason names
+  // the real cause even when the stamp also reads disabled. A separate fail-soft
+  // read: a pre-152 DB (no host_id column) reads as local instead of turning the
+  // whole stamp read into 'run-stamp-unreadable'.
+  if (isRemoteHostId(readRunHostId(db, runId))) {
+    return { outcome: 'skipped', reason: 'remote-host' };
   }
 
   if (!enabled || stampedType === null || !Number.isFinite(projectId)) {

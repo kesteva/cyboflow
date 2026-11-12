@@ -149,4 +149,24 @@ describe('WorktreeChangeNotifier', () => {
     unsubscribe();
     expect(notifier.watchedCount).toBe(0);
   });
+
+  it('returns a no-op unsubscribe and attaches no watcher for a remote session (M2)', async () => {
+    await withTempDir('wt-notifier-remote-', async (repo) => {
+      initRepo(repo);
+      const notifier = new WorktreeChangeNotifier();
+      let calls = 0;
+      const unsubscribe = notifier.subscribe('s1', repo, () => {
+        calls += 1;
+      }, 'host-a');
+      expect(notifier.watchedCount).toBe(0);
+      await settle();
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a1\nremote-edit\n');
+      await new Promise((r) => setTimeout(r, 2200));
+      expect(calls).toBe(0);
+      unsubscribe();
+      unsubscribe();
+      expect(notifier.watchedCount).toBe(0);
+      notifier.stopAll();
+    });
+  });
 });

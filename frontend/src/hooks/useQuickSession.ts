@@ -49,6 +49,13 @@ import {
 
 interface UseQuickSessionOptions {
   projectId: number | null;
+  /**
+   * Remote environment (host id) the started session runs on. Omitted (undefined) = no environment choice was
+   * offered: the request carries no hostId at all. null / 'local' = an EXPLICIT This Mac pick: the request carries
+   * `hostId: null`, because main reads an omitted hostId as "use the project default". An options-bag field (not a
+   * `start` positional) — start's arity is guarded.
+   */
+  hostId?: string | null;
   onSuccess?: (sessionId: string) => void;
 }
 
@@ -245,6 +252,9 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // Base branch for the session worktree (wizard Advanced) — omitted →
           // the project checkout's HEAD.
           ...(baseBranch !== undefined ? { baseBranch } : {}),
+          // Environment — omitted when no choice was offered; an explicit This Mac pick rides as null so a
+          // remote project default cannot override it (main reads an omitted hostId as "project default").
+          ...(opts.hostId !== undefined ? { hostId: opts.hostId === 'local' ? null : opts.hostId } : {}),
         });
 
         if (!result.success || !result.data) {
@@ -346,7 +356,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     // every time isStarting flips — the guard (`isStarting`) still holds because
     // setIsStarting is synchronous within the render cycle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [opts.projectId, opts.onSuccess],
+    [opts.projectId, opts.onSuccess, opts.hostId],
   );
 
   const startWithDefaults = useCallback(

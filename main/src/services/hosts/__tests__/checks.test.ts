@@ -1,8 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import { parseProbeOutput, type ProbeRecord } from '../remoteProbe';
+import type { ExecResult } from '../../../orchestrator/trpc/contracts/executionHost';
 import {
   ARRIVES_LATER_DETAIL,
   CHECK_TIER_IMPACT,
+  CLAUDE_AUTH_LIVE_PASS_DETAIL,
+  LINK_UP_DETAIL,
+  NEEDS_NODE_DETAIL,
+  NO_ORCH_LINK_DETAIL,
+  TOOLCHAIN_DAMAGED_DETAIL,
+  TOOLCHAIN_FIX,
+  TOOLCHAIN_NOT_INSTALLED_DETAIL,
+  TOOLCHAIN_UNCHECKED_DETAIL,
+  checkClaudeAuthLive,
+  codexBinFile,
+  type ExpectedToolchain,
   DISK_FAIL_BELOW_KB,
   DISK_WARN_BELOW_KB,
   checkArch,
@@ -102,11 +114,108 @@ describe('checkNode22', () => {
   });
 });
 
-describe('arrive-later checks', () => {
-  it('sdk-binary-hash and mcp-roundtrip are skipped and block full', () => {
-    for (const c of [checkSdkBinaryHash(), checkMcpRoundtrip()]) {
-      expect(c).toMatchObject({ status: 'skipped', detail: ARRIVES_LATER_DETAIL, tierImpact: 'blocks-full' });
+const HASH = 'a'.repeat(64);
+const CODEX_REL = 'codex/aarch64-apple-darwin/bin/codex';
+const EXPECTED: ExpectedToolchain = {
+  expectedHash: HASH,
+  files: [{ rel: 'claude', size: 1000 }, { rel: 'cyboflowMcpServer.js', size: 200 }, { rel: CODEX_REL, size: 300 }],
+  codexIncluded: true,
+  unavailableReason: null,
+};
+const installed = (over: Partial<ProbeRecord> = {}): ProbeRecord => probe({
+  tcHash: HASH, tcManifest: true, tcManifestHash: true, tcClaudeSize: 1000, tcMcpSize: 200, tcCodexSize: 300, ...over,
+});
+
+describe('checkSdkBinaryHash', () => {
+  it('is skipped (arrives later) when no toolchain source is wired — the M1 shape', () => {
+    expect(checkSdkBinaryHash(installed(), undefined))
+      .toMatchObject({ status: 'skipped', detail: ARRIVES_LATER_DETAIL, tierImpact: 'blocks-full' });
+  });
+  it('passes on a matching manifest + sizes, naming the short hash', () => {
+    expect(checkSdkBinaryHash(installed(), EXPECTED))
+      .toMatchObject({ status: 'pass', detail: `Installed (${HASH.slice(0, 12)})`, tierImpact: 'blocks-full' });
+  });
+  it('warns "Not installed" with the install fix when the manifest is absent (blocks full)', () => {
+    expect(checkSdkBinaryHash(installed({ tcManifest: false, tcManifestHash: null }), EXPECTED)).toMatchObject({
+      status: 'warn', detail: TOOLCHAIN_NOT_INSTALLED_DETAIL, fix: TOOLCHAIN_FIX, tierImpact: 'blocks-full',
+    });
+  });
+  it('fails "damaged" on a manifest without the hash or any size mismatch', () => {
+    for (const over of [
+      { tcManifestHash: false }, { tcClaudeSize: 999 }, { tcMcpSize: null }, { tcCodexSize: 1 }, { tcCodexSize: null },
+    ] as Array<Partial<ProbeRecord>>) {
+      expect(checkSdkBinaryHash(installed(over), EXPECTED))
+        .toMatchObject({ status: 'fail', detail: TOOLCHAIN_DAMAGED_DETAIL, fix: TOOLCHAIN_FIX });
     }
+  });
+  it('ignores the codex size for a claude-only toolchain', () => {
+    const claudeOnly: ExpectedToolchain = { ...EXPECTED, files: EXPECTED.files.slice(0, 2), codexIncluded: false };
+    expect(checkSdkBinaryHash(installed({ tcCodexSize: null }), claudeOnly).status).toBe('pass');
+  });
+  it('fails with the reason when this build has no tools for the arch', () => {
+    const none: ExpectedToolchain = { expectedHash: null, files: [], codexIncluded: false, unavailableReason: 'This build of cyboflow has no x64 tools' };
+    expect(checkSdkBinaryHash(installed(), none))
+      .toMatchObject({ status: 'fail', detail: 'This build of cyboflow has no x64 tools', tierImpact: 'blocks-full' });
+  });
+  it('is skipped (unchecked) when the probe looked for another hash or reported nothing', () => {
+    expect(checkSdkBinaryHash(installed({ tcHash: 'b'.repeat(64) }), EXPECTED).detail).toBe(TOOLCHAIN_UNCHECKED_DETAIL);
+    expect(checkSdkBinaryHash(installed({ tcManifest: null }), EXPECTED).status).toBe('skipped');
+    expect(checkSdkBinaryHash(installed(), null).detail).toBe(TOOLCHAIN_UNCHECKED_DETAIL);
+  });
+  it('codexBinFile finds the entrypoint only', () => {
+    expect(codexBinFile(EXPECTED)?.rel).toBe(CODEX_REL);
+    expect(codexBinFile({ files: [{ rel: 'codex/t/codex-path/rg', size: 1 }] })).toBeNull();
+  });
+});
+
+const res = (over: Partial<ExecResult> = {}): ExecResult => ({ code: 0, stdout: '', stderr: '', timedOut: false, ...over });
+
+describe('checkMcpRoundtrip', () => {
+  it('skips without node or an orch socket', () => {
+    expect(checkMcpRoundtrip({ kind: 'no-node' })).toMatchObject({ status: 'skipped', detail: NEEDS_NODE_DETAIL, tierImpact: 'blocks-full' });
+    expect(checkMcpRoundtrip({ kind: 'no-orch-socket' })).toMatchObject({ status: 'skipped', detail: NO_ORCH_LINK_DETAIL });
+  });
+  it('passes only for the same requestId with ok:true', () => {
+    const reply = (o: object) => res({ stdout: `${JSON.stringify(o)}\n` });
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r1', result: reply({ type: 'mcp-query-response', requestId: 'r1', ok: true }) }).status).toBe('pass');
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r1', result: reply({ requestId: 'r2', ok: true }) }).status).toBe('fail');
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r1', result: reply({ requestId: 'r1', ok: false }) }).status).toBe('fail');
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r1', result: res({ stdout: 'garbage' }) }).status).toBe('fail');
+  });
+  it('fails on a timeout, a link error or a non-zero exit, redacting what it shows', () => {
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r', result: res({ code: null, timedOut: true }) }).detail).toMatch(/timed out/);
+    const linkErr = checkMcpRoundtrip({ kind: 'link-failed', message: 'nope sk-ant-SECRET' });
+    expect(linkErr.status).toBe('fail');
+    expect(linkErr.detail).not.toContain('SECRET');
+    expect(checkMcpRoundtrip({ kind: 'reply', requestId: 'r', result: res({ code: 2, stdout: 'error ECONNREFUSED' }) }).detail)
+      .toMatch(/ECONNREFUSED/);
+  });
+  it('link-up (prelaunch) passes', () => {
+    expect(checkMcpRoundtrip({ kind: 'link-up' })).toMatchObject({ status: 'pass', detail: LINK_UP_DETAIL });
+  });
+});
+
+describe('checkClaudeAuthLive', () => {
+  const root = '~/cf-remote/abc';
+  it('exit 0 passes ("checked with one request")', () => {
+    expect(checkClaudeAuthLive(res(), root)).toMatchObject({ status: 'pass', detail: CLAUDE_AUTH_LIVE_PASS_DETAIL, tierImpact: 'none' });
+  });
+  it('a 401 / revoked token fails with the setup-token fix naming the env file', () => {
+    for (const r of [
+      res({ code: 1, stdout: '{"is_error":true,"result":"Failed to authenticate. API Error: 401 {\\"type\\":\\"authentication_error\\"}"}' }),
+      res({ code: 1, stderr: 'OAuth token revoked' }),
+    ]) {
+      const c = checkClaudeAuthLive(r, root);
+      expect(c.status).toBe('fail');
+      expect(c.fix).toBe('Create a new token with claude setup-token on that Mac and save it to ~/cf-remote/abc/env');
+    }
+  });
+  it('any other failure warns with the redacted last line', () => {
+    const c = checkClaudeAuthLive(res({ code: 1, stderr: 'line one\nboom sk-ant-oat01-SECRETSECRET\n' }), root);
+    expect(c.status).toBe('warn');
+    expect(c.detail).toContain('boom');
+    expect(c.detail).not.toContain('SECRETSECRET');
+    expect(checkClaudeAuthLive(res({ code: null, timedOut: true }), root).detail).toMatch(/timed out/);
   });
 });
 
@@ -114,7 +223,7 @@ describe('checkClaudeAuth', () => {
   const root = '~/cf-remote/abc';
   it('passes for an existing 600 file with exactly one well-formed line', () => {
     expect(checkClaudeAuth(probe({ envExists: true, envMode: '600', envLines: 1, envWellformed: 1 }), root))
-      .toMatchObject({ status: 'pass', detail: 'Token present; validated when remote flows arrive', tierImpact: 'none' });
+      .toMatchObject({ status: 'pass', detail: 'Token present', tierImpact: 'none' });
   });
   it('missing file warns with the setup-token fix naming the env path', () => {
     const c = checkClaudeAuth(probe({ envExists: false }), root);

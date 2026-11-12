@@ -800,6 +800,25 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
     expect(opts.disableUserCodexPlugins).toBe(true);
   });
 
+  it('(e-host) a remote run passes its host_id stamp as hostId; a local run (NULL / local / absent) omits the key', async () => {
+    const spawnOpts = async (hostId: string | null | undefined): Promise<ClaudeSpawnerOptions> => {
+      const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', ...(hostId === undefined ? {} : { host_id: hostId }) });
+      const workflow = makeWorkflowRow({ id: run.workflow_id });
+      const registry: WorkflowRegistryLike = {
+        getRunById: vi.fn().mockReturnValue(run),
+        getById: vi.fn().mockReturnValue(workflow),
+      };
+      const spawner = makeSpawner();
+      await new TestableRunExecutor(spawner, registry, makeSpyLogger()).execute(run.id);
+      return (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    };
+
+    expect((await spawnOpts('host-abc')).hostId).toBe('host-abc');
+    for (const local of [null, 'local', undefined]) {
+      expect('hostId' in (await spawnOpts(local))).toBe(false);
+    }
+  });
+
   it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/my/worktree',

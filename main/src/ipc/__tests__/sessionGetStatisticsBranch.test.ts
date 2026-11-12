@@ -61,7 +61,7 @@ import type { AppServices } from '../types';
 const SESSION_ID = 'sess-001';
 const WORKTREE = '/tmp/project/quick-test';
 
-function makeServices(opts: { baseBranch?: string; worktreePath?: string }) {
+function makeServices(opts: { baseBranch?: string; worktreePath?: string; hostId?: string | null }) {
   const fakeDb = {
     // Backs selectSessionRunTokenTotals(db, sessionId) — no matching runs.
     prepare: vi.fn(() => ({ all: vi.fn(() => []) })),
@@ -76,6 +76,7 @@ function makeServices(opts: { baseBranch?: string; worktreePath?: string }) {
       lastActivity: new Date('2026-07-01T00:05:00Z'),
       worktreePath: opts.worktreePath ?? WORKTREE,
       baseBranch: opts.baseBranch,
+      hostId: opts.hostId ?? null,
     })),
   };
 
@@ -192,5 +193,20 @@ describe('sessionOps.getStatistics — branch resolution', () => {
     expect(result.success).toBe(true);
     expect(result.data.session.branch).toBe('feature/multi-panel');
     expect(mockGetCurrentBranch).toHaveBeenCalledTimes(1);
+  });
+
+  it('never reads local git for a remote session (its worktree lives on the environment)', async () => {
+    mockGetCurrentBranch.mockReturnValue('should-not-be-read');
+    const { services } = makeServices({ baseBranch: 'main', worktreePath: '/Users/r/cf-remote/h/wt/x', hostId: 'host-1' });
+    const ops = createSessionOps(services);
+
+    const result = (await ops.getStatistics({ sessionId: SESSION_ID })) as {
+      success: boolean;
+      data: { session: { branch: string } };
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.data.session.branch).toBe('main');
+    expect(mockGetCurrentBranch).not.toHaveBeenCalled();
   });
 });

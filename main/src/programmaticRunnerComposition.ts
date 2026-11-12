@@ -69,7 +69,7 @@ import {
 import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
-import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
+import { gateRuntimePin, providerModelAfterRuntimeDrop } from './orchestrator/stepSpawnTarget';
 import type {
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
@@ -82,8 +82,10 @@ import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { readRunDigest } from './orchestrator/runDigestReader';
 import { buildStepTransitionEvent } from './orchestrator/stepTransitionBridge';
-import { runGitAsync } from './utils/runGit';
-import { checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { worktreeProbe } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { isRemoteHostId } from '../../shared/types/hosts';
+import { isAgentProvider, type AgentProvider, type WorkflowAgentRuntime } from '../../shared/types/agentRuntime';
+import { createRunHostAccess } from './services/hosts/runHostAccess';
 import type { VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import type { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import type { WorkflowRegistry } from './orchestrator/workflowRegistry';
@@ -91,6 +93,40 @@ import type { ConfigManager } from './services/configManager';
 import type { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import type { RunbookBootstrapStampStore } from './orchestrator/verify/bootstrapStampStore';
 import type { LoggerLike, DatabaseLike } from './orchestrator/types';
+
+// Runtimes that can run against a remote environment (mirrors runLauncher's HostLaunchRuntime).
+const REMOTE_CAPABLE_RUNTIMES: ReadonlySet<string> = new Set(['claude-sdk', 'codex-sdk']);
+
+/** True when a per-agent runtime pin must be dropped because the run is remote and the runtime is local-only. */
+export function shouldDropPinForRemoteRun(runtime: string | undefined, runIsRemote: boolean): boolean {
+  return runIsRemote && runtime !== undefined && !REMOTE_CAPABLE_RUNTIMES.has(runtime);
+}
+
+/** Why a per-agent runtime pin was dropped at spawn time, or null when it is honored (or absent). */
+export type StepPinDrop = 'provider-disabled' | 'remote';
+
+/**
+ * The spawn-time gates over a per-agent pin, as ONE reduction: the provider-access gate (a provider switched off in
+ * Settings → Integrations), then the remote-launch gate (a local-only runtime on a remote run). A dropped runtime
+ * takes the pin's `providerModel` with it unless the step falls back onto the same provider — see
+ * {@link providerModelAfterRuntimeDrop}. The Claude `model` alias and the effort are not gated here.
+ */
+export function gateStepAgentPin(
+  pin: { runtime?: WorkflowAgentRuntime | null; providerModel?: string | null },
+  ctx: { isProviderEnabled: (provider: AgentProvider) => boolean; runIsRemote: boolean; runProvider: AgentProvider },
+): { runtime: WorkflowAgentRuntime | undefined; providerModel: string | undefined; dropped: StepPinDrop | null } {
+  const pinned = pin.runtime ?? undefined;
+  let runtime = gateRuntimePin(pinned, ctx.isProviderEnabled);
+  let dropped: StepPinDrop | null = pinned !== undefined && runtime === undefined ? 'provider-disabled' : null;
+  if (shouldDropPinForRemoteRun(runtime, ctx.runIsRemote)) {
+    runtime = undefined;
+    dropped = 'remote';
+  }
+  const providerModel = pinned === undefined || dropped === null
+    ? pin.providerModel ?? undefined
+    : providerModelAfterRuntimeDrop(pinned, ctx.runProvider, pin.providerModel);
+  return { runtime, providerModel, dropped };
+}
 
 // Monitor-actuation seam (the 10 confirm-gated steering actions: add/remove/edit
 // task, skip/unskip/steer step, the whole-run rewind, the PER-LANE rewind,
@@ -196,6 +232,36 @@ export function composeProgrammaticRunner(
   // Assigned synchronously by the monitorFactory IIFE below, then returned.
   let buildMonitorSession: BuildMonitorSession | null = null;
 
+  // A REMOTE run's worktree (workflow_runs.host_id names an environment, spec M2
+  // §5 D3) through its host: the runner's lane build slots + environment actions
+  // and the commit probe below. Gates are read per call, so it is safe to build
+  // before hostsComposition starts; a local / NULL run never consults it.
+  const runHostAccess = createRunHostAccess();
+  // A run's remote host id, or null (This Mac / unknown / a failed read).
+  const readRunRemoteHostId = (runId: string): string | null => {
+    try {
+      const row = rawDb.prepare(`SELECT host_id FROM workflow_runs WHERE id = ?`).get(runId) as
+        | { host_id?: unknown }
+        | undefined;
+      const hostId = typeof row?.host_id === 'string' ? row.host_id : null;
+      return isRemoteHostId(hostId) && hostId.length > 0 ? hostId : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // A run's provider (workflow_runs.agent_provider), flooring to Claude like the spawn seam does.
+  const readRunProvider = (runId: string): AgentProvider => {
+    try {
+      const row = rawDb.prepare(`SELECT agent_provider FROM workflow_runs WHERE id = ?`).get(runId) as
+        | { agent_provider?: unknown }
+        | undefined;
+      return isAgentProvider(row?.agent_provider) ? row.agent_provider : 'claude';
+    } catch {
+      return 'claude';
+    }
+  };
+
   // Programmatic-run driver (execution-model seam, Stage 2). When a run's
   // immutable `execution_model` stamp is 'programmatic', RunExecutor delegates the
   // whole run to this collaborator: host code (the WorkflowController) walks the
@@ -211,6 +277,7 @@ export function composeProgrammaticRunner(
     // step cleanly skips (fail-open) and visual verification never fires on the
     // programmatic plane.
     db: rawDb,
+    runHostAccess,
     reporter: {
       report: (runId, stepId, status) =>
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
@@ -251,15 +318,26 @@ export function composeProgrammaticRunner(
       // written by the MCP workflow-config tools as well as the editor, so a pin
       // naming a provider the user switched off in Settings → Integrations can
       // reach here even though the editor hides it. Drop just the runtime pin
-      // (keeping model/effort) so the step falls back to the run-level provider,
-      // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
-      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
-      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
-      if (a.runtime && pinnedRuntime === undefined) {
-        cyboflowLogger.warn(
-          `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
-        );
+      // (keeping the Claude model + effort) so the step falls back to the
+      // run-level provider, which createRun already resolved onto an ENABLED
+      // provider — same fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
+      // Shared with the per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
+      // Remote-launch gate for PER-AGENT pins: the launch gate vets only the
+      // run's stamped runtime, and a pi/omp/CLI pin would dispatch to a
+      // local-only manager with the remote worktree path as cwd. Drop it so the
+      // step falls back to the run's own (SDK) runtime.
+      // Either drop takes the pin's provider model with it unless the step stays
+      // on that provider: an OMP model id must not reach a Codex spawn.
+      const gated = gateStepAgentPin(a, {
+        isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p),
+        runIsRemote: readRunRemoteHostId(runId) !== null,
+        runProvider: readRunProvider(runId),
+      });
+      if (gated.dropped !== null) {
+        const why = gated.dropped === 'remote'
+          ? 'run targets a remote environment (SDK runtimes only)'
+          : 'provider disabled in Settings → Integrations';
+        cyboflowLogger.warn(`[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — ${why}`);
       }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
@@ -269,13 +347,13 @@ export function composeProgrammaticRunner(
       // per-agent pins are window-agnostic and consistent across both planes.
       const model = bareModelId(a.model, isModelUsable);
       return {
-        ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
+        ...(gated.runtime ? { runtime: gated.runtime } : {}),
         ...(model ? { model } : {}),
         // a.providerModel is already normalized (providerModel ?? codexModel) by
         // effectiveAgents; codexModel mirrors it so a not-yet-migrated consumer of
         // this return shape (there is none left in-tree, but the field stays a
         // read-compat alias) still sees the correct value.
-        ...(a.providerModel ? { providerModel: a.providerModel, codexModel: a.providerModel } : {}),
+        ...(gated.providerModel ? { providerModel: gated.providerModel, codexModel: gated.providerModel } : {}),
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
@@ -344,7 +422,10 @@ export function composeProgrammaticRunner(
         injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
       ): MonitorSession =>
         new DefaultMonitorSession({
-          ctx,
+          // A remote run's monitor queries run without its (remote) worktree as
+          // cwd. The runner already marks its ctx; the lazy rehydrator's ctx is
+          // built from the row, so the stamp is re-read here for it.
+          ctx: ctx.remoteWorktree === true || readRunRemoteHostId(ctx.runId) === null ? ctx : { ...ctx, remoteWorktree: true },
           history,
           structuredQuery,
           textQuery,
@@ -524,20 +605,30 @@ export function composeProgrammaticRunner(
         // backstop can only withhold a false integrate, never invent a failure.
         beginCommitProbe: async (rid) => {
           const row = rawDb
-            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
-            .get(rid) as { worktree_path?: unknown } | undefined;
+            .prepare(`SELECT worktree_path, host_id FROM workflow_runs WHERE id = ?`)
+            .get(rid) as { worktree_path?: unknown; host_id?: unknown } | undefined;
           const worktreePath =
             row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
               ? row.worktree_path
               : null;
           if (worktreePath === null) return undefined;
+          // A REMOTE run's worktree is probed through its environment (spec M2 §5
+          // D3); This Mac's git on a remote path would fail every probe.
+          const remoteHostId =
+            row && typeof row.host_id === 'string' && isRemoteHostId(row.host_id) && row.host_id.length > 0
+              ? row.host_id
+              : null;
+          const probe = worktreeProbe(
+            worktreePath,
+            remoteHostId !== null ? runHostAccess.forHost(remoteHostId) : undefined,
+          );
           const readHead = async (): Promise<string> =>
-            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+            (await probe.git(['rev-parse', 'HEAD'])).trim();
           // `--untracked-files=all` lists files, not collapsed directories, so a new
           // file inside an already-untracked directory still reads as NEW dirt.
           const readDirtyPaths = async (): Promise<string[]> =>
             parsePorcelainPaths(
-              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
+              await probe.git(['status', '--porcelain', '--untracked-files=all']),
             );
           const startHead = await readHead();
           // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
@@ -569,7 +660,7 @@ export function composeProgrammaticRunner(
                 const bootstrapShas = new Set(runbookBootstrapStamps.commitShasForRun(rid));
                 if (bootstrapShas.size > 0) {
                   const between = (
-                    await runGitAsync(worktreePath, ['rev-list', `${startHead}..${endHead}`])
+                    await probe.git(['rev-list', `${startHead}..${endHead}`])
                   )
                     .split('\n')
                     .map((line) => line.trim())
@@ -593,7 +684,7 @@ export function composeProgrammaticRunner(
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
-              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
+              buildSlots: await probe.buildSlots(), // committed lane build output at the END HEAD (tri-state)
             };
           };
         },

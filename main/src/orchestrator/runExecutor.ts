@@ -28,6 +28,7 @@ import { providerLabel, providerSupportsOrchestrated } from './providerExecution
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../shared/types/cliSpawn';
 import type { AgentThreadImageAttachment } from '../../../shared/types/agentThread';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 // Type-only (erased by tsc) — the standalone-typecheck invariant above forbids a
@@ -324,6 +325,16 @@ export interface ClaudeSpawnerOptions extends LaneSpawnEnv {
    * persists as before.
    */
   eventsSink?: SpawnEventsSink;
+  /**
+   * Execution host (M2 remote flows) — the spawner-side twin of
+   * {@link ClaudeSpawnOptions.hostId}. RunExecutor passes the run's immutable
+   * `workflow_runs.host_id` stamp ONLY when it names a remote environment
+   * (`isRemoteHostId`); a local run omits the key, so its spawn options stay
+   * byte-identical. A string is authoritative; null/absent means "resolve from
+   * the run / session rows" (services/hosts/remoteRuntime.ts resolveHostIdFromDb),
+   * never "force This Mac".
+   */
+  hostId?: string | null;
 }
 
 /**
@@ -1013,6 +1024,9 @@ export class RunExecutor {
           disableUserCodexPlugins: true,
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
+          // Remote environment stamp (M2): only a remote host adds the key, so
+          // a local run's spawn options stay byte-identical.
+          ...(isRemoteHostId(run.host_id) ? { hostId: run.host_id } : {}),
         });
 
         if (this.shuttingDown) {

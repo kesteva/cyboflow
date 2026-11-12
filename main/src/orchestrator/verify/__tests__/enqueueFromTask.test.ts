@@ -433,6 +433,44 @@ describe('enqueueTaskVerification', () => {
     });
     expect(result).toEqual({ outcome: 'skipped', reason: 'verification-disabled' });
   });
+
+  describe('a run on a remote environment (M2)', () => {
+    const run = (): ReturnType<typeof enqueueTaskVerification> =>
+      enqueueTaskVerification({
+        db: dbAdapter(db),
+        runId: 'run-1',
+        task,
+        laneTaskRef: 'TASK-001',
+        attempt: 1,
+        worktreePath: gitRepo,
+      });
+
+    it('an ENABLED remote run → skipped(remote-host), enqueues nothing', async () => {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN host_id TEXT');
+      seedRun(db, { runId: 'run-1' });
+      db.prepare("UPDATE workflow_runs SET host_id = 'h-remote' WHERE id = 'run-1'").run();
+      initScheduler(db);
+      expect(await run()).toEqual({ outcome: 'skipped', reason: 'remote-host' });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
+    });
+
+    it('the remote reason wins over the disabled stamp (checked before the enabled check)', async () => {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN host_id TEXT');
+      seedRun(db, { runId: 'run-1', enabled: false });
+      db.prepare("UPDATE workflow_runs SET host_id = 'h-remote' WHERE id = 'run-1'").run();
+      initScheduler(db);
+      expect(await run()).toEqual({ outcome: 'skipped', reason: 'remote-host' });
+    });
+
+    it("a local run (host_id NULL or 'local') keeps the local posture", async () => {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN host_id TEXT');
+      seedRun(db, { runId: 'run-1', enabled: false });
+      initScheduler(db);
+      expect(await run()).toEqual({ outcome: 'skipped', reason: 'verification-disabled' });
+      db.prepare("UPDATE workflow_runs SET host_id = 'local' WHERE id = 'run-1'").run();
+      expect(await run()).toEqual({ outcome: 'skipped', reason: 'verification-disabled' });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

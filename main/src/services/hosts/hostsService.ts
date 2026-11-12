@@ -10,17 +10,49 @@
  * most recent attempt per host (HostView.lastAttempt — an unreachable run is not persisted beyond lifecycle).
  * Events: emitPreflightProgress per decided check and once with done:true; emitHostsChanged whenever the
  * view changes in memory (HostStore emits for its own writes).
+ *
+ * Orchestrator links (spec A7): the service owns ONE HostLinkPool (one refcounted `ssh -N -R` orch-socket forward
+ * per SSH machine). linkFor(id) hands later stages an acquire/release handle; link-up / link-down refresh the view
+ * (HostView.linkState) and reach onLinkEvent listeners. A target change or archive closes that machine's link;
+ * shutdown() closes them all.
+ *
+ * Full tier (spec A6): preflightExtras() is what an SshHost's preflight runs with — the EXPECTED toolchain for the
+ * machine's arch (this Mac's bundle, hashed by the toolchain module; repeated builds cost a stat per file thanks to
+ * the hasher's (path, size, mtime) cache, and concurrent builds for one arch coalesce) and a link handle for
+ * mcp-roundtrip. prelaunch() is the launch-time gate: it judges the last complete full preflight, whatever its age
+ * (tier, runtimes and sign-in are stable; the scheduler refreshes them daily), and then checks reachability, the
+ * toolchain and the link live under a 2 s budget — that live run is NEVER recorded, emitted or shown as the last
+ * attempt. A launch runs a full preflight only to re-check a failing verdict older than PRELAUNCH_RECHECK_AFTER_MS (it can
+ * take a minute and spends a model request), so a fix made outside the app is seen. installToolchain() is the explicit
+ * "Install cyboflow tools" action (progress on the bridge's toolchain channel), followed by a full preflight.
+ *
+ * Phase F (spec M2 §7): a full preflight that reached an SSH machine ends with one bounded GC pass over
+ * `<remoteRoot>/run` (deps.runDirGc, else the token-free built-in pass); drainRemoteProcesses() (quit, after the agent
+ * managers' shutdown) kills the remote processes every SshHost registered with the process tracker (2 s budget)
+ * before it closes the ssh masters they ride.
  */
-import type {
-  CapabilityTier,
-  HostsFeatureStatus,
-  HostView,
-  PreflightResult,
-} from '../../../../shared/types/hosts';
-import { emitHostsChanged, emitPreflightProgress, type HostsFacade } from '../../orchestrator/hostsBridge';
 import {
+  redactSecrets,
+  type CapabilityTier,
+  type HostLinkViewState,
+  type HostsFeatureStatus,
+  type HostView,
+  type PreflightCheckId,
+  type PreflightCheckResult,
+  type PreflightResult,
+  type ToolchainProgressEvent,
+} from '../../../../shared/types/hosts';
+import {
+  emitHostsChanged,
+  emitPreflightProgress,
+  emitToolchainProgress,
+  type HostsFacade,
+} from '../../orchestrator/hostsBridge';
+import {
+  HostNeedsPreflightError,
   HostNotFoundError,
   HostTerminalUnavailableError,
+  LocalHostImmutableError,
   RemoteHostsDisabledError,
   HostsDisabledError,
 } from '../../orchestrator/hosts/errors';
@@ -28,9 +60,38 @@ import type { HostRow, HostStore } from '../../orchestrator/hosts/hostStore';
 import { effectiveTier } from '../../orchestrator/hosts/tierRule';
 import type { LoggerLike } from '../../orchestrator/types';
 import { isHostPreflightScheduleKilled, isRemoteHostsKilled } from './flags';
-import type { HostRegistry } from './hostRegistry';
-import type { CaptureErrorFn } from './preflight/preflightEngine';
-
+import { HostLink, HostLinkPool, type HostLinkEvent, type HostLinkLease, type HostLinkTimers } from './hostLink';
+import { remoteFactsFromPreflight, type HostRegistry } from './hostRegistry';
+import { TOOLCHAIN_DAMAGED_DETAIL, type ExpectedToolchain } from './preflight/checks';
+import {
+  gcRemoteRunDir,
+  QUIT_DRAIN_BUDGET_MS,
+  remoteProcessTracker,
+  type RemoteProcessTracker,
+} from './remoteFencing';
+import type {
+  CaptureErrorFn,
+  PreflightOrchLink,
+  SshPreflightExtras,
+} from './preflight/preflightEngine';
+import type { SshTransportLike } from './sshTransport';
+import type { BuildToolchainManifestOptions, BuiltToolchain } from './toolchain/toolchainHash';
+import {
+  ToolchainPushError,
+  type PushToolchainInput,
+  type PushToolchainResult,
+} from './toolchain/toolchainPusher';
+import type { ResolvedToolchainSources } from './toolchain/toolchainResolver';
+import {
+  CODEX_ENTRYPOINT_REL,
+  TOOLCHAIN_CLAUDE_REL,
+  TOOLCHAIN_CODEX_DIR,
+  TOOLCHAIN_MCP_REL,
+  ToolchainUnavailableError,
+  toolchainArchFromUname,
+  type ToolchainArch,
+  type ToolchainManifest,
+} from './toolchain/types';
 
 /** Structural shape of HostTerminalManager (hostTerminalManager.ts); the service depends on nothing else. */
 export interface HostTerminalsLike {
@@ -51,6 +112,51 @@ export type HostStoreLike = Pick<
   'list' | 'get' | 'activeWork' | 'addSsh' | 'update' | 'setUserCap' | 'recordPreflight' | 'archive' | 'setProjectDefault'
 >;
 
+/** linkFor() cannot hand out a link: This Mac, links not wired, or no local orch socket to forward. */
+export class HostLinkUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostLinkUnavailableError';
+  }
+}
+
+/** What linkFor() returns: one release() per successful acquire(). */
+export interface HostLinkHandle {
+  /** Resolves with the remote socket path once the forward is up (opens it on first use). */
+  acquire(): Promise<HostLinkLease>;
+  release(): void;
+}
+
+export interface HostLinksDeps {
+  /** The SAME SshTransport the registry uses (forwards are dedicated connections, not the shared master). */
+  transport: Pick<SshTransportLike, 'openForward'>;
+  /** This Mac's orch socket path; null when there is none to forward (Windows named pipe / not started). */
+  getOrchSocketPath(): string | null;
+  timers?: HostLinkTimers;
+}
+
+/**
+ * The toolchain module (spec A5) as the service uses it; the composition wires the real functions. Absent ⇒ the
+ * preflight keeps the M1 shape (sdk-binary-hash skipped) and installToolchain() refuses.
+ */
+export interface HostsToolchainDeps {
+  /** @throws ToolchainUnavailableError when this build has no tools for `arch` (or the MCP bundle is not built). */
+  resolveSources(arch: ToolchainArch): ResolvedToolchainSources;
+  buildManifest(resolved: ResolvedToolchainSources, opts?: BuildToolchainManifestOptions): Promise<BuiltToolchain>;
+  push(input: PushToolchainInput): Promise<PushToolchainResult>;
+  /** The SAME SshTransport the registry uses. */
+  transport: PushToolchainInput['transport'];
+}
+
+/** The runtime a launch needs on the machine. */
+export type PrelaunchRuntime = 'claude-sdk' | 'codex-sdk';
+
+export type PrelaunchFailureCode =
+  | 'unreachable' | 'not-installed' | 'no-auth' | 'tier' | 'runtime-unavailable' | 'disabled' | 'archived' | 'link-down'
+  | 'needs-check';
+
+export type PrelaunchResult = { ok: true } | { ok: false; code: PrelaunchFailureCode; reason: string };
+
 export interface HostsServiceDeps {
   store: HostStoreLike;
   registry: Pick<HostRegistry, 'get' | 'invalidate' | 'closeAllMasters'>;
@@ -64,6 +170,18 @@ export interface HostsServiceDeps {
   env?: NodeJS.ProcessEnv;
   logger: LoggerLike;
   captureError?: CaptureErrorFn;
+  /** Orchestrator links; absent ⇒ linkFor() throws HostLinkUnavailableError (tests / stripped wiring). */
+  links?: HostLinksDeps;
+  /** The toolchain module; absent ⇒ no toolchain checks and no install. */
+  toolchain?: HostsToolchainDeps;
+  /**
+   * Spec F3: collect `<remoteRoot>/run` after a full preflight found the machine reachable (RemoteRuntime.gcRunDir —
+   * it knows which runs are active and owns the token-write cache). Must not reject. Absent ⇒ the built-in pass,
+   * which removes stale pidfiles / temp files but never a token file.
+   */
+  runDirGc?: (hostId: string, remoteRoot: string) => Promise<unknown>;
+  /** Live remote processes for the quit drain (spec F2). Default: the app-wide tracker every SshHost registers with. */
+  processTracker?: RemoteProcessTracker;
 }
 
 interface LastAttempt {
@@ -74,6 +192,11 @@ interface LastAttempt {
 
 interface InFlight {
   promise: Promise<PreflightResult>;
+  controller: AbortController;
+}
+
+interface InstallInFlight {
+  promise: Promise<void>;
   controller: AbortController;
 }
 
@@ -94,11 +217,143 @@ export function summarizePreflight(result: PreflightResult): string {
   return parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}`).join(' · ') || 'No checks ran';
 }
 
+/** HostView.remoteReady: an SSH machine whose latest complete preflight passed sdk-binary-hash and recorded facts. */
+export function isRemoteReady(row: Pick<HostRow, 'kind' | 'preflight'>): boolean {
+  if (row.kind !== 'ssh' || remoteFactsFromPreflight(row.preflight) === null) return false;
+  return row.preflight?.results.some((r) => r.id === 'sdk-binary-hash' && r.status === 'pass') === true;
+}
+
+function linkViewState(link: HostLink | undefined): HostLinkViewState {
+  if (link === undefined) return 'idle';
+  if (link.state === 'up') return 'up';
+  if (link.state === 'reconnecting') return 'down';
+  return 'idle';
+}
+
+/** A failing full preflight older than this is re-checked once before prelaunch refuses a launch on it. */
+export const PRELAUNCH_RECHECK_AFTER_MS = 2 * 60_000;
+
+function prelaunchFail(code: PrelaunchFailureCode, reason: string): PrelaunchResult {
+  return { ok: false, code, reason };
+}
+
+function rowOf(result: PreflightResult, id: PreflightCheckId): PreflightCheckResult | undefined {
+  return result.results.find((r) => r.id === id);
+}
+
+/** A check's detail with its fix appended, for a launch-refusal reason. */
+function describeCheck(row: PreflightCheckResult | undefined, fallback: string): string {
+  if (!row) return fallback;
+  return row.fix ? `${row.label}: ${row.detail} (${row.fix})` : `${row.label}: ${row.detail}`;
+}
+
+/**
+ * Judge a complete FULL preflight for a launch of `runtime` (pure). Order: reachable → toolchain installed →
+ * signed in for that runtime → effective tier full (a failing link reads as link-down) → runtime present.
+ */
+export function judgeFullPreflight(
+  result: PreflightResult,
+  userCap: CapabilityTier | null,
+  runtime: PrelaunchRuntime,
+): PrelaunchResult {
+  if (!result.reachable) return prelaunchFail('unreachable', describeCheck(rowOf(result, 'ssh-reachable'), 'The environment is not reachable.'));
+  if (result.probeComplete === false) return prelaunchFail('unreachable', 'The last check of this environment did not finish.');
+  const sdk = rowOf(result, 'sdk-binary-hash');
+  if (sdk?.status !== 'pass') return prelaunchFail('not-installed', describeCheck(sdk, 'cyboflow tools are not installed (Install cyboflow tools)'));
+  const auth = rowOf(result, runtime === 'claude-sdk' ? 'claude-auth' : 'codex-auth');
+  if (auth?.status !== 'pass') return prelaunchFail('no-auth', describeCheck(auth, 'Not signed in on this environment.'));
+  if (effectiveTier(result.detectedTier, userCap) !== 'full') {
+    const blocking = result.results.find((r) => r.tierImpact === 'blocks-full' && (r.status === 'fail' || r.status === 'skipped'));
+    if (blocking?.id === 'mcp-roundtrip') return prelaunchFail('link-down', describeCheck(blocking, 'The orchestrator link is down.'));
+    if (blocking) return prelaunchFail('tier', describeCheck(blocking, 'This environment can only open terminals.'));
+    return prelaunchFail('tier', userCap === 'cli'
+      ? 'This environment is limited to terminals.'
+      : 'This environment can only open terminals.');
+  }
+  const present = runtime === 'claude-sdk' ? result.runtimes.claudeSdk : result.runtimes.codexSdk;
+  if (!present) {
+    return prelaunchFail('runtime-unavailable', runtime === 'claude-sdk'
+      ? 'Claude is not available on this environment.'
+      : 'Codex is not available on this environment (its tools are not installed or it is not signed in).');
+  }
+  return { ok: true };
+}
+
+/** Judge a PRELAUNCH preflight (pure): reachable in time → toolchain → node → sign-in shape → link. */
+export function judgePrelaunchPreflight(result: PreflightResult, runtime: PrelaunchRuntime): PrelaunchResult {
+  const reach = rowOf(result, 'ssh-reachable');
+  if (reach?.status !== 'pass') return prelaunchFail('unreachable', describeCheck(reach, 'The environment is not reachable.'));
+  if (!result.probeComplete) return prelaunchFail('unreachable', 'The environment did not answer in time.');
+  const sdk = rowOf(result, 'sdk-binary-hash');
+  if (sdk?.status !== 'pass') return prelaunchFail('not-installed', describeCheck(sdk, 'cyboflow tools are not installed (Install cyboflow tools)'));
+  const node = rowOf(result, 'node22');
+  if (node?.status !== 'pass') return prelaunchFail('runtime-unavailable', describeCheck(node, 'Node.js 22 was not found.'));
+  if (runtime === 'claude-sdk') {
+    const auth = rowOf(result, 'claude-auth');
+    if (auth?.status !== 'pass') return prelaunchFail('no-auth', describeCheck(auth, 'No Claude token on this environment.'));
+  }
+  const link = rowOf(result, 'mcp-roundtrip');
+  if (link?.status !== 'pass') return prelaunchFail('link-down', describeCheck(link, 'The orchestrator link is down.'));
+  return { ok: true };
+}
+
+/** The expected-toolchain view of a manifest: the three files the probe sizes. */
+export function expectedFromManifest(manifest: ToolchainManifest): ExpectedToolchain {
+  const codexRel = manifest.codexTarget ? `${TOOLCHAIN_CODEX_DIR}/${manifest.codexTarget}/${CODEX_ENTRYPOINT_REL}` : null;
+  const wanted = new Set([TOOLCHAIN_CLAUDE_REL, TOOLCHAIN_MCP_REL, ...(codexRel ? [codexRel] : [])]);
+  return {
+    expectedHash: manifest.hash,
+    files: manifest.files.filter((f) => wanted.has(f.rel)).map((f) => ({ rel: f.rel, size: f.size })),
+    codexIncluded: codexRel !== null && manifest.files.some((f) => f.rel === codexRel),
+    unavailableReason: null,
+  };
+}
+
+function unavailableToolchain(reason: string): ExpectedToolchain {
+  return { expectedHash: null, files: [], codexIncluded: false, unavailableReason: reason };
+}
+
+/** Closed set for the host-toolchain seam's errorClass tag. */
+function toolchainErrorClass(err: unknown): string {
+  const name = err instanceof Error ? err.name : '';
+  return name === 'ToolchainPushError' || name === 'InvalidToolchainFileError' || name === 'InvalidToolchainRootError'
+    ? name
+    : 'other';
+}
+
 export class HostsService implements HostsFacade {
   private readonly inflight = new Map<string, InFlight>();
   private readonly lastAttempts = new Map<string, LastAttempt>();
+  /** The pool's current link per host (for HostView.linkState); a disposed one reads as idle. */
+  private readonly links = new Map<string, HostLink>();
+  private readonly linkPool: HostLinkPool | null;
+  private readonly linkListeners = new Set<(e: HostLinkEvent) => void>();
+  /** The absolute remote root a running preflight probed, for a link opened before any result was recorded. */
+  private readonly probedRoots = new Map<string, string>();
+  private readonly installs = new Map<string, InstallInFlight>();
+  /** In-flight manifest builds per arch (a preflight and an install share one). */
+  private readonly toolchainBuilds = new Map<ToolchainArch, Promise<BuiltToolchain>>();
+  /** Per-host in-memory generation (see generation()). Absent = 0. */
+  private readonly generations = new Map<string, number>();
 
-  constructor(private readonly deps: HostsServiceDeps) {}
+  constructor(private readonly deps: HostsServiceDeps) {
+    const linkDeps = deps.links;
+    this.linkPool = linkDeps ? new HostLinkPool((hostId) => this.createLink(hostId, linkDeps)) : null;
+  }
+
+  /**
+   * A per-host counter bumped whenever what was learned about the machine stops applying: an sshTarget change and
+   * an archive. App-lifetime caches of remote writes (run tokens, role files, artifact dirs, the installed
+   * manifest) include it in their keys, so a cache entry made for the old machine is never trusted for the new one.
+   * In memory only: every cache it guards is in memory too.
+   */
+  generation(hostId: string): number {
+    return this.generations.get(hostId) ?? 0;
+  }
+
+  private bumpGeneration(hostId: string): void {
+    this.generations.set(hostId, this.generation(hostId) + 1);
+  }
 
   // ---------------------------------------------------------------- gates
 
@@ -159,6 +414,9 @@ export class HostsService implements HostsFacade {
       preflightAt: row.preflightAt,
       lastAttempt: this.lastAttempts.get(row.id) ?? null,
       preflightRunning: this.inflight.has(row.id),
+      installRunning: this.installs.has(row.id),
+      remoteReady: isRemoteReady(row),
+      linkState: isLocal ? 'idle' : linkViewState(this.links.get(row.id)),
       runningSessions: work.sessions,
       runningRuns: work.runs,
       archivedAt: row.archivedAt,
@@ -194,6 +452,7 @@ export class HostsService implements HostsFacade {
     // A label-only edit needs no teardown: the registry's cache key includes the label, so the next get() builds
     // a fresh SshHost, and the shared master (keyed by target) keeps serving any probe that is running now.
     if (!before || patch.sshTarget === undefined || patch.sshTarget === before.sshTarget) return;
+    this.bumpGeneration(id);
     // A new destination invalidates everything learned about the old one. Cancel a preflight still talking to
     // the OLD machine and drop it from the coalescing map FIRST, so the re-check below starts a fresh run
     // instead of coalescing onto (and recording) the old one.
@@ -202,7 +461,10 @@ export class HostsService implements HostsFacade {
       running.controller.abort();
       this.inflight.delete(id);
     }
+    this.installs.get(id)?.controller.abort();
     this.deps.registry.invalidate(id);
+    this.disposeLink(id);
+    this.probedRoots.delete(id);
     this.lastAttempts.delete(id);
     this.kickPreflight(id);
   }
@@ -217,9 +479,13 @@ export class HostsService implements HostsFacade {
     this.guard();
     this.guardRemoteFor(id);
     await this.deps.store.archive(id);
+    this.bumpGeneration(id);
     this.inflight.get(id)?.controller.abort();
+    this.installs.get(id)?.controller.abort();
     this.lastAttempts.delete(id);
     this.deps.terminals.closeForHost(id);
+    this.disposeLink(id);
+    this.probedRoots.delete(id);
     this.deps.registry.invalidate(id);
   }
 
@@ -285,7 +551,27 @@ export class HostsService implements HostsFacade {
         }
       }
     }
+    await this.collectRunDir(row, result, signal);
     return result;
+  }
+
+  /**
+   * Spec F3, at the end of a FULL preflight that reached an SSH machine and recorded its remote root: one bounded GC
+   * pass over `<remoteRoot>/run` (see HostsServiceDeps.runDirGc). Never throws; a cancelled run skips it.
+   */
+  private async collectRunDir(row: HostRow, result: PreflightResult, signal: AbortSignal): Promise<void> {
+    const root = result.remote?.remoteRoot ?? null;
+    if (row.kind !== 'ssh' || result.mode !== 'full' || !result.reachable || result.probeComplete === false) return;
+    if (root === null || !root.startsWith('/') || signal.aborted) return;
+    try {
+      if (this.deps.runDirGc) {
+        await this.deps.runDirGc(row.id, root);
+        return;
+      }
+      await gcRemoteRunDir(this.deps.registry.get(row.id).exec, root, { hostId: row.id, logger: this.deps.logger });
+    } catch (err) {
+      this.deps.logger.warn('[hosts] run folder cleanup skipped', { hostId: row.id, error: err instanceof Error ? err.name : 'unknown' });
+    }
   }
 
   /** Start a full preflight in the background (add / target change). Never throws. */
@@ -295,6 +581,323 @@ export class HostsService implements HostsFacade {
         error: err instanceof Error ? err.name : 'unknown',
       });
     });
+  }
+
+  // ------------------------------------------------------------ orchestrator links
+
+  /**
+   * The orch-socket forward of an SSH machine, for a remote spawn: acquire() before the process starts, release()
+   * when it exits. Throws (gates, unknown/archived host, This Mac, links not wired) synchronously; acquire() also
+   * rejects with HostLinkUnavailableError when this Mac has no orch socket, and with the HostLink errors
+   * (not checked yet, link down, socket path too long).
+   */
+  linkFor(hostId: string): HostLinkHandle {
+    this.guard();
+    this.guardRemote();
+    const row = this.requireLive(hostId);
+    if (row.kind !== 'ssh' || row.sshTarget === null) {
+      throw new HostLinkUnavailableError('This Mac needs no orchestrator link.');
+    }
+    const pool = this.linkPool;
+    if (pool === null) throw new HostLinkUnavailableError('Orchestrator links are not available in this build.');
+    const link = pool.get(hostId);
+    return {
+      acquire: async (): Promise<HostLinkLease> => {
+        if ((this.deps.links?.getOrchSocketPath() ?? null) === null) {
+          throw new HostLinkUnavailableError('The cyboflow orchestrator socket is not running on this Mac.');
+        }
+        return link.acquire();
+      },
+      release: (): void => {
+        const before = linkViewState(link);
+        link.release();
+        // The last release ends a reconnect loop without an event: refresh the view so 'down' does not linger.
+        if (linkViewState(link) !== before) emitHostsChanged({ kind: 'hosts', hostId });
+      },
+    };
+  }
+
+  /** link-up / link-down for every SSH machine. Returns the unsubscribe function. */
+  onLinkEvent(listener: (e: HostLinkEvent) => void): () => void {
+    this.linkListeners.add(listener);
+    return () => this.linkListeners.delete(listener);
+  }
+
+  private createLink(hostId: string, linkDeps: HostLinksDeps): HostLink {
+    const row = this.deps.store.get(hostId);
+    if (!row || row.sshTarget === null) throw new HostNotFoundError();
+    const link = new HostLink({
+      hostId,
+      sshTarget: row.sshTarget,
+      transport: linkDeps.transport,
+      // A first check opens the link before its result (the remote facts) is recorded: fall back to its probe.
+      remoteRoot: () => remoteFactsFromPreflight(this.deps.store.get(hostId)?.preflight)?.remoteRoot
+        ?? this.probedRoots.get(hostId) ?? null,
+      // acquire() refuses before this is ever read without a path; a reconnect that finds none fails and backs off.
+      localSock: () => linkDeps.getOrchSocketPath() ?? '',
+      timers: linkDeps.timers,
+      logger: this.deps.logger,
+    });
+    link.onEvent((e) => this.onLinkEventInternal(e));
+    this.links.set(hostId, link);
+    return link;
+  }
+
+  private onLinkEventInternal(e: HostLinkEvent): void {
+    if (e.type === 'link-up') this.deps.logger.info('[hosts] orchestrator link up', { hostId: e.hostId });
+    else this.deps.logger.warn('[hosts] orchestrator link down', { hostId: e.hostId, reason: e.reason });
+    emitHostsChanged({ kind: 'hosts', hostId: e.hostId });
+    for (const l of this.linkListeners) {
+      try {
+        l(e);
+      } catch {
+        /* a listener never breaks the link */
+      }
+    }
+  }
+
+  private disposeLink(hostId: string): void {
+    if (!this.links.has(hostId)) return;
+    this.linkPool?.dispose(hostId);
+    this.links.delete(hostId);
+    emitHostsChanged({ kind: 'hosts', hostId });
+  }
+
+  // ------------------------------------------------------------ toolchain + full-tier preflight inputs
+
+  /** Hash this Mac's toolchain for `arch` (coalesced per arch; the hasher's cache makes repeats a stat per file). */
+  private buildToolchain(tc: HostsToolchainDeps, arch: ToolchainArch, onHashProgress?: (done: number, total: number) => void): Promise<BuiltToolchain> {
+    const running = this.toolchainBuilds.get(arch);
+    if (running) return running;
+    const build = (async (): Promise<BuiltToolchain> => tc.buildManifest(tc.resolveSources(arch), { onHashProgress }))()
+      .finally(() => {
+        if (this.toolchainBuilds.get(arch) === build) this.toolchainBuilds.delete(arch);
+      });
+    this.toolchainBuilds.set(arch, build);
+    return build;
+  }
+
+  /** The expected toolchain for a probed `uname -m`. Never rejects: an unusable build becomes unavailableReason. */
+  private async expectedToolchainFor(unameM: string): Promise<ExpectedToolchain> {
+    const tc = this.deps.toolchain;
+    if (!tc) return unavailableToolchain('This build of cyboflow cannot install tools on other machines');
+    const arch = toolchainArchFromUname(unameM);
+    if (arch === null) return unavailableToolchain(`This build of cyboflow has no tools for ${unameM}`);
+    try {
+      return expectedFromManifest((await this.buildToolchain(tc, arch)).manifest);
+    } catch (err) {
+      if (err instanceof ToolchainUnavailableError) return unavailableToolchain(err.message);
+      this.deps.logger.warn('[hosts] could not hash the local toolchain', { error: err instanceof Error ? err.name : 'unknown' });
+      return unavailableToolchain(`Could not prepare the cyboflow tools: ${redactSecrets(err instanceof Error ? err.message : String(err))}`);
+    }
+  }
+
+  /** mcp-roundtrip's (and the prelaunch link row's) handle on the machine's forward. */
+  private preflightLink(hostId: string): PreflightOrchLink {
+    let held: HostLinkHandle | null = null;
+    return {
+      available: () => (this.deps.links?.getOrchSocketPath() ?? null) !== null,
+      acquire: async (remoteRoot: string) => {
+        this.probedRoots.set(hostId, remoteRoot);
+        const handle = this.linkFor(hostId);
+        const lease = await handle.acquire();
+        held = handle;
+        return lease;
+      },
+      release: () => {
+        const handle = held;
+        held = null;
+        handle?.release();
+      },
+    };
+  }
+
+  /**
+   * What an SSH machine's preflight runs with (SshHostDeps.preflightExtras, wired by the composition): the expected
+   * toolchain (arch hint = the last complete check's), the link, and for prelaunch the last known node path.
+   */
+  async preflightExtras(hostId: string, mode: PreflightResult['mode']): Promise<SshPreflightExtras> {
+    const row = this.deps.store.get(hostId);
+    const extras: SshPreflightExtras = {};
+    if (this.deps.toolchain) {
+      extras.toolchain = {
+        archHint: row?.preflight?.remote?.arch ?? row?.arch ?? null,
+        expectedFor: (unameM) => this.expectedToolchainFor(unameM),
+      };
+    }
+    if (this.linkPool !== null) extras.orchLink = this.preflightLink(hostId);
+    if (mode === 'prelaunch') extras.prelaunchNodePath = row?.preflight?.remote?.nodePath ?? null;
+    return extras;
+  }
+
+  /** The row's last complete, reachable FULL preflight, whatever its age; else null. */
+  private lastFullPreflight(row: HostRow): PreflightResult | null {
+    const p = row.preflight;
+    if (!p || p.mode !== 'full' || p.probeComplete === false || !p.reachable) return null;
+    return p;
+  }
+
+  /**
+   * Launch-time gate for a remote session/run on `hostId`. This Mac always passes. Judges the last complete full
+   * preflight (any age; none → 'needs-check') for toolchain, sign-in, tier and runtime — a failing verdict older than
+   * PRELAUNCH_RECHECK_AFTER_MS is re-checked with one fresh full preflight before it refuses — then checks reachability,
+   * the toolchain and the link live under the 2 s prelaunch budget. The live run is never recorded and emits
+   * nothing. Never throws.
+   */
+  async prelaunch(hostId: string, runtime: PrelaunchRuntime, signal?: AbortSignal): Promise<PrelaunchResult> {
+    const st = this.status();
+    if (!st.running) return prelaunchFail('disabled', 'Environments are turned off.');
+    const row = this.deps.store.get(hostId);
+    if (!row || row.archivedAt !== null) return prelaunchFail('archived', 'This environment was removed.');
+    if (row.kind !== 'ssh') return { ok: true };
+    if (st.killed) return prelaunchFail('disabled', 'Remote environments are turned off.');
+
+    const last = this.lastFullPreflight(row);
+    if (last === null) return prelaunchFail('needs-check', 'This environment has no completed check yet. Run a check first.');
+    const gate = judgeFullPreflight(last, row.userCapTier, runtime);
+    if (!gate.ok) {
+      // The stored check may predate a fix made outside the app (a token written, tools installed by hand), so an
+      // older failing verdict is re-checked once — recorded like "Check again" — before it refuses the launch.
+      const age = Date.now() - Date.parse(last.finishedAt);
+      if (!(age > PRELAUNCH_RECHECK_AFTER_MS)) return gate;
+      let fresh: PreflightResult;
+      try {
+        fresh = await this.runPreflight(hostId);
+      } catch {
+        return gate;
+      }
+      const recheck = judgeFullPreflight(fresh, this.deps.store.get(hostId)?.userCapTier ?? row.userCapTier, runtime);
+      if (!recheck.ok) return recheck;
+    }
+    let live: PreflightResult;
+    try {
+      live = await this.deps.registry.get(hostId).preflight('prelaunch', undefined, signal);
+    } catch (err) {
+      if (err instanceof HostNotFoundError) return prelaunchFail('archived', 'This environment was removed.');
+      return prelaunchFail('unreachable', redactSecrets(err instanceof Error ? err.message : String(err)));
+    }
+    return judgePrelaunchPreflight(live, runtime);
+  }
+
+  /**
+   * `git -C <cwd> <args…>` on `hostId`, stdout on exit 0 (the orchestrator's handle on a remote session worktree;
+   * RunLauncher reads HEAD / the branch through it). Refused like any other host I/O while the feature is off or the
+   * kill switch is on.
+   * @throws HostsDisabledError / RemoteHostsDisabledError / HostNotFoundError / HostGitCommandError
+   */
+  async gitCapture(
+    hostId: string,
+    cwd: string,
+    args: string[],
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<string> {
+    this.guard();
+    this.guardRemoteFor(hostId);
+    const { stdout } = await this.deps.registry.get(hostId).git.capture({ hostId, path: cwd }, args, opts);
+    return stdout;
+  }
+
+  /**
+   * "Install cyboflow tools" (≈550 MB): hash this Mac's toolchain for the machine's arch, push it, then kick a full
+   * preflight. Needs a complete check (remote folder + arch): HostNeedsPreflightError otherwise. One install per
+   * host: a call while one runs returns the running promise. Progress → emitToolchainProgress.
+   */
+  installToolchain(id: string): Promise<void> {
+    try {
+      this.guard();
+      this.guardRemote();
+      const row = this.requireLive(id);
+      if (row.kind !== 'ssh' || row.sshTarget === null) throw new LocalHostImmutableError();
+      const running = this.installs.get(id);
+      if (running) return running.promise;
+      const tc = this.deps.toolchain;
+      if (!tc) throw new ToolchainPushError('check', id, 'not available in this build');
+      const facts = remoteFactsFromPreflight(row.preflight);
+      const unameM = row.preflight?.remote?.arch ?? null;
+      if (facts === null || unameM === null) throw new HostNeedsPreflightError();
+      const arch = toolchainArchFromUname(unameM);
+      if (arch === null) throw new ToolchainPushError('check', id, `this build of cyboflow has no tools for ${unameM}`);
+
+      // A damaged install keeps its matching manifest, so the pusher's manifest shortcut must be bypassed.
+      const damaged = row.preflight?.results.some((r) => r.id === 'sdk-binary-hash' && r.detail === TOOLCHAIN_DAMAGED_DETAIL) === true;
+      const controller = new AbortController();
+      const promise = this.executeInstall(tc, id, row.sshTarget, facts.remoteRoot, arch, controller.signal, damaged).finally(() => {
+        if (this.installs.get(id)?.controller === controller) this.installs.delete(id);
+        emitHostsChanged({ kind: 'hosts', hostId: id });
+      });
+      this.installs.set(id, { promise, controller });
+      emitHostsChanged({ kind: 'hosts', hostId: id });
+      return promise;
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  private async executeInstall(
+    tc: HostsToolchainDeps,
+    id: string,
+    target: string,
+    remoteRoot: string,
+    arch: ToolchainArch,
+    signal: AbortSignal,
+    force = false,
+  ): Promise<void> {
+    const progress = (ev: Omit<ToolchainProgressEvent, 'hostId' | 'message'>, message: string | null = null): void => {
+      try {
+        emitToolchainProgress({ hostId: id, ...ev, message });
+      } catch {
+        /* a listener never breaks an install */
+      }
+    };
+    let step: 'hash' | 'push' = 'hash';
+    try {
+      progress({ phase: 'hashing', bytesSent: 0, bytesTotal: 0 });
+      const built = await this.buildToolchain(tc, arch, (done, total) => progress({ phase: 'hashing', bytesSent: done, bytesTotal: total }));
+      if (signal.aborted) throw new ToolchainPushError('aborted', id, 'cancelled');
+      step = 'push';
+      const result = await tc.push({
+        hostId: id,
+        transport: tc.transport,
+        target,
+        remoteRoot,
+        manifest: built.manifest,
+        sources: built.sources,
+        signal,
+        force,
+        logger: this.deps.logger,
+        onProgress: (p) => progress({ phase: p.phase, bytesSent: p.bytesSent, bytesTotal: p.bytesTotal }),
+      });
+      this.deps.logger.info('[hosts] cyboflow tools installed', {
+        hostId: id,
+        alreadyInstalled: result.alreadyInstalled,
+        removed: result.removed.length,
+      });
+    } catch (err) {
+      const named = err instanceof ToolchainUnavailableError || err instanceof ToolchainPushError
+        ? err
+        : new ToolchainPushError('check', id, redactSecrets(err instanceof Error ? err.message : String(err)));
+      // The closed `step` tag: the pusher's own step, else where an unexpected error surfaced (hash | push).
+      const pushStep = err instanceof ToolchainPushError ? err.step : step;
+      progress({ phase: 'failed', bytesSent: 0, bytesTotal: 0 }, redactSecrets(named.message));
+      this.deps.logger.warn('[hosts] installing cyboflow tools failed', { hostId: id, step: pushStep, error: named.name });
+      // This build lacking tools for the arch is a configuration answer, and a cancel is the user's: neither is a defect.
+      if (!(named instanceof ToolchainUnavailableError) && pushStep !== 'aborted') {
+        try {
+          const reported = new Error(redactSecrets(named.message));
+          reported.name = named.name;
+          this.deps.captureError?.('host-toolchain', reported, {
+            hostKind: 'ssh',
+            errorClass: toolchainErrorClass(err),
+            step: pushStep,
+          });
+        } catch {
+          /* telemetry never breaks an install */
+        }
+      }
+      throw named;
+    }
+    // A cancelled install (archive / target change / quit) has nothing to re-check.
+    if (!signal.aborted) this.kickPreflight(id);
   }
 
   // ------------------------------------------------------------ terminals
@@ -330,13 +933,63 @@ export class HostsService implements HostsFacade {
 
   // ------------------------------------------------------------ lifecycle
 
-  /** Quit drain (sync): abort in-flight preflights, kill terminals, close shared ssh masters. Never throws. */
+  /**
+   * Quit drain (sync): abort in-flight preflights, close orchestrator links, kill terminals, close shared ssh
+   * masters. Never throws. Remote AGENT processes are deliberately not killed here: this runs before the run executor
+   * latches into shutdown mode, and a run whose agent dies first would be transitioned (see drainRemoteProcesses).
+   * While any remote process is live the masters stay open for its kill (drainRemoteProcesses closes them; an
+   * unref'd fallback closes them after the drain budget in case nothing calls it).
+   */
   shutdown(): void {
     for (const f of this.inflight.values()) f.controller.abort();
+    for (const i of this.installs.values()) i.controller.abort();
+    try {
+      this.linkPool?.disposeAll();
+      this.links.clear();
+    } catch (err) {
+      this.deps.logger.warn('[hosts] link teardown failed', { error: err instanceof Error ? err.name : 'unknown' });
+    }
     try {
       this.deps.terminals.destroyAll();
     } catch (err) {
       this.deps.logger.warn('[hosts] terminal teardown failed', { error: err instanceof Error ? err.name : 'unknown' });
+    }
+    if (this.tracker().size === 0) {
+      this.closeMasters();
+      return;
+    }
+    if (this.mastersFallback === null) {
+      this.mastersFallback = setTimeout(() => this.closeMasters(), QUIT_DRAIN_BUDGET_MS + 1_000);
+      this.mastersFallback.unref?.();
+    }
+  }
+
+  /**
+   * Spec F2 quit drain of the remote processes every SshHost spawned (the process tracker): stdin EOF + remote TERM
+   * to each, remote KILL + local SIGKILL for survivors, bounded by QUIT_DRAIN_BUDGET_MS; then the shared ssh masters
+   * close. Call it AFTER the agent managers were shut down (the run executor latched) — it is the backstop for what
+   * their own kill path has not finished. Never rejects; settles within the budget.
+   */
+  async drainRemoteProcesses(): Promise<void> {
+    try {
+      if (this.tracker().size > 0) await this.tracker().drain({ budgetMs: QUIT_DRAIN_BUDGET_MS, logger: this.deps.logger });
+    } catch {
+      /* best-effort */
+    }
+    this.closeMasters();
+  }
+
+  private tracker(): RemoteProcessTracker {
+    return this.deps.processTracker ?? remoteProcessTracker;
+  }
+
+  /** shutdown()'s deferred master close while remote processes were live (cleared by the close). */
+  private mastersFallback: ReturnType<typeof setTimeout> | null = null;
+
+  private closeMasters(): void {
+    if (this.mastersFallback !== null) {
+      clearTimeout(this.mastersFallback);
+      this.mastersFallback = null;
     }
     try {
       this.deps.registry.closeAllMasters();

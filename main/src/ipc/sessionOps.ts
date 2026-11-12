@@ -37,6 +37,7 @@ import { isPermissionMode } from '../../../shared/types/workflows';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { getCurrentBranch } from '../services/gitPlumbingCommands';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
 import { listQuickSessions } from '../orchestrator/quickSessionListing';
 import { QuestionRouter } from '../orchestrator/questionRouter';
@@ -484,7 +485,8 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // worktree is unreadable or has no resolvable ref (getCurrentBranch
       // returns null — a detached HEAD does NOT: it resolves to the short
       // commit sha). baseBranch itself is untouched below.
-      const liveBranch = getCurrentBranch(session.worktreePath);
+      // A remote session's (M2) worktree is on its environment: a local read only warns, every poll.
+      const liveBranch = isRemoteHostId(session.hostId) ? null : getCurrentBranch(session.worktreePath);
       const resolvedBranch = liveBranch ?? (session.baseBranch || 'main');
 
       // Calculate session duration
@@ -516,6 +518,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // ipc/sessionFileStats.ts for the full rationale.
       const gitFileStats = await computeSessionFileStats({
         worktreePath: session.worktreePath,
+        hostId: session.hostId, // M2: a remote worktree has no local git to diff
         // TASK-278: the caller's persisted BaseSelector selection (when any)
         // wins over the recorded branch point, so the card agrees with
         // whatever base the Diff panel beside it is showing.

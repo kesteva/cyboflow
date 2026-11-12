@@ -27,8 +27,10 @@ import {
 } from '../../../../../shared/types/fanOutDispatch';
 import { renderFanOutBatchScripts } from '../../../orchestrator/prompts/fanOutStageScript';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
+import type { WorkflowBundleFile } from '../../../orchestrator/workflows/workflowBundle';
 import type { WorkflowBundleWriter } from './workflowBundleWriter';
-import { installAgentOverlay } from './agentOverlayWriter';
+import { installAgentOverlay, resolveAgentOverlayFiles } from './agentOverlayWriter';
+import type { BundleFs } from './bundleFs';
 
 /** Marker line preceding the cyboflow patterns in a worktree's git exclude. */
 const CYBOFLOW_EXCLUDE_MARKER = '# cyboflow: generated agent/command bundle (not user code)';
@@ -204,6 +206,59 @@ export function installWorkflowBundle(
   } catch (err) {
     logger?.warn(
       `[WorkflowBundleInstall] install failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * The overlay agents layered over the flow bundle's agents: an overlay entry REPLACES a same-named bundle agent
+ * (the local path writes the bundle, then the overlay over it, so the overlay's content is what ends up on disk).
+ */
+function overlayAgents(bundleAgents: WorkflowBundleFile[], overlay: WorkflowBundleFile[]): WorkflowBundleFile[] {
+  const byName = new Map<string, WorkflowBundleFile>();
+  for (const file of bundleAgents) byName.set(file.name, file);
+  for (const file of overlay) byName.set(file.name, file);
+  return [...byName.values()];
+}
+
+/**
+ * {@link installWorkflowBundle} through a {@link BundleFs} port — the SSH-environment install (spec M2 §5 D1).
+ * Produces the same final file set as the local path: the flow bundle plus the project's effective agent overlay
+ * (merged into the bundle's agents, overlay wins), placed by WorkflowBundleWriter.writeVia in ONE reconcile pass
+ * so a still-live sibling lane never sees its agents/commands missing.
+ *
+ * Deliberately NO ensureBundleExcluded: a remote session worktree is a LINKED worktree of the environment's bare
+ * repo, whose shared `<bare>/info/exclude` remoteCheckout already seeded with the cyboflow globs at bare init
+ * (services/hosts/remoteCheckout.ts) — the per-worktree `.git` is a file, not a directory, and the local exclude
+ * writer would shell out to a LOCAL git against a remote path.
+ *
+ * Async, never rejects — a bundle failure must not break a spawn (logged, like the local path).
+ */
+export async function installWorkflowBundleVia(
+  port: BundleFs,
+  db: Database.Database,
+  writer: WorkflowBundleWriter,
+  runId: string,
+  worktreePath: string,
+  logger?: LoggerLike,
+  dispatch: FanOutDispatch = DEFAULT_FAN_OUT_DISPATCH,
+): Promise<void> {
+  try {
+    const scripts = dispatch === 'workflow' ? resolveStageScripts(db, runId, logger) : [];
+    const resolved = resolveWorkflowBundle(getRunWorkflowPath(db, runId, logger));
+    let overlay: WorkflowBundleFile[] = [];
+    try {
+      overlay = resolveAgentOverlayFiles(db, runId, logger);
+    } catch (err) {
+      // Same floor as installAgentOverlay: the flow bundle still installs without the overlay.
+      logger?.warn(
+        `[AgentOverlay] overlay failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    await writer.writeVia(port, worktreePath, { ...resolved, agents: overlayAgents(resolved.agents, overlay), scripts });
+  } catch (err) {
+    logger?.warn(
+      `[WorkflowBundleInstall] install via port failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }

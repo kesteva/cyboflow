@@ -32,6 +32,8 @@ import {
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import { isRemoteHostId } from '../../../../shared/types/hosts';
+import type { RunHostAccess, RunWorktreeHost } from '../trpc/contracts/runHostAccess';
 import {
   isVerificationType,
   type VerificationTaskV1,
@@ -86,11 +88,10 @@ import { hasReviewableDesignSurface } from '../runEntityOwnership';
 // artifact says, and only the gate-body copy knows the `reported_at` freshness
 // rule (migration 143). This module used to keep a byte-identical private copy.
 import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
-import { EnvironmentActions, environmentActionsDisabled } from './environmentActions';
-import { LaneBuildSlots, laneBuildSlotsDisabled, verifyLaneBuildSlotsIgnored } from './laneBuildSlots';
-import { runGitExit, runToolCapture } from '../../utils/runGit';
-import { ensureGitExcludeEntries } from '../../utils/gitExcludeWriter';
-import { mkdir } from 'fs/promises';
+import { EnvironmentActions, environmentActionsDisabled, HostEnvironmentActions } from './environmentActions';
+import { hostLaneBuildSlotsDeps, LaneBuildSlots, laneBuildSlotsDisabled } from './laneBuildSlots';
+import { localLaneBuildSlotsDeps } from './laneBuildSlotsWiring';
+import { runToolCapture } from '../../utils/runGit';
 
 /**
  * Bound on each git call that verifies the lane build slots are ignored: the
@@ -341,6 +342,15 @@ export interface DefaultProgrammaticRunnerDeps {
    * the env override, whose default is explore-on — the engine's own default.
    */
   verifyLiveConfig?: VerificationPostureDeps['liveConfig'];
+  /**
+   * The run's machine when its immutable `workflow_runs.host_id` names a REMOTE
+   * environment (spec M2 §5 D3): lane build slots and environment actions then
+   * run through it, never on This Mac. Consulted ONLY for a remote run — a
+   * local / NULL host keeps the local path byte-identical. Absent while a run is
+   * remote ⇒ that run gets no build slots and no environment actions (logged),
+   * never a local fallback.
+   */
+  runHostAccess?: RunHostAccess;
   logger?: LoggerLike;
 }
 
@@ -711,6 +721,29 @@ export function readProjectThoroughness(
 export class DefaultProgrammaticRunner implements ProgrammaticRunner {
   constructor(private readonly deps: DefaultProgrammaticRunnerDeps) {}
 
+  /**
+   * The remote run's machine, or undefined (logged once per run) when no host
+   * access is wired — that run then gets no lane build slots and no
+   * environment actions rather than local ones.
+   */
+  private runHostFor(runId: string, hostId: string): RunWorktreeHost | undefined {
+    const reason = 'lane build slots and environment actions are disabled for this remote run';
+    if (!this.deps.runHostAccess) {
+      this.deps.logger?.warn(`[DefaultProgrammaticRunner] no remote host access is wired; ${reason}`, { runId, hostId });
+      return undefined;
+    }
+    try {
+      return this.deps.runHostAccess.forHost(hostId);
+    } catch (err) {
+      this.deps.logger?.warn(`[DefaultProgrammaticRunner] remote host access failed; ${reason}`, {
+        runId,
+        hostId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
   async run(ctx: ProgrammaticRunContext): Promise<void> {
     const def = resolveWorkflowDefinition(ctx.workflow.name, ctx.workflow.spec_json);
     if (!def) {
@@ -878,26 +911,28 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // "unavailable" notice is once per run (the host below subscribes to it and
     // prepares the root eagerly in the fan-out preflight). Kill switch:
     // CYBOFLOW_DISABLE_LANE_BUILD_SLOTS=1 (no instance, so no notice either).
+    //
+    // A REMOTE run (workflow_runs.host_id names an environment) binds the slots'
+    // exclude / git verification / mkdir to its host and computes the slot dir
+    // and lane env as POSIX paths under the remote worktree, so its lanes get
+    // remote values; without host access it gets no slots (never local ones).
+    const remoteHostId = isRemoteHostId(ctx.run.host_id) ? ctx.run.host_id : null;
+    const runHost = remoteHostId !== null ? this.runHostFor(ctx.runId, remoteHostId) : undefined;
+    const hasWorktree = typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0;
     const laneBuildSlots =
-      !laneBuildSlotsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
-        ? new LaneBuildSlots(
-            ctx.worktreePath,
-            {
-              ensureExcluded: (worktreePath, entries) =>
-                ensureGitExcludeEntries(worktreePath, entries, {
-                  label: 'LaneBuildSlots',
-                  ...(this.deps.logger ? { logger: this.deps.logger } : {}),
-                }) !== null,
-              verifyIgnored: (worktreePath, root) =>
-                verifyLaneBuildSlotsIgnored(worktreePath, root, (cwd, args) =>
-                  runGitExit(cwd, args, { timeout: LANE_BUILD_SLOTS_GIT_TIMEOUT_MS }),
-                ),
-              mkdirp: async (dirPath) => {
-                await mkdir(dirPath, { recursive: true });
-              },
-            },
-            this.deps.logger,
-          )
+      !laneBuildSlotsDisabled() && hasWorktree && (remoteHostId === null || runHost !== undefined)
+        ? runHost !== undefined
+          ? new LaneBuildSlots(
+              ctx.worktreePath,
+              hostLaneBuildSlotsDeps(runHost, LANE_BUILD_SLOTS_GIT_TIMEOUT_MS),
+              this.deps.logger,
+              { posixPaths: true },
+            )
+          : new LaneBuildSlots(
+              ctx.worktreePath,
+              localLaneBuildSlotsDeps(LANE_BUILD_SLOTS_GIT_TIMEOUT_MS, this.deps.logger),
+              this.deps.logger,
+            )
         : undefined;
 
     const runner = new SpawnStepRunner(
@@ -966,6 +1001,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         projectId: ctx.run.project_id,
         workflowName: ctx.workflow.name,
         worktreePath: ctx.worktreePath,
+        ...(remoteHostId !== null ? { remoteWorktree: true } : {}),
       },
       ctx.injectEvent,
     );
@@ -1051,12 +1087,21 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // The run worktree's closed set of host-run environment actions (lane triage's
     // `fix_environment` + the fan-out dependency preflight). Kill switch:
     // CYBOFLOW_DISABLE_ENV_ACTIONS=1.
-    const environmentActions =
-      !environmentActionsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
-        ? new EnvironmentActions(ctx.worktreePath, (bin, args, cwd, timeoutMs) =>
-            runToolCapture(bin, cwd, args, { timeout: timeoutMs }),
-          )
-        : undefined;
+    // A REMOTE run runs them on its host (cwd = the remote worktree, the
+    // environment's tool PATH), answering the host's sync reads from a snapshot
+    // read once here (bounded, fail-soft) before the run host exists.
+    let environmentActions: EnvironmentActions | HostEnvironmentActions | undefined;
+    if (!environmentActionsDisabled() && hasWorktree) {
+      if (remoteHostId === null) {
+        environmentActions = new EnvironmentActions(ctx.worktreePath, (bin, args, cwd, timeoutMs) =>
+          runToolCapture(bin, cwd, args, { timeout: timeoutMs }),
+        );
+      } else if (runHost !== undefined) {
+        const hostActions = new HostEnvironmentActions(ctx.worktreePath, runHost, this.deps.logger);
+        await hostActions.prime(); // bounded inside; never rejects
+        environmentActions = hostActions;
+      }
+    }
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,

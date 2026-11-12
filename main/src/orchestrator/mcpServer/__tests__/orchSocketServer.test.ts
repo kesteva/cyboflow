@@ -32,6 +32,7 @@ import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { OrchSocketServer, isNamedPipePath } from '../orchSocketServer';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
+import { PREFLIGHT_PING_MESSAGE_TYPE } from '../preflightPing';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -867,6 +868,32 @@ describe('OrchSocketServer', () => {
       expect(resp.ok).toBe(false);
       expect(client.destroyed).toBe(false);
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // preflight-ping: the remote-environment link probe reaches the handler
+  // with no runId (so no bind, no token) and is answered ok:true.
+  // -------------------------------------------------------------------------
+
+  it('answers an unauthenticated preflight-ping end to end without binding a run', async () => {
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
+    await server.start();
+
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+
+    client.write(JSON.stringify({ type: PREFLIGHT_PING_MESSAGE_TYPE, requestId: 'ping-nonce-1' }) + '\n');
+
+    const lines = await waitForLines(1);
+    expect(parse(lines[0])).toEqual({
+      type: 'mcp-query-response',
+      requestId: 'ping-nonce-1',
+      ok: true,
+      data: { pong: true },
+    });
+    expect(client.destroyed).toBe(false);
+    expect(server.getRunBindingCounts()).toEqual({});
   });
 
   // -------------------------------------------------------------------------

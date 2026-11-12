@@ -6,7 +6,7 @@ import { codexPermissionFlagsForMode } from '../codexPtyManager';
 import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
 import { getShellPath } from '../../../../utils/shellPath';
 import { stampSpawnMarker } from '../../../../utils/spawnMarker';
-import { orchTokenEnv } from '../../../../orchestrator/orchAuthToken';
+import { ORCH_TOKEN_FILE_ENV_VAR, orchTokenEnv } from '../../../../orchestrator/orchAuthToken';
 import { managedTestConcurrencyEnv } from '../../../../../../shared/types/testConcurrency';
 import type {
   AppServerJsonValue,
@@ -20,6 +20,16 @@ export interface CodexAppServerMcpRuntimeConfig {
   orchSocketPath: string;
   bridgeScriptPath: string;
   nodeExecutablePath: string;
+  /**
+   * REMOTE (SSH environment) spawns only: the 0600 orch-token file on that
+   * machine (`<remoteRoot>/run/<runId>.token`). When set, the cyboflow MCP
+   * bridge gets `CYBOFLOW_ORCH_TOKEN_FILE` instead of the token itself (the
+   * bridge reads it via readOrchToken) and no ELECTRON_RUN_AS_NODE guard (the
+   * node is the remote machine's, never this app's binary). The three paths
+   * above are then the REMOTE ones (forwarded socket, pushed bundle, probed
+   * node). Absent — every local spawn — the bridge env is byte-identical.
+   */
+  orchTokenFile?: string;
 }
 
 /**
@@ -69,8 +79,11 @@ function buildMcpConfig(
           CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
           // Bearer token for `runId` (orchAuthToken.ts) — the socket server
           // refuses to bind the runId without it. This config is sent over the
-          // app-server JSON-RPC channel, never written to disk.
-          ...orchTokenEnv(runId),
+          // app-server JSON-RPC channel, never written to disk. A remote spawn
+          // carries only the path of its 0600 token file on that machine.
+          ...(runtimeConfig.orchTokenFile !== undefined
+            ? { [ORCH_TOKEN_FILE_ENV_VAR]: runtimeConfig.orchTokenFile }
+            : orchTokenEnv(runId)),
           // Tag the server's advertised tool scope so cyboflowMcpServer surfaces
           // the matching scoped family (and gates out the run-scoped tools):
           // 'global-agent' → the global-agent read/propose family; 'design' → the
@@ -81,7 +94,10 @@ function buildMcpConfig(
           // Guard: nodeExecutablePath may resolve to the Electron app binary for a
           // packaged app with no standalone node on PATH — without this flag,
           // messaging Codex boots a whole new Cyboflow app. See electronNodeGuard.
-          ...electronRunAsNodeGuardEnv(runtimeConfig.nodeExecutablePath),
+          // Never for a remote spawn: its node is the remote machine's.
+          ...(runtimeConfig.orchTokenFile !== undefined
+            ? {}
+            : electronRunAsNodeGuardEnv(runtimeConfig.nodeExecutablePath)),
         }, worktreePath),
         required: true,
         default_tools_approval_mode: 'approve',
@@ -141,6 +157,25 @@ export function buildCodexAppServerEnvironment(
     // The app-server — and every command the Codex agent shells out to,
     // including the project gate — inherits this env, so marking it here is what
     // makes a Codex lane's gate self-govern its vitest fork pool.
+    ...managedTestConcurrencyEnv(),
+  }, worktreePath);
+}
+
+/**
+ * The cyboflow slice of a REMOTE app-server env — buildCodexAppServerEnvironment
+ * minus everything that belongs to this Mac: no `...process.env`, no login-shell
+ * PATH, no orch socket and no orch token. RemoteRuntimeSession.env() turns it into
+ * the complete remote env (remote HOME/USER/…, the remote PATH with the pushed
+ * `codex-path` first, the forwarded CYBOFLOW_ORCH_SOCKET and
+ * CYBOFLOW_ORCH_TOKEN_FILE). `worktreePath` is the REMOTE checkout (the spawn
+ * marker's CYBOFLOW_WORKTREE).
+ */
+export function buildCodexRemoteAppServerEnvironment(
+  runId: string,
+  worktreePath: string,
+): Record<string, string> {
+  return stampSpawnMarker({
+    CYBOFLOW_RUN_ID: runId,
     ...managedTestConcurrencyEnv(),
   }, worktreePath);
 }

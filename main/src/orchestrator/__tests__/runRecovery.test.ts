@@ -37,6 +37,7 @@ import {
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
   stampSessionRunsPrOpen,
+  REMOTE_RUN_RESTART_REASON,
 } from '../runRecovery';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { RunQueueRegistry } from '../RunQueueRegistry';
@@ -398,6 +399,69 @@ describe('recoverActiveStateOrphans', () => {
     expect(result.approvalsCanceled).toBe(0);
     const approval = db.prepare('SELECT status FROM approvals WHERE id = ?').get('approval-O4') as { status: string };
     expect(approval.status).toBe('pending');
+  });
+
+  // -------------------------------------------------------------------------
+  // Remote environments (M2): an explicit host check, not the existsSync accident.
+  // -------------------------------------------------------------------------
+  describe('runs on a remote environment', () => {
+    const remoteRow = (db: ReturnType<typeof createTestDb>, id: string) =>
+      db.prepare('SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?').get(id) as {
+        status: string;
+        error_message: string | null;
+        outcome: string | null;
+      };
+
+    it('fails a would-be-resumed orchestrated orphan with the remote reason even though its worktree path exists locally', () => {
+      const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+      seedResumableOrchestrated(db, 'run-R1');
+      db.prepare("UPDATE workflow_runs SET host_id = 'h-remote' WHERE id = 'run-R1'").run();
+
+      const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+      expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
+      expect(remoteRow(db, 'run-R1')).toEqual({ status: 'failed', error_message: REMOTE_RUN_RESTART_REASON, outcome: 'interrupted' });
+    });
+
+    it('fails programmatic remote orphans (running and gate-parked) instead of resetting them for re-drive, and expires their approvals', () => {
+      const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+      seedRun(db, { id: 'run-R2', status: 'running' });
+      markProgrammatic(db, 'run-R2', 'epics');
+      seedRun(db, { id: 'run-R3', status: 'awaiting_review' });
+      markProgrammatic(db, 'run-R3', 'approve-idea');
+      db.prepare("UPDATE workflow_runs SET host_id = 'h-remote' WHERE id IN ('run-R2', 'run-R3')").run();
+      seedApproval(db, { runId: 'run-R2', status: 'pending' });
+
+      const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+      expect(result.programmaticToResume).toEqual([]);
+      expect(result.approvalsCanceled).toBe(1);
+      expect(remoteRow(db, 'run-R2')).toMatchObject({ status: 'failed', error_message: REMOTE_RUN_RESTART_REASON });
+      expect(remoteRow(db, 'run-R3')).toMatchObject({ status: 'failed', error_message: REMOTE_RUN_RESTART_REASON });
+    });
+
+    it("treats host_id 'local' and NULL as local: same resume / force-fail as before", () => {
+      const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+      seedResumableOrchestrated(db, 'run-L1');
+      db.prepare("UPDATE workflow_runs SET host_id = 'local' WHERE id = 'run-L1'").run();
+      seedRun(db, { id: 'run-L2', status: 'running' });
+      markProgrammatic(db, 'run-L2', 'epics');
+
+      const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+      expect(result.orchestratedToResume).toEqual([{ id: 'run-L1' }]);
+      expect(result.programmaticToResume).toEqual([{ id: 'run-L2', currentStepId: 'epics', completedStepIds: [] }]);
+    });
+
+    it('leaves a remote orchestrated awaiting_review row untouched, like a local one', () => {
+      const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+      seedRun(db, { id: 'run-R4', status: 'awaiting_review' });
+      db.prepare("UPDATE workflow_runs SET host_id = 'h-remote' WHERE id = 'run-R4'").run();
+
+      recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+      expect(remoteRow(db, 'run-R4').status).toBe('awaiting_review');
+    });
   });
 
   it('force-fails (interrupted) a STALE orchestrated orphan even with a resume target', () => {

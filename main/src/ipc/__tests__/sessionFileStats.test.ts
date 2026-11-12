@@ -179,4 +179,16 @@ describe('computeSessionFileStats', () => {
       expect(logger.warn).toHaveBeenCalled();
     });
   });
+
+  it('returns null for a remote-environment session without asking git (M2)', async () => {
+    const getDiffStatsAgainstRef = vi.fn();
+    const result = await computeSessionFileStats({
+      worktreePath: '/home/me/cf-remote/host-a/worktrees/s1',
+      baseCommit: 'abc',
+      hostId: 'host-a',
+      gitDiffManager: { getDiffStatsAgainstRef },
+    });
+    expect(result).toBeNull();
+    expect(getDiffStatsAgainstRef).not.toHaveBeenCalled();
+  });
 });

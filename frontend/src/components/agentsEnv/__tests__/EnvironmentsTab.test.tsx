@@ -24,6 +24,7 @@ vi.mock('../../../trpc/client', () => ({
         terminalClose: { get mutate() { return terminalClose; } },
         onTerminalExit: { get subscribe() { return terminalExitSubscribe; } },
         onPreflightProgress: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onToolchainProgress: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
     },
   },

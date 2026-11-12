@@ -79,6 +79,26 @@ describe('git:restore', () => {
     expect(git(wt, 'status', '--porcelain').trim()).toBe('');
   });
 
+  it('refuses a remote-environment session without touching the tree (M2)', async () => {
+    // A real, dirty local repo at the session path proves the guard fires on the host, not on a missing path.
+    const wt = path.join(tmpRoot, 'wt-remote');
+    fs.mkdirSync(wt);
+    initRepo(wt, 'committed\n');
+    fs.writeFileSync(path.join(wt, 'tracked.txt'), 'LOCAL EDIT\n');
+    fs.writeFileSync(path.join(wt, 'scratch.tmp'), 'junk\n');
+
+    const session = { id: 's1', worktreePath: wt, hostId: 'host-a' } as unknown as Session;
+    const ops = createFileOps(servicesFor(session));
+    const result = await ops.gitRestore({ sessionId: 's1' });
+    expect(result).toEqual({ success: false, error: 'Restoring changes is not available on remote environments.' });
+    expect(fs.readFileSync(path.join(wt, 'tracked.txt'), 'utf-8')).toBe('LOCAL EDIT\n');
+    expect(fs.existsSync(path.join(wt, 'scratch.tmp'))).toBe(true);
+
+    const search = await ops.search({ sessionId: 's1', pattern: 'tracked' });
+    expect(search).toMatchObject({ success: false, files: [] });
+    expect(!search.success && search.error).toBe('File search is not available on remote environments.');
+  });
+
   it('returns success:false with no git effect when the session is missing', async () => {
     const ops = createFileOps(servicesFor(undefined));
 

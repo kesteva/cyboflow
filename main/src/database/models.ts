@@ -34,6 +34,11 @@ export interface Project {
    * shared/types/thoroughness.ts.
    */
   solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
+  /**
+   * The project's default environment (migration 152). NULL = This Mac. Written ONLY by HostStore
+   * (hostsSoleWriter.test.ts); sessions:create-quick reads it as the fallback host when environments are on.
+   */
+  default_host_id?: string | null;
 }
 
 export interface Session {
@@ -141,7 +146,7 @@ export interface Session {
    */
   design_idea_id?: string | null;
   /** Idea this session is the persistent home for (migration 113; idea sessions feature). NO FK. */
-  /** Execution host (migration 152). NULL = This Mac (legacy). Nothing stamps it in M1. */
+  /** Execution host (migration 152). NULL = This Mac (canonical; 'local' tolerated on read). Stamped at session creation (M2). */
   host_id?: string | null;
   home_idea_id?: string | null;
   /** Idea whose launch minted this session (migration 114; sidebar nesting lineage). NO FK. */
@@ -193,6 +198,8 @@ export interface CreateSessionData {
   base_commit?: string;
   base_branch?: string;
   run_id?: string | null;
+  /** Remote environment (migration 152); NULL/absent = This Mac. Never the literal 'local'. */
+  host_id?: string | null;
 }
 
 export interface UpdateSessionData {

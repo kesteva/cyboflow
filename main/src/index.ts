@@ -254,6 +254,8 @@ import { armRelaunchIfRequested, cancelRelaunchOnQuit } from './utils/relaunchIn
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 import { stripInheritedRunEnv } from './utils/inheritedRunEnv';
 import { formatProcessWarning } from './utils/processWarning';
+import { isRemoteHostId } from '../../shared/types/hosts';
+import { getRemoteCheckout } from './services/hosts/remoteCheckoutBridge';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -3083,7 +3085,8 @@ app.whenReady().then(async () => {
       // real checkout, so it is skipped outright. This became load-bearing when
       // the idea-session door (openIdeaSessionCore) started using this same
       // primitive to compensate a half-created IN-PLACE home session.
-      if (
+      if (isRemoteHostId(dbSession?.host_id)) await getRemoteCheckout()?.removeSessionWorktree(sessionId); // M2: never local git
+      else if (
         dbSession?.worktree_name &&
         dbSession.project_id &&
         !dbSession.is_main_repo &&
@@ -3427,6 +3430,7 @@ async function drainOnQuit(): Promise<void> {
     await cliManagerFactory.shutdown();
     console.log('[Main] CLI manager factory shutdown complete');
   }
+  await hostsComposition?.drain(); // remote agent processes (after their managers), then the ssh masters
 
   // Tear down all run user-shells (and any dev servers they launched) so none
   // orphan on quit. RunShellManager is independent of the CLI factory above.

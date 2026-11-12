@@ -515,6 +515,8 @@ function isPureHumanGate(step: WorkflowStep): boolean {
  * is one extra finding per verify-disabled lane, never a wedged run.
  */
 const VERIFY_DISABLED_ENQUEUE_REASON = 'verification-disabled';
+/** M2: a remote-environment run never verifies visually (enqueueFromTask's 'remote-host'); also deliberate, so silent. */
+const VERIFY_REMOTE_HOST_ENQUEUE_REASON = 'remote-host';
 
 /** Whether a (non-pure-gate) agent step also carries a trailing human checkpoint. */
 function hasTrailingGate(step: WorkflowStep): boolean {
@@ -2423,10 +2425,10 @@ export class WorkflowController {
               // request row exists, so — unlike a gate-side skip, which writes a
               // 'skipped' row and a verdictDelivery finding — nothing reaches the
               // human. Raise a non-blocking finding for every declined reason
-              // EXCEPT 'verification-disabled': a deliberate off switch is not a
-              // surprise, and filing one finding per lane per run for it would
+              // EXCEPT 'verification-disabled' / 'remote-host': a deliberate off switch
+              // is not a surprise, and filing one finding per lane per run for it would
               // bury the reasons that are.
-              if (enqueueOutcome.reason !== VERIFY_DISABLED_ENQUEUE_REASON) {
+              if (enqueueOutcome.reason !== VERIFY_DISABLED_ENQUEUE_REASON && enqueueOutcome.reason !== VERIFY_REMOTE_HOST_ENQUEUE_REASON) {
                 // A decline that names a MODALITY or a RUNBOOK is a fact about the
                 // run, not about this lane: flip the posture so the remaining
                 // lanes skip the enqueue and their per-lane findings collapse into

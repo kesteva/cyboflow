@@ -34,6 +34,7 @@ import { watch, type FSWatcher } from 'fs';
 import { GitFileWatcher } from './gitFileWatcher';
 import { runGitAsync } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 
 type Listener = () => void;
 
@@ -76,8 +77,13 @@ export class WorktreeChangeNotifier {
    * `listener`. Returns the unsubscribe; the watcher set is torn down when the
    * last listener leaves. Never throws — a worktree that cannot be watched
    * simply never notifies (the rail's mount fetch and focus refetch still run).
+   *
+   * `hostId` (M2): a session on a remote environment gets a no-op unsubscribe and
+   * no watcher — its worktree path is on another machine, and there is no ssh
+   * polling. The renderer shows the Diff tab as unavailable for it instead.
    */
-  subscribe(sessionId: string, worktreePath: string, listener: Listener): () => void {
+  subscribe(sessionId: string, worktreePath: string, listener: Listener, hostId?: string | null): () => void {
+    if (isRemoteHostId(hostId)) return () => {};
     let entry = this.watched.get(sessionId);
     if (!entry || entry.worktreePath !== worktreePath) {
       if (entry) this.stop(sessionId, entry);

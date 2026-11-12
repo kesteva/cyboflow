@@ -71,6 +71,8 @@ vi.mock('../../orchestrator/approvalRouter', () => ({
 import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
 import { panelManager } from '../../services/panelManager';
+import { setRemoteCheckout } from '../../services/hosts/remoteCheckoutBridge';
+import type { RemoteCheckoutLike } from '../../services/hosts/remoteCheckout';
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
@@ -97,6 +99,7 @@ interface DbRow {
   project_id?: number;
   is_main_repo?: boolean;
   name?: string;
+  host_id?: string | null;
 }
 
 function makeServices(
@@ -593,6 +596,24 @@ describe('sessions:delete — branch close-out', () => {
       'failed',
       expect.anything(),
     );
+  });
+
+  it('a REMOTE session cleans up on its environment and never touches the local repo (M2)', async () => {
+    const removeSessionWorktree = vi.fn(async () => true);
+    setRemoteCheckout({ removeSessionWorktree } as unknown as RemoteCheckoutLike);
+    try {
+      const made = makeServices(worktreeSession({ host_id: 'h-remote' }));
+      const handlers = register(made.services);
+
+      await invoke(handlers, 'sessions:delete', 's1');
+      await made.awaitCleanup();
+
+      expect(removeSessionWorktree).toHaveBeenCalledWith('s1');
+      expect(made.removeWorktree).not.toHaveBeenCalled();
+      expect(made.deleteBranch).not.toHaveBeenCalled();
+    } finally {
+      setRemoteCheckout(null);
+    }
   });
 
   it('skips the branch delete entirely when the worktree removal fails (branch still checked out)', async () => {

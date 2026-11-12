@@ -24,6 +24,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { DatabaseLike } from './types';
 import type { RunFileEntry, RunFileContent } from '../../../shared/types/runFiles';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
 
 /** Files larger than this are not returned as text (the viewer shows a notice). */
 export const MAX_VIEWABLE_BYTES = 1024 * 1024; // 1 MiB
@@ -56,6 +58,7 @@ export class RunFileError extends Error {
 
 interface WorktreeRow {
   worktree_path: string | null;
+  host_id?: string | null;
 }
 
 /**
@@ -67,10 +70,17 @@ interface WorktreeRow {
  */
 export function resolveSessionWorktreePath(db: DatabaseLike, sessionId: string): string {
   const row = db
-    .prepare('SELECT worktree_path FROM sessions WHERE id = ?')
+    // `*` rather than naming host_id: a minimal sessions slice (pre-152 test fixtures) has no host_id column,
+    // and an absent host reads as This Mac.
+    .prepare('SELECT * FROM sessions WHERE id = ?')
     .get(sessionId) as WorktreeRow | undefined;
   if (!row) {
     throw new RunFileError('session-not-found', `Session ${sessionId} not found`);
+  }
+  // M2: a remote session's worktree is on its environment — nothing on this Mac to list or read. Mapped to
+  // PRECONDITION_FAILED like a missing worktree; the message is what the explorer shows.
+  if (isRemoteHostId(row.host_id)) {
+    throw new RunFileError('no-worktree', remoteUnavailableError('The file explorer'));
   }
   if (!row.worktree_path) {
     throw new RunFileError('no-worktree', `Session ${sessionId} has no worktree`);
