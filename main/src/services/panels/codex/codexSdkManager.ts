@@ -30,6 +30,7 @@ import {
   type ResolvedCodexExecutable,
 } from './codexExecutablePath';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { localRunArtifactsRoot } from '../../../utils/runArtifactsRoot';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import { rollupRunUsage } from '../../../orchestrator/runUsageRollup';
 import { resolveRunDeployableAgents } from '../claude/agentOverlayWriter';
@@ -771,7 +772,7 @@ export class CodexSdkManager extends AbstractCliManager {
       return await this.spawnRemoteTrackedProcess(options, spawnKey, runId, warmEligible, hostId);
     }
 
-    const runtimeConfig = { ...this.requireMcpRuntimeConfig(), runArtifactsDir: getCyboflowSubdirectory('artifacts', 'runs', runId) };
+    const runtimeConfig = { ...this.requireMcpRuntimeConfig(), runArtifactsDir: localRunArtifactsRoot(getCyboflowSubdirectory('artifacts', 'runs'), runId) };
     const executable = this.getResolvedExecutable();
     // HERMETIC spawn only: the user's own MCP servers, read fresh each spawn so
     // an edit to config.toml is honoured (and busts a parked entry via the
