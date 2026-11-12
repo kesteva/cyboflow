@@ -82,6 +82,21 @@ export function gateRuntimePin(
 }
 
 /**
+ * A pin's `providerModel` once a spawn-time gate DROPPED its runtime. The id names a model of the dropped runtime's
+ * provider, so it survives only when the step falls back onto that same provider (a `codex-pty` pin on a Codex
+ * run). On any other fallback it would be handed to a provider that does not know it (an OMP model id on a Codex
+ * run, failing the step) — dropped, so the step takes the run's model.
+ */
+export function providerModelAfterRuntimeDrop(
+  droppedRuntime: WorkflowAgentRuntime,
+  runProvider: AgentProvider,
+  providerModel: string | null | undefined,
+): string | undefined {
+  if (!providerModel) return undefined;
+  return providerForRuntime(droppedRuntime) === runProvider ? providerModel : undefined;
+}
+
+/**
  * Alias-level mirror of the spawn seam's guarded-model fallback
  * (`modelContext.applyModelAvailabilityFallback`): a guarded alias (Fable) whose
  * concrete model the availability guard reports unusable is swapped for its
