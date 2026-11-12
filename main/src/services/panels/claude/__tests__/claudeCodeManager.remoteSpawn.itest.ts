@@ -311,6 +311,29 @@ describe('remote Claude spawn (mocked-SDK integration)', () => {
     expect(second.released).toBe(true);
   });
 
+  it('B3: a stop by the chat run id (Merge / Dismiss on a quick session) cancels a spawn that is still preparing', async () => {
+    process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
+    fakeSdk.setScenario(scenario().systemInit({ sessionId: SDK_SESSION }).assistantText('ok').resultSuccess());
+    const session = createFakeRemoteSession({ runId: 'chat-run-1', spawnKey: 'panel-chat' });
+    let resolvePrep: (s: FakeRemoteSession) => void = () => undefined;
+    const prepare = vi.fn<RemoteRuntimeLike['prepare']>().mockImplementationOnce(() => new Promise((r) => { resolvePrep = r; }));
+    setRemoteRuntime({ resolveHostId: vi.fn(() => null), prepare, removeRunToken: vi.fn(async () => undefined) });
+    const mgr = new ClaudeCodeManager(makeSessionManager('host-1'), undefined, undefined, db);
+    mgr.setOrchSocketPath('/tmp/remote-itest.sock');
+    // A quick session: the gate run is the chat sentinel, not the panel id.
+    mgr.setChatSentinelProvider(() => 'chat-run-1');
+
+    const pending = mgr.spawnCliProcess({ panelId: 'panel-chat', sessionId: 'session-chat', worktreePath: REMOTE_WT, prompt: 'hello' });
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+    expect(prepare.mock.calls[0]).toEqual(['host-1', { runId: 'chat-run-1', spawnKey: 'panel-chat' }]);
+    await mgr.killProcess('chat-run-1'); // SubstrateDispatchFacade.endSession / killSession
+    resolvePrep(session);
+
+    await expect(pending).resolves.toEqual({ resultText: null });
+    expect(fakeSdk.calls).toHaveLength(0);
+    expect(session.released).toBe(true);
+  });
+
   it('leaves a This Mac session unchanged (no spawner, local MCP entry, token in env)', async () => {
     process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
     fakeSdk.setScenario(scenario().systemInit({ sessionId: SDK_SESSION }).assistantText('ok').resultSuccess());
