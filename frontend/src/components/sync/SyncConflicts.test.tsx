@@ -155,6 +155,21 @@ describe('sync conflicts UI', () => {
       expect(useNavigationStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'integrations' });
     });
 
+    it('opens the Conflicts view when the status counts conflicts the list has not loaded yet', async () => {
+      useNavigationStore.setState({ settingsOpen: false });
+      await mountHost(status([project({ openConflicts: 2, heldDeletes: 30 })]), []);
+      fireEvent.click(await screen.findByTestId('sync-indicator'));
+      expect(await screen.findByTestId('sync-conflicts-view')).toBeInTheDocument();
+      expect(useNavigationStore.getState().settingsOpen).toBe(false);
+    });
+
+    it('spins while a pass runs even with deletions held', async () => {
+      await mountHost(status([project({ heldDeletes: 30, syncing: true })]));
+      const indicator = await screen.findByTestId('sync-indicator');
+      expect(indicator).toHaveAttribute('data-state', 'syncing');
+      expect(screen.queryByTestId('sync-indicator-held')).not.toBeInTheDocument();
+    });
+
     it('shows the open count excluding pending, and opens the view on click', async () => {
       await mountHost(status([project({ openConflicts: 2 })]), [
         conflict(),

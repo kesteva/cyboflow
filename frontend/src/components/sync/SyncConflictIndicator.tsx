@@ -16,13 +16,16 @@ export function SyncConflictIndicator(): React.JSX.Element | null {
   const errored = synced.some((p) => p.status === 'error' || p.backoffUntil !== null);
   const syncing = synced.some((p) => p.syncing);
   const count = needsReview(conflicts).length;
+  // The status counts, not the lazily loaded list: a click must not miss conflicts still loading.
+  const openConflicts = synced.reduce((n, p) => n + p.openConflicts, 0);
   const held = synced.reduce((n, p) => n + p.heldDeletes, 0);
   const state = errored ? 'error' : syncing ? 'syncing' : 'idle';
   const label =
     `Sync ${state}` +
     (count > 0 ? `, ${count} conflict${count === 1 ? '' : 's'} need review` : '') +
     (held > 0 ? `, ${held} deletion${held === 1 ? '' : 's'} waiting to sync` : '');
-  const onClick = count === 0 && held > 0 ? () => useNavigationStore.getState().openSettings('integrations') : openView;
+  const onlyHeld = count === 0 && openConflicts === 0 && held > 0;
+  const onClick = onlyHeld ? () => useNavigationStore.getState().openSettings('integrations') : openView;
   return (
     <button
       type="button"
@@ -35,10 +38,10 @@ export function SyncConflictIndicator(): React.JSX.Element | null {
     >
       {errored ? (
         <AlertTriangle className="h-3 w-3 text-status-error" />
-      ) : held > 0 ? (
-        <AlertTriangle data-testid="sync-indicator-held" className="h-3 w-3 text-status-warning" />
       ) : syncing ? (
         <RefreshCcw className={cn('h-3 w-3 animate-spin')} />
+      ) : held > 0 ? (
+        <AlertTriangle data-testid="sync-indicator-held" className="h-3 w-3 text-status-warning" />
       ) : (
         <Check className="h-3 w-3" />
       )}
