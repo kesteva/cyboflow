@@ -70,6 +70,7 @@ import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/program
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import { gateStepAgentPin } from './orchestrator/stepSpawnTarget';
+import { remoteRuntimeKnownUnavailable } from './orchestrator/hostsBridge';
 import type {
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
@@ -294,10 +295,12 @@ export function composeProgrammaticRunner(
       // back to the run's own (SDK) runtime. A DROPPED runtime takes the pin's
       // provider model with it unless the step stays on that provider: an OMP
       // model id must not reach a Codex spawn.
+      const remoteHostId = readRunRemoteHostId(runId);
       const gated = gateStepAgentPin(a, {
         isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p),
-        runIsRemote: readRunRemoteHostId(runId) !== null,
+        runIsRemote: remoteHostId !== null,
         runProvider: readRunProvider(runId),
+        remoteRuntimeUnavailable: (runtime) => remoteHostId !== null && remoteRuntimeKnownUnavailable(remoteHostId, runtime),
       });
       if (gated.changed !== null) {
         const why = gated.changed === 'remote'

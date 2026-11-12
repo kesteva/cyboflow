@@ -70,6 +70,7 @@ import type { EffectiveAgent } from './agents/effectiveAgents';
 import type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
 import { gateStepAgentPin, resolveStepSpawnTarget, usableModelAlias } from './stepSpawnTarget';
 import { isRemoteHostId } from '../../../shared/types/hosts';
+import { remoteRuntimeKnownUnavailable } from './hostsBridge';
 
 export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
 
@@ -180,17 +181,18 @@ function resolveEffectiveDefinition(
 }
 
 /**
- * Whether the run targets a remote environment (`workflow_runs.host_id`). Its own guarded read: a database that
- * predates the column (or a failed read) is a This Mac run.
+ * The run's remote environment (`workflow_runs.host_id`), or null. Its own guarded read: a database that predates
+ * the column (or a failed read) is a This Mac run.
  */
-function readRunIsRemote(db: DatabaseLike, runId: string): boolean {
+function readRunRemoteHostId(db: DatabaseLike, runId: string): string | null {
   try {
     const row = db.prepare(`SELECT host_id FROM workflow_runs WHERE id = ?`).get(runId) as
       | { host_id?: unknown }
       | undefined;
-    return typeof row?.host_id === 'string' && row.host_id.length > 0 && isRemoteHostId(row.host_id);
+    const hostId = typeof row?.host_id === 'string' ? row.host_id : null;
+    return isRemoteHostId(hostId) && hostId.length > 0 ? hostId : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -274,10 +276,13 @@ export function resolveRunStepModels(
     gates && runProvider === 'claude' ? usableModelAlias(rawRunModel, gates.isModelUsable) : rawRunModel;
 
   // The pin gates of the spawn seam (resolveStepAgent), so a pin the spawn moves or drops is reported the same way.
+  const remoteHostId = readRunRemoteHostId(db, runId);
   const pinGate = {
     isProviderEnabled: (p: AgentProvider): boolean => gates?.isProviderEnabled(p) ?? true,
-    runIsRemote: readRunIsRemote(db, runId),
+    runIsRemote: remoteHostId !== null,
     runProvider,
+    remoteRuntimeUnavailable: (runtime: WorkflowAgentRuntime): boolean =>
+      remoteHostId !== null && remoteRuntimeKnownUnavailable(remoteHostId, runtime),
   };
 
   const effectiveByKey = new Map<string, EffectiveAgent>(

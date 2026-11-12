@@ -117,15 +117,27 @@ export function remoteRuntimeForPin(runtime: WorkflowAgentRuntime): WorkflowAgen
 /** Why a per-agent runtime pin is not honored as written, or null when it is (or there is none). */
 export type StepPinChange = 'provider-disabled' | 'remote';
 
+export interface StepPinGateContext {
+  isProviderEnabled: (provider: AgentProvider) => boolean;
+  runIsRemote: boolean;
+  runProvider: AgentProvider;
+  /**
+   * Remote runs: true when the environment's last complete check found `runtime` unavailable there. Absent or
+   * false (unknown included) ⇒ a moved pin is honored. See hostsBridge's `remoteRuntimeKnownUnavailable`.
+   */
+  remoteRuntimeUnavailable?: (runtime: WorkflowAgentRuntime) => boolean;
+}
+
 /**
  * The spawn-time gates over a per-agent pin, as ONE reduction: the provider-access gate ({@link gateRuntimePin}),
  * then the remote-run gate ({@link remoteRuntimeForPin}). A pin whose runtime is DROPPED takes its `providerModel`
  * with it unless the step falls back onto the same provider ({@link providerModelAfterRuntimeDrop}); a pin MOVED to
- * its provider's SDK runtime keeps both models. The Claude `model` alias and the effort are not gated here.
+ * its provider's SDK runtime keeps both models — unless the environment is known not to have that runtime, in which
+ * case it is dropped like a provider with none. The Claude `model` alias and the effort are not gated here.
  */
 export function gateStepAgentPin(
   pin: Pick<StepAgentPin, 'runtime' | 'providerModel'>,
-  ctx: { isProviderEnabled: (provider: AgentProvider) => boolean; runIsRemote: boolean; runProvider: AgentProvider },
+  ctx: StepPinGateContext,
 ): { runtime: WorkflowAgentRuntime | undefined; providerModel: string | undefined; changed: StepPinChange | null } {
   const pinned = pin.runtime ?? undefined;
   let runtime = gateRuntimePin(pinned, ctx.isProviderEnabled);
@@ -133,7 +145,9 @@ export function gateStepAgentPin(
   if (runtime !== undefined && ctx.runIsRemote) {
     const remote = remoteRuntimeForPin(runtime);
     if (remote !== runtime) {
-      runtime = remote;
+      // The launch gate vetted only the run's own runtime: a pin MOVED onto another runtime the environment is
+      // known not to have (not signed in there) would fail mid-run, so it is dropped to the run's runtime instead.
+      runtime = remote !== undefined && ctx.remoteRuntimeUnavailable?.(remote) === true ? undefined : remote;
       changed = 'remote';
     }
   }

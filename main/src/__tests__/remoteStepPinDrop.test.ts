@@ -19,12 +19,13 @@ describe('remoteRuntimeForPin', () => {
 /** The gates `resolveStepAgent` applies, then the spawn seam's reduction: what the step actually spawns on. */
 function spawnTargetFor(
   pin: { runtime?: WorkflowAgentRuntime; model?: string; providerModel?: string },
-  run: { provider: AgentProvider; model: string | null; remote: boolean; disabled?: AgentProvider[] },
+  run: { provider: AgentProvider; model: string | null; remote: boolean; disabled?: AgentProvider[]; unavailable?: WorkflowAgentRuntime[] },
 ) {
   const gated = gateStepAgentPin(pin, {
     isProviderEnabled: (p) => !(run.disabled ?? []).includes(p),
     runIsRemote: run.remote,
     runProvider: run.provider,
+    remoteRuntimeUnavailable: (r) => (run.unavailable ?? []).includes(r),
   });
   const target = resolveStepSpawnTarget(
     { runtime: gated.runtime, model: pin.model, providerModel: gated.providerModel },
@@ -61,6 +62,14 @@ describe('gateStepAgentPin → resolveStepSpawnTarget', () => {
       .toEqual({ changed: 'remote', provider: 'claude', model: 'sonnet', source: 'run' });
     expect(gateStepAgentPin({ runtime: 'claude-interactive' }, { isProviderEnabled: () => true, runIsRemote: true, runProvider: 'codex' }).runtime)
       .toBe('claude-sdk');
+  });
+
+  it('a Claude CLI pin falls back to the run runtime when the environment is known not to have Claude', () => {
+    expect(spawnTargetFor({ runtime: 'claude-interactive', model: 'opus' }, { provider: 'codex', model: 'gpt-run', remote: true, unavailable: ['claude-sdk'] }))
+      .toEqual({ changed: 'remote', provider: 'codex', model: 'gpt-run', source: 'run' });
+    // An explicit SDK pin is honored as written: only a MOVED pin consults availability.
+    expect(spawnTargetFor({ runtime: 'claude-sdk', model: 'opus' }, { provider: 'codex', model: 'gpt-run', remote: true, unavailable: ['claude-sdk'] }))
+      .toEqual({ changed: null, provider: 'claude', model: 'opus', source: 'pin' });
   });
 
   it('a Claude CLI pin whose provider is switched off is dropped, not moved', () => {
