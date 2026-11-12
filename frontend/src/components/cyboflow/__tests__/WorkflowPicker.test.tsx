@@ -2822,4 +2822,31 @@ describe('WorkflowPicker — environment picker (M2 C4)', () => {
       expect.objectContaining({ hostId: 'h2', agentRuntime: 'claude-sdk', substrate: 'sdk' }),
     );
   });
+
+  it.each([
+    ['a Claude CLI quick default stays on Claude while the picker sits on Codex', 'claude-interactive', 'codex-sdk', 'claude-sdk'],
+    ['a Codex CLI quick default moves to the Codex SDK while the picker sits on Claude', 'codex-pty', 'claude-sdk', 'codex-sdk'],
+  ] as const)('an untouched remote Quick Session keeps its own provider: %s', async (_name, quickRuntime, pickerRuntime, expected) => {
+    useConfigStore.setState({
+      config: {
+        runTypeDefaults: { quick: { agentRuntime: quickRuntime }, 'workflow:wf-1': { agentRuntime: pickerRuntime } },
+      } as unknown as AppConfig,
+    });
+    act(() => {
+      useHostsStore.setState({ hosts: [makeLocalHost(), readyHost], featureStatus: makeHostsStatus() });
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    expect(selectedRuntime()).toBe(pickerRuntime);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-environment-option-h2'));
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('quick-session-button'));
+    });
+    await waitFor(() => expect(mockCreateQuick).toHaveBeenCalled());
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ hostId: 'h2', agentRuntime: expected, agentProvider: expected === 'codex-sdk' ? 'codex' : 'claude' }),
+    );
+  });
 });

@@ -94,6 +94,22 @@ export function peekHostsFacade(): HostsFacade | null {
   return facade;
 }
 
+/**
+ * True when the environment's last complete check found `runtime` unavailable there (not signed in / not
+ * installed). Unknown — no facade, no host, no check, or a runtime the check does not report — is false: only a
+ * definite "no" changes what a step spawns on.
+ */
+export function remoteRuntimeKnownUnavailable(hostId: string, runtime: string): boolean {
+  try {
+    const flags = facade?.get(hostId).preflight?.runtimes;
+    if (runtime === 'claude-sdk') return flags?.claudeSdk === false;
+    if (runtime === 'codex-sdk') return flags?.codexSdk === false;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /** Test-only: clear the wired facade so a case starts from the unset state. */
 export function _resetHostsFacadeForTesting(): void {
   facade = null;

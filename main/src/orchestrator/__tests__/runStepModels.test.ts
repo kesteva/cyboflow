@@ -366,6 +366,27 @@ describe('resolveRunStepModels', () => {
     expect(inheritStep?.family).toBe('opus');
   });
 
+  it('applies the remote-run gate: a pin the environment cannot host is reported as what actually spawns', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-remote', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+    seedStepModelsRun(db, 'run-local', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+    db.prepare(`UPDATE workflow_runs SET host_id = 'host-1' WHERE id = 'run-remote'`).run();
+    const resolver: EffectiveAgentsResolver = () => [
+      // OMP has no runtime on a remote environment: the pin (and its model id) is dropped.
+      effectiveAgent({ agentKey: 'codex-agent', model: null, runtime: 'omp-sdk', providerModel: 'omp/model-x' }),
+      // Claude CLI moves to the Claude SDK and keeps its Claude model.
+      effectiveAgent({ agentKey: 'claude-interactive-sonnet-agent', model: 'sonnet', runtime: 'claude-interactive' }),
+    ];
+
+    const remote = resolveRunStepModels(dbAdapter(db), 'run-remote', resolver);
+    expect(remote.find((s) => s.stepId === 'codex-step')).toMatchObject({ label: 'gpt-5.6-sol', family: 'other' });
+    expect(remote.find((s) => s.stepId === 'claude-runtime-and-model-step')).toMatchObject({ label: 'Sonnet 5.5', family: 'sonnet' });
+
+    // The same pins on This Mac are honored as written.
+    const local = resolveRunStepModels(dbAdapter(db), 'run-local', resolver);
+    expect(local.find((s) => s.stepId === 'codex-step')).toMatchObject({ label: 'omp/model-x', family: 'other' });
+  });
+
   it('omits the human-gate step entirely, while keeping every other step', () => {
     const db = makeDb();
     seedStepModelsRun(db, 'run-human-gate', { model: 'sonnet', agentProvider: 'claude' });

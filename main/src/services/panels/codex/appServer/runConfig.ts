@@ -30,6 +30,12 @@ export interface CodexAppServerMcpRuntimeConfig {
    * node). Absent — every local spawn — the bridge env is byte-identical.
    */
   orchTokenFile?: string;
+  /**
+   * The run's CYBOFLOW_RUN_ARTIFACTS_DIR (screenshots, prototypes) as the app-server sees it — this Mac's folder, or
+   * the environment's for a remote spawn. It sits OUTSIDE the worktree, so a `workspace-write` sandbox needs it as a
+   * writable root or every artifact write stops on an approval. Set per spawn by the manager; absent ⇒ no root.
+   */
+  runArtifactsDir?: string;
 }
 
 /**
@@ -297,6 +303,12 @@ export function buildCodexAppServerThreadConfiguration(
       // plugin's OAuth MCP server makes each lane's thread/start block on its own
       // macOS keychain prompt. Same documented key the isolation branch uses.
       ...(options.disableUserCodexPlugins ? { features: { plugins: false } } : {}),
+      // The run artifacts folder is the one place outside the worktree the agent is asked to write (verified on
+      // 0.159.2 with `codex sandbox`: blocked without the root, allowed with it, sibling run folders still blocked).
+      // Only `workspace-write` reads the table; the array REPLACES a `writable_roots` list in the user's config.toml.
+      ...(permissionFlags.sandbox === 'workspace-write' && runtimeConfig.runArtifactsDir
+        ? { sandbox_workspace_write: { writable_roots: [runtimeConfig.runArtifactsDir] } }
+        : {}),
     },
     ...(model ? { model } : {}),
     ...instructions,

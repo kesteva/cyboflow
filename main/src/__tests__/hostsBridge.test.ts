@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   HOSTS_CHANNEL, HostsNotInitializedError, _resetHostsFacadeForTesting, emitHostsChanged,
   emitHostTerminalExit, emitPreflightProgress, emitToolchainProgress, getHostsFacade, hostEvents, hostPreflightChannel,
-  hostTerminalChannel, hostToolchainChannel, peekHostsFacade, setHostsFacade,
+  hostTerminalChannel, hostToolchainChannel, peekHostsFacade, remoteRuntimeKnownUnavailable, setHostsFacade,
   type HostsFacade,
 } from '../orchestrator/hostsBridge';
 
@@ -20,6 +20,24 @@ describe('hostsBridge', () => {
     expect(getHostsFacade()).toBe(f);
     _resetHostsFacadeForTesting();
     expect(peekHostsFacade()).toBeNull();
+  });
+  it('reports a runtime unavailable only on a definite "no" from the last check', () => {
+    expect(remoteRuntimeKnownUnavailable('h1', 'claude-sdk')).toBe(false); // no facade
+    const views: Record<string, unknown> = {
+      h1: { preflight: { runtimes: { claudeSdk: false, codexSdk: true } } },
+      h2: { preflight: null },
+    };
+    setHostsFacade({
+      get: (id: string) => {
+        if (!(id in views)) throw new Error('not found');
+        return views[id];
+      },
+    } as unknown as HostsFacade);
+    expect(remoteRuntimeKnownUnavailable('h1', 'claude-sdk')).toBe(true);
+    expect(remoteRuntimeKnownUnavailable('h1', 'codex-sdk')).toBe(false);
+    expect(remoteRuntimeKnownUnavailable('h1', 'omp-sdk')).toBe(false);
+    expect(remoteRuntimeKnownUnavailable('h2', 'claude-sdk')).toBe(false); // never checked
+    expect(remoteRuntimeKnownUnavailable('gone', 'claude-sdk')).toBe(false); // unknown host
   });
   it('emits on the hosts and per-host preflight channels', () => {
     const changed: unknown[] = [];
