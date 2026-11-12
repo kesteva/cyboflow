@@ -190,7 +190,10 @@ describe('TrackerIntegrationSection', () => {
     });
     render(<TrackerIntegrationSection />);
 
-    expect(await screen.findByText('Paused: beads (smk) runs on Studio')).toBeInTheDocument();
+    // Cut to fit the card, so the whole reason is also the tooltip.
+    const chip = await screen.findByText('Paused: beads (smk) runs on Studio');
+    expect(chip).toHaveClass('truncate');
+    expect(chip).toHaveAttribute('title', 'Paused: beads (smk) runs on Studio');
     expect(screen.queryByText('Paused — check credentials')).not.toBeInTheDocument();
   });
 
