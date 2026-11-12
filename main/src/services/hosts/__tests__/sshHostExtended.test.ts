@@ -375,10 +375,11 @@ describe.skipIf(!posix)('SshHost against a local /bin/sh loopback (no ssh)', () 
     await new Promise<void>((r) => setTimeout(r, 300));
     expect(replacementExited).toBe(false);
     expect(replacement.exitCode).toBeNull();
-    // Only the old spawn's pidfile is reaped.
-    await waitFor(() => readdirSync(join(root, 'run')).length === 1);
+    // Only the old spawn's pidfile is reaped. The reap is a best-effort exec with its own 5 s timeout, so a
+    // loaded CI host needs more than waitFor's default 5 s to see it land.
+    await waitFor(() => readdirSync(join(root, 'run')).length === 1, 12_000);
     const replacementExit = new Promise<void>((resolve) => replacement.once('exit', () => resolve()));
     replacement.kill('SIGKILL');
     await replacementExit;
-  }, 15_000);
+  }, 25_000);
 });
