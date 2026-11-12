@@ -26,6 +26,10 @@ import {
 } from '../remoteCheckout';
 import { runGitCapture } from '../../../utils/runGit';
 
+// The "environment" here is the local disk standing in for a POSIX ssh host (/bin/sh, absolute /-rooted remote
+// paths). Real environments are always macOS/Linux, so on a Windows runner the stand-in cannot exist.
+const posix = process.platform !== 'win32';
+
 const MIG = path.join(__dirname, '..', '..', '..', 'database', 'migrations');
 const logger: LoggerLike = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
 
@@ -155,7 +159,7 @@ const input = (sessionId: string, key: string) => ({
 });
 const bare = (): string => path.join(remoteRoot, 'repos', '7.git');
 
-describe('RemoteCheckout.ensureSessionWorktree (real git)', { timeout: 30_000 }, () => {
+describe.skipIf(!posix)('RemoteCheckout.ensureSessionWorktree (real git)', { timeout: 30_000 }, () => {
   it('first session: inits the bare repo, pushes the base, adds the worktree, walks the row to remote_ready', async () => {
     const head = git(project, ['rev-parse', 'HEAD']).trim();
     expect(await checkout.worktreeExists(hostId, 'k1')).toBe(false);
@@ -270,7 +274,7 @@ describe('RemoteCheckout.ensureSessionWorktree (real git)', { timeout: 30_000 },
   });
 });
 
-describe('RemoteCheckout.removeSessionWorktree (real git)', { timeout: 30_000 }, () => {
+describe.skipIf(!posix)('RemoteCheckout.removeSessionWorktree (real git)', { timeout: 30_000 }, () => {
   it('removes the worktree, branch and base ref, then marks the row cleaned; repeat calls are no-ops', async () => {
     await checkout.ensureSessionWorktree(input('s1', 'k1'));
     await checkout.ensureSessionWorktree(input('s2', 'k2'));
@@ -309,7 +313,7 @@ describe('RemoteCheckout.removeSessionWorktree (real git)', { timeout: 30_000 },
   });
 });
 
-describe('parseWorktreeList', () => {
+describe.skipIf(!posix)('parseWorktreeList', () => {
   it('maps each listed path to its branch (null for bare / detached)', () => {
     const out = 'worktree /r/b.git\nbare\n\nworktree /r/wt/k\nHEAD abc\nbranch refs/heads/k\n\nworktree /r/wt/d\nHEAD abc\ndetached\n';
     expect([...parseWorktreeList(out)]).toEqual([['/r/b.git', null], ['/r/wt/k', 'refs/heads/k'], ['/r/wt/d', null]]);
