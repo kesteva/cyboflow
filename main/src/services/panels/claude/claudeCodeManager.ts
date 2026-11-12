@@ -1482,8 +1482,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // and the interactive MCP approval path keeps reading fresh per call.
       // M2: null host = This Mac (unchanged); a remote host prepares (gates, orch link, token file) or fails readably.
       const hostId = resolveClaudeSpawnHostId(this.db, { hostId: options.hostId, sessionHostId: sessionRow?.host_id, runId, sessionId }, makeLoggerLike(this.logger));
-      // runId too: Merge / Dismiss stop a quick session by its chat run id, which is neither the spawn key nor the panel.
-      if (hostId !== null) prep = this.remotePreps.begin(spawnKey, displayPanelId, runId);
+      if (hostId !== null) prep = this.remotePreps.begin(spawnKey, displayPanelId, runId); // runId: Merge / Dismiss stop a quick session by its chat run id
       const remote = (remoteLease.session = hostId === null ? null : await prepareRemoteClaudeSpawn(hostId, { runId, spawnKey }, makeLoggerLike(this.logger)));
       const permissionRules = remote === null ? this.loadSpawnPermissionRules(options.worktreePath) : await loadRemoteSpawnPermissionRules(remote, options.worktreePath, makeLoggerLike(this.logger));
       const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules, remote);
