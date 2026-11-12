@@ -7,6 +7,14 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// TaskQueue runs session creation at concurrency 1 on Linux (5 elsewhere). The B1 barrier tests need two creates in
+// flight at once, so pin a non-Linux platform: on a Linux CI host the barrier would otherwise never open.
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  const platform = (): NodeJS.Platform => 'darwin';
+  return { ...actual, platform, default: { ...actual, platform } };
+});
+
 vi.mock('../panelManager', () => ({
   panelManager: {
     ensureDiffPanel: vi.fn().mockResolvedValue(undefined),
