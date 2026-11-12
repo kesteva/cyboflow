@@ -49,6 +49,9 @@ export function buildSeedTasksBlock(
 
       const refOrId = task.ref?.trim() || taskId;
       const parts: string[] = [title !== '' ? `## ${refOrId}: ${title}` : `## ${refOrId}`];
+      // A programmatic fan-out lane is told its item by opaque id (stepPrompt itemNote); without the id here a
+      // lane cannot tell which ref is its own and may redo a sibling's task.
+      if (refOrId !== taskId) parts.push(`Task id: \`${taskId}\``);
       if (summary !== '') parts.push(summary);
       if (body !== '') parts.push(body);
       sections.push(parts.join('\n\n'));

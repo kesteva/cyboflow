@@ -42,6 +42,7 @@
  */
 
 import * as path from 'path';
+import type { RunWorktreeHost } from '../trpc/contracts/runHostAccess';
 import type { LoggerLike } from '../types';
 
 /**
@@ -92,6 +93,15 @@ export interface LaneBuildSlotsDeps {
   mkdirp(dirPath: string): void | Promise<void>;
 }
 
+/** Options for a {@link LaneBuildSlots} whose worktree is not on This Mac. */
+export interface LaneBuildSlotsOptions {
+  /**
+   * Compute slot paths with POSIX semantics: the worktree is an absolute path on a remote (POSIX) environment, so
+   * the slot dir and the lane env values must be remote paths whatever this Mac's own path flavour is.
+   */
+  posixPaths?: boolean;
+}
+
 export class LaneBuildSlots {
   /**
    * Set once the exclude is in place AND git confirmed it; memoized for the
@@ -113,11 +123,17 @@ export class LaneBuildSlots {
   private unavailable: { reason: string; delivered: boolean } | undefined;
   private unavailableListener: ((reason: string) => void) | undefined;
 
+  /** `path` for a local worktree (unchanged); `path.posix` for a remote one. */
+  private readonly paths: path.PlatformPath;
+
   constructor(
     private readonly worktreePath: string,
     private readonly deps: LaneBuildSlotsDeps,
     private readonly logger?: LoggerLike,
-  ) {}
+    options: LaneBuildSlotsOptions = {},
+  ) {
+    this.paths = options.posixPaths === true ? path.posix : path;
+  }
 
   /**
    * Subscribe to the FIRST failure of any kind (exclude write, git verification,
@@ -150,7 +166,7 @@ export class LaneBuildSlots {
     // Exclude + verify BEFORE the directory exists: never leave an un-ignored
     // build tree in the worktree, even for a moment.
     if (!(await this.prepare())) return undefined;
-    const dir = path.resolve(this.worktreePath, LANE_BUILD_SLOTS_DIR, `slot-${slot}`);
+    const dir = this.paths.resolve(this.worktreePath, LANE_BUILD_SLOTS_DIR, `slot-${slot}`);
     if (!this.created.has(slot)) {
       try {
         await this.deps.mkdirp(dir);
@@ -164,7 +180,7 @@ export class LaneBuildSlots {
       }
       this.created.add(slot);
     }
-    const moduleCache = path.join(dir, MODULE_CACHE_SUBDIR);
+    const moduleCache = this.paths.join(dir, MODULE_CACHE_SUBDIR);
     // Keys stay in step with MODULE_CACHE_ENV_KEYS (stripInheritedLaneEnv).
     return {
       slot,
@@ -304,6 +320,25 @@ export async function verifyLaneBuildSlotsIgnored(
     };
   }
   return { ok: false, reason: `\`git check-ignore\` failed (exit ${ignored.exitCode})${stderrSuffix(ignored.stderr)}` };
+}
+
+/**
+ * {@link LaneBuildSlotsDeps} for a run whose worktree is on a REMOTE environment (spec M2 §5 D3). Every call goes
+ * through the run's host; nothing touches This Mac.
+ *   - ensureExcluded: a no-op that reports success — a remote worktree is a linked worktree of the environment's
+ *     bare repo, whose shared `info/exclude` was seeded with `.cyboflow/` when the bare repo was set up
+ *     (services/hosts/remoteCheckout.ts). verifyIgnored below is the proof either way: if the entry is missing,
+ *     git says so and the run gets no slots, with the usual notice.
+ *   - verifyIgnored: {@link verifyLaneBuildSlotsIgnored} over the host's git.
+ *   - mkdirp: the host's `mkdir -p`.
+ */
+export function hostLaneBuildSlotsDeps(host: RunWorktreeHost, gitTimeoutMs: number): LaneBuildSlotsDeps {
+  return {
+    ensureExcluded: () => true,
+    verifyIgnored: (worktreePath, root) =>
+      verifyLaneBuildSlotsIgnored(worktreePath, root, (cwd, args) => host.gitExit(cwd, args, { timeoutMs: gitTimeoutMs })),
+    mkdirp: (dirPath) => host.mkdirp(dirPath),
+  };
 }
 
 function stderrSuffix(stderr: string): string {

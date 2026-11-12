@@ -43,6 +43,13 @@ interface PanelStateWithCustomData extends ToolPanelState {
 import { addSessionLog } from '../ipc/logs';
 import { withLock } from '../utils/mutex';
 import { panelManager } from './panelManager';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+
+/** Trailing options for {@link SessionManager.createSession} (the positional list is already 14 long). */
+export interface CreateSessionOptions {
+  /** Remote environment (M2) to stamp on sessions.host_id; null/undefined/'local' = This Mac (stamps NULL). */
+  hostId?: string | null;
+}
 
 /**
  * Parse a JSON-string-array session column (migration 037's
@@ -254,7 +261,8 @@ export class SessionManager extends EventEmitter {
     inPlace?: boolean,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
-    agentModel?: string | null
+    agentModel?: string | null,
+    options?: CreateSessionOptions
   ): Promise<Session> {
     return await withLock(`session-creation`, async () => {
       return this.createSessionWithId(
@@ -272,7 +280,8 @@ export class SessionManager extends EventEmitter {
         inPlace,
         agentProvider,
         agentRuntime,
-        agentModel
+        agentModel,
+        options
       );
     });
   }
@@ -292,7 +301,8 @@ export class SessionManager extends EventEmitter {
     inPlace?: boolean,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
-    agentModel?: string | null
+    agentModel?: string | null,
+    options?: CreateSessionOptions
   ): Session {
     // Ensure this session ID isn't already being created
     if (this.activeSessions.has(id) || this.db.getSession(id)) {
@@ -327,7 +337,9 @@ export class SessionManager extends EventEmitter {
       // Model is now managed at panel level
       base_commit: baseCommit,
       base_branch: baseBranch,
-      tool_type: toolType
+      tool_type: toolType,
+      // Remote environment (M2): only a remote id is stamped; local stays NULL (the canonical form).
+      ...(isRemoteHostId(options?.hostId) ? { host_id: options.hostId } : {})
     };
 
     const dbSession = this.db.createSession(sessionData);

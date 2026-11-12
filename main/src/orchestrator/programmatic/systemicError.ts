@@ -44,6 +44,13 @@ interface SystemicPattern {
  * also excluded — see isModelUnavailableError in modelAvailabilityService.ts
  * for that separate, non-systemic classifier.
  */
+/**
+ * The remote-environment outage signal (spec M2 C3). Exported so the pause gate
+ * can title a host outage "environment unreachable" from the same text test.
+ */
+export const HOST_UNREACHABLE_PATTERN =
+  /host-unreachable:|could not resolve hostname|no route to host|network is unreachable|host is down|ssh: connect to host|kex_exchange_identification|connection to \S+ closed|ssh exited with 255/i;
+
 const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   {
     // "Claude AI usage limit reached|1751234567" (epoch-suffixed subscription
@@ -192,6 +199,15 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     // (`TypeError: fetch failed`, cause chain omitted from the surfaced text).
     name: 'net-fetch-failed',
     pattern: /fetch failed/i,
+  },
+  {
+    // A remote environment (SSH host) dropped out from under the run: our own
+    // `host-unreachable:` prefix (RunLauncher's HostLaunchRefusedError) plus the
+    // OpenSSH/OS wordings of an unreachable machine and ssh's own exit 255.
+    // Deliberately NOT bare "permission denied": an auth failure on the host is
+    // a configuration problem, not an outage that clears by waiting.
+    name: 'host-unreachable',
+    pattern: HOST_UNREACHABLE_PATTERN,
   },
 ];
 

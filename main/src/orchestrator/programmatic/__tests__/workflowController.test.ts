@@ -1598,6 +1598,22 @@ describe('WorkflowController', () => {
         expect(skips).toEqual([]);
       });
 
+      it('F8: a remote-environment run\'s "remote-host" enqueue skip is deliberate too — no finding', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        host.enqueueVisualVerification = makeEnqueue({ outcome: 'skipped', reason: 'remote-host' }).fn;
+        const skips = recordSkips(host);
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(skips).toEqual([]);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
       // ── F8 "never skip silently" (docs/proposals/visual-verification-
       //    brittleness-fixes.md): the two PRE-ROW drops raise a non-blocking
       //    finding. Gate-side skips already write a 'skipped' row + a

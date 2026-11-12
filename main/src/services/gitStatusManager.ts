@@ -9,6 +9,7 @@ import { GitStatusLogger } from './gitStatusLogger';
 import { perfBump } from './perfTracer';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats, GitOperationalError } from './gitPlumbingCommands';
 import { runGitAsync } from '../utils/runGit';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 
 interface GitStatusCache {
   [sessionId: string]: {
@@ -49,6 +50,14 @@ export class GitStatusManager {
   private isInitialLoadInProgress = false;
   private initialLoadQueue: string[] = [];
   private readonly INITIAL_LOAD_DELAY_MS = 200; // Increased to 200ms for better staggering
+
+  /**
+   * Sessions whose worktree lives on a remote environment (M2). Their status is a fixed neutral
+   * 'unknown', cached once and never refetched: no local git can read a path on another machine,
+   * and polling it over ssh would cost one round trip per git command per session per refresh.
+   * A session's host never changes, so membership is permanent until the cache is cleared.
+   */
+  private readonly remoteSessions = new Set<string>();
 
   constructor(
     private sessionManager: SessionManager,
@@ -96,6 +105,9 @@ export class GitStatusManager {
    * Get git status for a specific session (with caching)
    */
   async getGitStatus(sessionId: string): Promise<GitStatus | null> {
+    const remote = this.knownRemoteStatus(sessionId);
+    if (remote) return remote;
+
     // Check cache first
     const cached = this.cache[sessionId];
     if (cached && Date.now() - cached.lastChecked < this.CACHE_TTL_MS) {
@@ -143,6 +155,10 @@ export class GitStatusManager {
       
       // Update all sessions in parallel
       await Promise.all(projectSessions.map(async (session) => {
+        if (isRemoteHostId(session.hostId)) {
+          this.markRemote(session.id);
+          return;
+        }
         if (session.id === updatedBySessionId) {
           // The session that rebased to main is now in sync with main
           await this.updateGitStatusAfterRebase(session.id, 'to_main');
@@ -201,6 +217,10 @@ export class GitStatusManager {
 
       const session = await this.sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
+        return;
+      }
+      if (isRemoteHostId(session.hostId)) {
+        this.markRemote(sessionId);
         return;
       }
 
@@ -277,6 +297,8 @@ export class GitStatusManager {
    * @param isUserInitiated - Whether this refresh was triggered by user action (shows loading spinner)
    */
   async refreshSessionGitStatus(sessionId: string, isUserInitiated = false): Promise<GitStatus | null> {
+    const remote = this.knownRemoteStatus(sessionId);
+    if (remote) return remote;
     perfBump('git.status.refresh');
 
     // Clear any existing debounce timer for this session
@@ -296,6 +318,10 @@ export class GitStatusManager {
         
         // Fast path: check if git status actually changed before doing expensive operations
         const session = await this.sessionManager.getSession(sessionId);
+        if (isRemoteHostId(session?.hostId)) {
+          resolve(this.markRemote(sessionId));
+          return;
+        }
         if (session?.worktreePath) {
           const hasChanged = await this.hasGitStatusChanged(sessionId, session.worktreePath);
           if (!hasChanged) {
@@ -321,6 +347,9 @@ export class GitStatusManager {
    * This prevents UI lock when many sessions load at once
    */
   async queueInitialLoad(sessionId: string): Promise<GitStatus | null> {
+    const remote = this.knownRemoteStatus(sessionId);
+    if (remote) return remote;
+
     // Check cache first
     const cached = this.getCachedStatus(sessionId);
     if (cached && Date.now() - cached.lastChecked < this.CACHE_TTL_MS) {
@@ -565,6 +594,12 @@ export class GitStatusManager {
         this.abortControllers.delete(sessionId);
         return null;
       }
+      if (isRemoteHostId(session.hostId)) {
+        // Remote worktree: no local git (and no ssh polling). The coalesced caller caches this.
+        this.abortControllers.delete(sessionId);
+        this.remoteSessions.add(sessionId);
+        return { state: 'unknown', lastChecked: new Date().toISOString() };
+      }
       
       // Check if operation was cancelled
       if (abortController.signal.aborted) {
@@ -734,6 +769,22 @@ export class GitStatusManager {
     }
   }
 
+  /** The cached neutral status of a session already known to be remote; null for every other session. */
+  private knownRemoteStatus(sessionId: string): GitStatus | null {
+    if (!this.remoteSessions.has(sessionId)) return null;
+    return this.cache[sessionId]?.status ?? this.markRemote(sessionId);
+  }
+
+  /** Record `sessionId` as remote and cache its fixed neutral status (see remoteSessions). */
+  private markRemote(sessionId: string): GitStatus {
+    this.remoteSessions.add(sessionId);
+    const existing = this.cache[sessionId];
+    if (existing && existing.status.state === 'unknown') return existing.status;
+    const status: GitStatus = { state: 'unknown', lastChecked: new Date().toISOString() };
+    this.cache[sessionId] = { status, lastChecked: Date.now() };
+    return status;
+  }
+
   /**
    * Update cache with new status
    * @param generation (d) If provided, the generation the write's fetch/update began at —
@@ -762,6 +813,7 @@ export class GitStatusManager {
    */
   clearSessionCache(sessionId: string): void {
     delete this.cache[sessionId];
+    this.remoteSessions.delete(sessionId);
     this.sessionGenerations.delete(sessionId);
     this.inFlightFetches.delete(sessionId);
   }
@@ -771,6 +823,7 @@ export class GitStatusManager {
    */
   clearAllCache(): void {
     this.cache = {};
+    this.remoteSessions.clear();
     this.sessionGenerations.clear();
     this.inFlightFetches.clear();
   }

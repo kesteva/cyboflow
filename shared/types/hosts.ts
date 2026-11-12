@@ -40,6 +40,28 @@ export interface PreflightRuntimes {
   codexCli: boolean;
 }
 
+/**
+ * What a COMPLETE probe learned about an SSH machine that a remote launch needs (spawn env base, tool paths,
+ * the orch forward's socket). Persisted inside the preflight JSON; never parsed back out of check `detail`s.
+ */
+export interface PreflightRemoteFacts {
+  home: string;
+  /** The configured remote root, expanded to an absolute path (`~/cf-remote/<id>` → `/Users/k/cf-remote/<id>`). */
+  remoteRoot: string;
+  user: string | null;
+  logname: string | null;
+  shell: string | null;
+  tmpdir: string | null;
+  lang: string | null;
+  nodePath: string | null;
+  gitPath: string | null;
+  /** The user's own codex CLI (not the cyboflow toolchain's). */
+  codexPath: string | null;
+  arch: string | null;
+  /** `<remoteRoot>/s/o.sock` fits a unix socket path (< 100 bytes). */
+  socketPathOk: boolean;
+}
+
 export interface PreflightResult {
   hostId: string;
   mode: 'full' | 'prelaunch';
@@ -60,6 +82,11 @@ export interface PreflightResult {
   osVersion: string | null;
   toolchainHash: string | null;
   appVersion: string;
+  /**
+   * SSH only, and only for a complete probe that reported the remote home (probeComplete true). Absent for This
+   * Mac, for an unreachable / incomplete run, and in results persisted before remote flows.
+   */
+  remote?: PreflightRemoteFacts;
 }
 
 export interface SshHostConfig {
@@ -87,11 +114,27 @@ export interface HostView {
   /** In-memory, most recent run. */
   lastAttempt: { at: string; reachable: boolean; summary: string } | null;
   preflightRunning: boolean;
+  /**
+   * SSH only: the latest complete preflight passed `sdk-binary-hash` (cyboflow tools installed and matching) and
+   * recorded the remote facts — the machine can host SDK sessions/flows. Always false for This Mac (it needs no
+   * remote toolchain; pickers check `kind` first).
+   */
+  remoteReady: boolean;
+  /**
+   * The orchestrator link (ssh -R forward of the orch socket) for this machine: 'up' while forwarded, 'down' while
+   * reconnecting after an unexpected drop, 'idle' otherwise (none needed yet / closed). Always 'idle' for This Mac.
+   */
+  linkState: HostLinkViewState;
+  /** SSH only: an "Install cyboflow tools" push is running for this machine (in memory). */
+  installRunning: boolean;
   runningSessions: number;
   runningRuns: number;
   archivedAt: string | null;
   createdAt: string;
 }
+
+export const HOST_LINK_VIEW_STATES = ['idle', 'up', 'down'] as const;
+export type HostLinkViewState = (typeof HOST_LINK_VIEW_STATES)[number];
 
 export interface HostsFeatureStatus {
   available: boolean;
@@ -122,12 +165,19 @@ export const HOSTS_ERROR_NAMES = {
   terminalUnavailable: 'HostTerminalUnavailableError',
   invalidLabel: 'InvalidHostLabelError',
   disabled: 'HostsDisabledError',
+  /** This build of cyboflow has no tools for the machine's architecture (or its MCP bundle is not built). */
+  toolchainUnavailable: 'ToolchainUnavailableError',
+  /** Installing cyboflow tools on the machine failed (upload / verify / install). */
+  toolchainPushFailed: 'ToolchainPushError',
+  /** The action needs a complete check of the machine first (its remote folder and architecture). */
+  needsPreflight: 'HostNeedsPreflightError',
 } as const;
 
 export type HostsFailureCode =
   | 'not_found' | 'label_taken' | 'invalid_target'
   | 'invalid_label' | 'cap_above_detected' | 'local_immutable'
-  | 'has_active_work' | 'terminal_unavailable' | 'feature_disabled' | 'remote_hosts_disabled' | 'unknown';
+  | 'has_active_work' | 'terminal_unavailable' | 'feature_disabled' | 'remote_hosts_disabled'
+  | 'toolchain_unavailable' | 'toolchain_push_failed' | 'needs_preflight' | 'unknown';
 
 export type HostsResult<T> = ({ ok: true } & T) | { ok: false; error: HostsFailureCode; message: string };
 
@@ -142,10 +192,34 @@ export interface PreflightProgressEvent {
   done: boolean;
 }
 
+export const TOOLCHAIN_PROGRESS_PHASES = ['hashing', 'uploading', 'verifying', 'done', 'failed'] as const;
+export type ToolchainProgressPhase = (typeof TOOLCHAIN_PROGRESS_PHASES)[number];
+
+/**
+ * "Install cyboflow tools" progress for one machine. Bytes are SOURCE bytes (hashing: bytes hashed; uploading /
+ * verifying: uncompressed bytes sent), so `bytesTotal` is known up front (0 while hashing has not sized the
+ * bundle yet). `done` / `failed` end an install; `message` is set (redacted, user-presentable) only on `failed`.
+ */
+export interface ToolchainProgressEvent {
+  hostId: string;
+  phase: ToolchainProgressPhase;
+  bytesSent: number;
+  bytesTotal: number;
+  message: string | null;
+}
+
 /** A host terminal's ssh process exited (pushed so an open terminal view can show "Disconnected (exit N)"). */
 export interface HostTerminalExitEvent {
   terminalId: string;
   exitCode: number | null;
+}
+
+/**
+ * The ONE test for "this session/run lives on a remote environment". The canonical local value is NULL in
+ * `sessions.host_id` / `workflow_runs.host_id`; the literal 'local' is tolerated on read but never stamped.
+ */
+export function isRemoteHostId(id: string | null | undefined): id is string {
+  return id != null && id !== 'local';
 }
 
 /** ssh destination: no leading '-', a conservative charset, bounded length. */

@@ -3,6 +3,7 @@ import { Loader2, Pencil, RefreshCw, Terminal, Trash2 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Chip } from '../landing/QueuePrimitives';
 import { HealthDot } from './HealthDot';
+import { InstallToolsControl } from './InstallToolsControl';
 import { PreflightChecklist } from './PreflightChecklist';
 import { TierControl } from './TierControl';
 import { useHostsStore } from '../../stores/hostsStore';
@@ -147,9 +148,17 @@ export function EnvironmentCard({
         </div>
       )}
 
+      {isSsh && host.linkState === 'down' && (
+        <div data-testid={`environment-link-down-${host.id}`} className="text-[11px] text-status-warning">
+          Orchestrator link down
+        </div>
+      )}
+
       <TierControl host={host} onChange={(cap) => void changeCap(cap)} />
 
       <PreflightChecklist hostId={host.id} results={results} running={running} />
+
+      {isSsh && <InstallToolsControl host={host} />}
 
       {failure !== null && (
         <div role="alert" data-testid={`environment-failure-${host.id}`} className="text-[11px] text-status-error">

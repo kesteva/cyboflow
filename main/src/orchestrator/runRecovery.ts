@@ -26,6 +26,10 @@ import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
 import { writeRunUsageRow } from './runUsageRollup';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+
+/** error_message of a remote-environment run failed by boot recovery (M2: no remote resume). */
+export const REMOTE_RUN_RESTART_REASON = 'Remote runs cannot resume after a restart yet';
 
 interface PendingReviewItemRow {
   id: string;
@@ -336,10 +340,17 @@ export function recoverActiveStateOrphans(
   // Phase 4b note: 'paused' is DELIBERATELY excluded — a paused (SDK Pause) run
   // retains claude_session_id + current_step_id so Resume re-drives it; it MUST
   // survive a restart and is never force-failed here.
+  //
+  // host_id (migration 152) is projected only when the column exists, so a
+  // pre-152 schema reads every run as local.
+  const hasHostId =
+    (db
+      .prepare("SELECT 1 AS ok FROM pragma_table_info('workflow_runs') WHERE name = 'host_id'")
+      .get() as { ok?: number } | undefined)?.ok === 1;
   const candidates = db
     .prepare(
       `SELECT r.id, r.status, r.execution_model, r.current_step_id, r.substrate, r.worktree_path,
-              r.experiment_id,
+              r.experiment_id, ${hasHostId ? 'r.host_id' : 'NULL'} AS host_id,
               CASE WHEN w.name = '__quick__' THEN 1 ELSE 0 END AS is_quick,
               CASE WHEN julianday('now') - julianday(r.updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
          FROM workflow_runs r
@@ -354,6 +365,7 @@ export function recoverActiveStateOrphans(
     substrate: string | null;
     worktree_path: string | null;
     experiment_id: string | null;
+    host_id: string | null;
     is_quick: number;
     is_fresh: number;
   }[];
@@ -372,10 +384,27 @@ export function recoverActiveStateOrphans(
   //  - NON-programmatic starting/running orphans that are NOT resumable → force-fail
   //    'app_restart' + outcome='interrupted' (infra interruption, not an agent bug).
   //  - NON-programmatic awaiting_review orphans → leave untouched.
-  const programmatic = orphans.filter((r) => r.execution_model === 'programmatic');
+  //  - REMOTE-environment orphans (M2) that would otherwise resume (programmatic,
+  //    or an orchestrated running/starting run) → FAIL with REMOTE_RUN_RESTART_REASON.
+  //    Explicit, not the accident of `existsSync` missing a path that lives on
+  //    another machine (or, worse, hitting a same-named local one). A remote
+  //    `__quick__` sentinel keeps the quick path below (force-fail, revived on the
+  //    next chat turn); a remote orchestrated awaiting_review row is left alone
+  //    like a local one. Not counted in running/startingRecovered: those feed the
+  //    app_restart crash aggregate, and this is a known limit, not a crash.
+  const remoteFail = orphans.filter(
+    (r) =>
+      isRemoteHostId(r.host_id) &&
+      r.is_quick !== 1 &&
+      (r.execution_model === 'programmatic' || r.status === 'running' || r.status === 'starting'),
+  );
+  const remoteFailIds = remoteFail.map((r) => r.id);
+  const remoteFailSet = new Set(remoteFailIds);
+  const programmatic = orphans.filter((r) => r.execution_model === 'programmatic' && !remoteFailSet.has(r.id));
   const nonProgActive = orphans.filter(
     (r) =>
       r.execution_model !== 'programmatic' &&
+      !remoteFailSet.has(r.id) &&
       (r.status === 'running' || r.status === 'starting') &&
       // EXPERIMENT-ARM quick sentinels (workflow_runs.experiment_id stamped by
       // stampQuickArmRunExperimentTag) are exempt from the sweep entirely — left
@@ -425,7 +454,10 @@ export function recoverActiveStateOrphans(
 
   if (
     orphans.length === 0 ||
-    (programmatic.length === 0 && orchestratedToResume.length === 0 && forceFail.length === 0)
+    (programmatic.length === 0 &&
+      orchestratedToResume.length === 0 &&
+      forceFail.length === 0 &&
+      remoteFailIds.length === 0)
   ) {
     return {
       runningRecovered: 0,
@@ -479,6 +511,19 @@ export function recoverActiveStateOrphans(
       ).run(...failIds);
     }
 
+    // Remote-environment orphans: a terminal failure naming the limit (outcome
+    // 'interrupted' like any restart casualty). awaiting_review is in the guard
+    // because a programmatic run parked at a gate would otherwise resume onto the host.
+    if (remoteFailIds.length > 0) {
+      const ph = remoteFailIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE workflow_runs
+            SET status = 'failed', error_message = ?, outcome = 'interrupted',
+                ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (${ph}) AND status IN ('running', 'starting', 'awaiting_review')`,
+      ).run(REMOTE_RUN_RESTART_REASON, ...remoteFailIds);
+    }
+
     // Reset programmatic runs to 'starting' so the normal execute() lifecycle
     // (pre_spawn → running, guarded on 'starting') re-drives them cleanly; keep
     // current_step_id as the resume pointer. Clear the in-flight failure fields but
@@ -520,7 +565,7 @@ export function recoverActiveStateOrphans(
     // promise behind any pending approval is gone — the old gate could never be
     // answered. Only PROGRAMMATIC resumes keep the survive-contract (they re-attach
     // to the still-pending review item as they re-walk).
-    const expireApprovalIds = [...failIds, ...orchestratedResumeIds];
+    const expireApprovalIds = [...failIds, ...orchestratedResumeIds, ...remoteFailIds];
     let approvalsChanges = 0;
     if (expireApprovalIds.length > 0) {
       const ph = expireApprovalIds.map(() => '?').join(',');

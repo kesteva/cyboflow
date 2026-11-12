@@ -51,6 +51,11 @@ import { SprintLaneStore } from '../../sprintLaneStore';
 import type { SprintLaneRow } from '../../../../../shared/types/sprintBatch';
 import { runHasControllerVisualVerify } from '../../laneChainResolution';
 import type { McpQueryHandlerDeps, McpQueryMessage, McpQueryResponse } from '../mcpQueryMessages';
+import { isRemoteHostId } from '../../../../../shared/types/hosts';
+
+/** The skip reason a run on a remote environment gets (M2: visual verification is local-only). */
+export const REMOTE_HOST_VERIFY_SKIP_REASON =
+  'remote-host: visual verification is not available for runs on a remote environment';
 
 /**
  * The context the McpQueryHandler composes this family with. `writeResponse`
@@ -310,6 +315,21 @@ export class VerifyToolHandlers {
     const ctx = this.resolveReviewItemRunContext(msg.runId);
     if (!ctx.ok) {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // REMOTE ENVIRONMENT (M2): visual verification is local-only — its build,
+    // serve and drive all assume the worktree is on this Mac. A run on a remote
+    // host skips BEFORE any verify config / worktree read (the run's worktree
+    // path names a directory on the other machine). A skip, never an error: the
+    // caller continues without parking, and the reason names the cause.
+    if (isRemoteHostId(this.readRunHostId(msg.runId))) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { skipped: true, reason: REMOTE_HOST_VERIFY_SKIP_REASON },
+      });
       return;
     }
 
@@ -1423,6 +1443,18 @@ export class VerifyToolHandlers {
    * a request skipped here never reached it, so claiming it did would invent
    * evidence.
    */
+  /** `workflow_runs.host_id`, read fail-soft (a pre-152 DB / missing row reads as local). */
+  private readRunHostId(runId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT host_id FROM workflow_runs WHERE id = ?').get(runId) as
+        | { host_id?: unknown }
+        | undefined;
+      return typeof row?.host_id === 'string' ? row.host_id : null;
+    } catch {
+      return null;
+    }
+  }
+
   private disabledSkipReason(isQuickRun: boolean, enabled: boolean): string {
     if (enabled) {
       return (

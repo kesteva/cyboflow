@@ -85,6 +85,7 @@ import { resolveExecutionModel } from './executionModelResolver';
 import { resolveVisualVerification } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
+import { isRemoteHostId } from '../../../shared/types/hosts';
 import {
   reconcileRotationExperiment,
   reconcileRotationExperimentsForWorkflow,
@@ -2097,10 +2098,12 @@ export class WorkflowRegistry {
     // can never disagree about what this run executed.
     const specHash = computeSpecHash(effectiveSpecJson);
 
-    const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    // `withHost` (M2) appends host_id for a REMOTE session's run only, so the local INSERT is byte-identical.
+    const insertSql = (withHost: boolean): string => `
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix${withHost ? ', host_id' : ''})
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${withHost ? ', ?' : ''})
+    `;
+    const insert = this.db.prepare(insertSql(false));
 
     const createTx = this.db.transaction(() => {
       // Rotation attribution re-check (migration 058): the resolver's pick crossed
@@ -2119,7 +2122,12 @@ export class WorkflowRegistry {
               opts.rotationExperimentId,
               opts.variantId ?? BASELINE_VARIANT_SENTINEL,
             );
-      insert.run(
+      // Environment (M2): a run INHERITS its session's host (read in this tx, never a launch parameter). A remote
+      // run stamps host_id and has visual verification + eval forced OFF in the same immutable INSERT — neither can
+      // run against a worktree on another machine. Local (NULL / 'local') takes the unchanged statement.
+      const runHostId = this.readSessionHostId(sessionId);
+      const remoteHost = isRemoteHostId(runHostId);
+      (remoteHost ? this.db.prepare(insertSql(true)) : insert).run(
         runId,
         workflowId,
         runProjectId,
@@ -2129,10 +2137,10 @@ export class WorkflowRegistry {
         agentRuntime,
         executionModel,
         model,
-        evalEnabled,
-        verifyEnabled,
-        verifyType,
-        verifyChain,
+        remoteHost ? 0 : evalEnabled,
+        remoteHost ? 0 : verifyEnabled,
+        remoteHost ? null : verifyType,
+        remoteHost ? null : verifyChain,
         sessionId ?? null,
         specHash,
         opts?.experimentId ?? null,
@@ -2142,6 +2150,7 @@ export class WorkflowRegistry {
         rotationExperimentId,
         tuningLevelStamp,
         runtimeMixStamp,
+        ...(remoteHost ? [runHostId] : []),
       );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
@@ -2161,6 +2170,23 @@ export class WorkflowRegistry {
     createTx();
 
     return { runId, permissionMode, substrate, executionModel };
+  }
+
+  /**
+   * `sessions.host_id` for the run's session (M2), or null. A schema-narrow test DB without the sessions table or
+   * its host_id column reads as This Mac (null); any other read error propagates — a remote session must never be
+   * silently stamped local.
+   */
+  private readSessionHostId(sessionId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT host_id FROM sessions WHERE id = ?').get(sessionId) as
+        | { host_id: string | null }
+        | undefined;
+      return row?.host_id ?? null;
+    } catch (err) {
+      if (err instanceof Error && /no such (table|column)/i.test(err.message)) return null;
+      throw err;
+    }
   }
 
   /**
@@ -2250,7 +2276,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix, merge_sha, host_id, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

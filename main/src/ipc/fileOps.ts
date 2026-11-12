@@ -5,6 +5,7 @@ import { runGitCapture } from '../utils/runGit';
 import { normalizePathSeparators } from '../utils/posixPath';
 import type { AppServices } from './types';
 import type { WorkspaceFileOpsLike } from '../orchestrator/trpc/contracts/workspaceFileOps';
+import { isRemoteSession, remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
 
 interface FileSearchRequest {
   sessionId?: string;
@@ -120,6 +121,8 @@ export function createFileOps(
         if (!session) {
           throw new Error(`Session not found: ${request.sessionId}`);
         }
+        // M2: never run the destructive reset/clean against a path that lives on a remote environment.
+        if (isRemoteSession(session)) throw new Error(remoteUnavailableError('Restoring changes'));
 
         try {
           // Reset all changes to the last commit
@@ -152,6 +155,7 @@ export function createFileOps(
           if (!session) {
             throw new Error(`Session not found: ${request.sessionId}`);
           }
+          if (isRemoteSession(session)) throw new Error(remoteUnavailableError('File search'));
           searchDirectory = session.worktreePath;
         } else if (request.projectId) {
           const project = databaseService.getProject(request.projectId);

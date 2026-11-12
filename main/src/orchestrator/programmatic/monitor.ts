@@ -72,7 +72,18 @@ export interface MonitorContext {
   workflowName: string;
   /** The run's git worktree — the cwd the monitor's read-only inspection runs in. */
   worktreePath: string;
+  /**
+   * The worktree is on a REMOTE environment (the run's `workflow_runs.host_id`,
+   * spec M2 §5 D3): `worktreePath` is a path on that machine, so the monitor's
+   * local SDK queries run WITHOUT it as cwd (a local temp dir instead) and the
+   * prompt says the files cannot be read. Absent ⇒ a This-Mac run (unchanged).
+   */
+  remoteWorktree?: boolean;
 }
+
+/** The sentence a remote run's monitor prompts carry (see MonitorContext.remoteWorktree). */
+export const REMOTE_WORKTREE_PROMPT_NOTE =
+  "This run's worktree is on a remote environment, not this machine, so you cannot read its files: judge from the history above only.";
 
 /** The whole-history snapshot the monitor reads before each act. */
 export interface MonitorHistory {
@@ -2914,6 +2925,16 @@ export class DefaultMonitorSession implements MonitorSession {
     this.logger = deps.logger;
   }
 
+  /**
+   * The prompt + cwd of one SDK query. A This-Mac run: the prompt as built and
+   * the worktree as cwd (unchanged). A remote run: no cwd (the query runs in a
+   * local temp dir — the remote path does not exist here) and the prompt says so.
+   */
+  private queryTarget(prompt: string): { prompt: string; cwd?: string } {
+    if (this.ctx.remoteWorktree !== true) return { prompt, cwd: this.ctx.worktreePath };
+    return { prompt: `${prompt}\n\n${REMOTE_WORKTREE_PROMPT_NOTE}` };
+  }
+
   async triage(
     failedStep: WorkflowStep,
     error: string | undefined,
@@ -2923,9 +2944,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId);
       const prompt = buildTriagePrompt(this.ctx, failedStep, error, history);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_TRIAGE_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -2979,9 +2999,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId);
       const prompt = buildLaneTriagePrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_LANE_TRIAGE_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -3054,9 +3073,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
       const prompt = buildReviewLoopPrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_REVIEW_LOOP_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -3141,9 +3159,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
       const prompt = buildGateEscalationPrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_GATE_ESCALATION_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -3216,9 +3233,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
       const prompt = buildBlockingItemsPrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_BLOCKING_ITEMS_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -3256,8 +3272,7 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId);
       const prompt = buildAnswerPrompt(this.ctx, question, history);
       const reply = await this.textQuery({
-        prompt,
-        cwd: this.ctx.worktreePath,
+        ...this.queryTarget(prompt),
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });
@@ -3396,9 +3411,8 @@ export class DefaultMonitorSession implements MonitorSession {
       const history = await this.history.read(this.ctx.runId);
       const prompt = buildActionAnswerPrompt(this.ctx, text, history);
       const structured = await this.structuredQuery({
-        prompt,
+        ...this.queryTarget(prompt),
         schema: MONITOR_CONVERSE_SCHEMA,
-        cwd: this.ctx.worktreePath,
         ...(this.model ? { model: this.model } : {}),
         ...(signal ? { signal } : {}),
       });

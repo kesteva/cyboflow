@@ -5,10 +5,12 @@ import {
   CANCELLED_DETAIL,
   PREFLIGHT_ERROR_DETAIL,
   PROBE_INCOMPLETE_DETAIL,
+  remoteFactsFrom,
   runSshPreflight,
   type SshPreflightContext,
 } from '../preflight/preflightEngine';
 import { NOT_REACHABLE_DETAIL } from '../preflight/checks';
+import { parseProbeOutput } from '../remoteProbe';
 import type { SshExecOptions, SshTransportLike } from '../sshTransport';
 
 const HEALTHY = [
@@ -16,7 +18,9 @@ const HEALTHY = [
   'git_version=git version 2.39.5', 'node_path=/opt/homebrew/bin/node', 'node_version=v22.11.0',
   'claude_path=/Users/k/.local/bin/claude', 'claude_version=2.1.290', 'codex_path=/opt/homebrew/bin/codex',
   'codex_version=codex-cli 0.159.2', 'codex_auth=1', 'env_exists=1', 'env_mode=600', 'env_wellformed=1',
-  'env_lines=1', 'sleep_value=0', 'sleep_prevented=0', 'disk_free_kb=50000000', 'probe_done=1',
+  'env_lines=1', 'sleep_value=0', 'sleep_prevented=0', 'disk_free_kb=50000000', 'user=k', 'logname=k',
+  'shell=/bin/zsh', 'lang=en_US.UTF-8', 'tmpdir=/var/folders/xy/T/', 'git_path=/usr/bin/git',
+  'remote_root=/Users/k/cf-remote/h1', 'sock_path_bytes=32', 'probe_done=1',
 ].join('\n');
 
 const ok = (over: Partial<ExecResult> = {}): ExecResult => ({ code: 0, stdout: '', stderr: '', timedOut: false, ...over });
@@ -153,9 +157,68 @@ describe('runSshPreflight', () => {
     expect(r.results.filter((c) => c.status === 'fail')).toEqual([]);
   });
 
+  it('a complete probe records the remote facts a launch needs', async () => {
+    const r = await runSshPreflight(ctx(fakeTransport()), 'full');
+    expect(r.remote).toEqual({
+      home: '/Users/k', remoteRoot: '/Users/k/cf-remote/h1', user: 'k', logname: 'k', shell: '/bin/zsh',
+      tmpdir: '/var/folders/xy/T/', lang: 'en_US.UTF-8', nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git',
+      codexPath: '/opt/homebrew/bin/codex', arch: 'arm64', socketPathOk: true,
+    });
+  });
+
+  it('records no remote facts for an unreachable, incomplete or cancelled run', async () => {
+    const unreachable = await runSshPreflight(ctx(fakeTransport({ exec: async () => ok({ code: 255 }) })), 'full');
+    expect(unreachable.remote).toBeUndefined();
+    const partial = await runSshPreflight(
+      ctx(fakeTransport({ runScript: async () => ok({ code: 255, stdout: HEALTHY.replace('probe_done=1', '') }) })),
+      'full',
+    );
+    expect(partial.remote).toBeUndefined();
+    const ac = new AbortController();
+    const cancelled = await runSshPreflight(
+      ctx(fakeTransport({ runScript: async () => { ac.abort(); return ok({ stdout: HEALTHY }); } })),
+      'full',
+      undefined,
+      ac.signal,
+    );
+    expect(cancelled.remote).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(unreachable, 'remote')).toBe(false);
+  });
+
   it('runs the probe against the configured remote root', async () => {
     const tr = fakeTransport();
     await runSshPreflight(ctx(tr, { remoteRoot: '~/cf-remote/zz' }), 'prelaunch');
     expect(tr.runScript.mock.calls[0][1]).toContain(`root="$HOME"/'cf-remote/zz'`);
+  });
+});
+
+describe('remoteFactsFrom', () => {
+  const probe = (extra: string) => parseProbeOutput(`${HEALTHY}\n${extra}`);
+
+  it('expands a ~ root against the probed home (a trailing slash on $HOME does not double up)', () => {
+    const p = parseProbeOutput(HEALTHY.replace('home=/Users/k', 'home=/Users/k/'));
+    expect(remoteFactsFrom(p, '~/cf-remote/h1')?.remoteRoot).toBe('/Users/k/cf-remote/h1');
+    expect(remoteFactsFrom(p, '/srv/cf/')?.remoteRoot).toBe('/srv/cf');
+  });
+
+  it('is undefined without a home, or when the root cannot be made absolute', () => {
+    expect(remoteFactsFrom(parseProbeOutput(HEALTHY.replace('home=/Users/k', 'home=')), '~/cf-remote/h1')).toBeUndefined();
+    expect(remoteFactsFrom(parseProbeOutput(HEALTHY.replace('remote_root=/Users/k/cf-remote/h1', 'remote_root=rel')), 'rel')).toBeUndefined();
+  });
+
+  it('flags a socket path that would not fit (local length check and the probe byte count)', () => {
+    const long = `/${'d'.repeat(95)}`;
+    expect(remoteFactsFrom(probe(''), long)?.socketPathOk).toBe(false);
+    const p = parseProbeOutput(HEALTHY.replace('sock_path_bytes=32', 'sock_path_bytes=120'));
+    expect(remoteFactsFrom(p, '~/cf-remote/h1')?.socketPathOk).toBe(false);
+    expect(remoteFactsFrom(probe(''), '~/cf-remote/h1')?.socketPathOk).toBe(true);
+  });
+
+  it('keeps unreported tool paths null', () => {
+    const p = parseProbeOutput('home=/Users/k\nprobe_done=1\n');
+    expect(remoteFactsFrom(p, '~/r')).toEqual({
+      home: '/Users/k', remoteRoot: '/Users/k/r', user: null, logname: null, shell: null, tmpdir: null, lang: null,
+      nodePath: null, gitPath: null, codexPath: null, arch: null, socketPathOk: true,
+    });
   });
 });

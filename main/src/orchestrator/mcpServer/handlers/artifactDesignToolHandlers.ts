@@ -15,6 +15,7 @@ import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { ArtifactError, ArtifactRouter } from '../../artifactRouter';
 import type { ArtifactActor } from '../../artifactRouter';
 import { FeedbackError, FeedbackRouter } from '../../feedbackRouter';
+import { pullRemoteRunArtifacts } from '../../hosts/remoteArtifactPull';
 import {
   ARTIFACT_POLICIES,
   MAX_PROTOTYPE_HTML_BYTES,
@@ -116,6 +117,15 @@ export class ArtifactDesignToolHandlers {
       if (policy === undefined) {
         throw new ArtifactError('invalid_atype', `unknown artifact atype '${msg.atype}' (no policy in the artifact registry)`);
       }
+      // M2 (spec §5 D4): a run on a remote environment wrote its prototype / screenshots THERE. Bring the named
+      // files into this Mac's run artifacts dir before the blesser below (and every reader) looks for them. No-op
+      // for a local run and for a non-file atype; a file missing on the environment fails the report readably.
+      await pullRemoteRunArtifacts(this.db, {
+        runId: msg.runId,
+        atype: msg.atype,
+        payloadJson: msg.payloadJson ?? null,
+        localDir: getCyboflowSubdirectory('artifacts', 'runs', msg.runId),
+      });
       let payloadJson: string | null = msg.payloadJson ?? null;
       if (policy.blessing !== 'none') {
         const parsed = this.parseArtifactPayload(msg.payloadJson);

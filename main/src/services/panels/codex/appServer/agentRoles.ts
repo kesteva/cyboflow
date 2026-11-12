@@ -54,6 +54,7 @@ import type { EffectiveAgent } from '../../../../orchestrator/agents/effectiveAg
 import { providerForRuntime } from '../../../../../../shared/types/agentRuntime';
 import { normalizeEffortSelection } from '../../../../../../shared/types/reasoningEffort';
 import { getCyboflowSubdirectory } from '../../../../utils/cyboflowDirectory';
+import type { MachineFs } from '../../../../orchestrator/trpc/contracts/executionHost';
 
 /**
  * One registered role, exactly as it rides in the thread `config.agents` map.
@@ -248,6 +249,37 @@ export function pruneStaleCodexAgentRoleFiles(
   return removed;
 }
 
+/** One agent's role file, planned: its registered name, content, file NAME and description. */
+interface PlannedRole {
+  role: string;
+  content: string;
+  fileName: string;
+  description: string;
+}
+
+/**
+ * Pure: the content-addressed role file for one agent, or null for a key that is
+ * not a safe filename (warned). Shared by the local and the on-host writers so a
+ * role registers under the same file name on every machine.
+ */
+function planRole(agent: EffectiveAgent, logger?: LoggerLike): PlannedRole | null {
+  if (!AGENT_KEY_PATTERN.test(agent.agentKey)) {
+    logger?.warn(`[CodexAgentRoles] skipping agent with an unsafe key: ${JSON.stringify(agent.agentKey)}`);
+    return null;
+  }
+  const content = renderCodexAgentRoleToml(agent);
+  const digest = createHash('sha256').update(content).digest('hex').slice(0, 16);
+  // A blank description would still register, but Codex advertises it in the
+  // spawn_agent tool text — give the orchestrator something to choose by.
+  const description = typeof agent.description === 'string' ? agent.description.trim() : '';
+  return {
+    role: `${ROLE_PREFIX}${agent.agentKey}`,
+    content,
+    fileName: `${ROLE_PREFIX}${agent.agentKey}-${digest}.toml`,
+    description: description.length > 0 ? description : `Cyboflow ${agent.agentKey} role`,
+  };
+}
+
 /**
  * Materialize every agent as a role file under `rolesDir` and return the
  * thread-config `agents` map for the ones that landed. An agent whose file cannot
@@ -283,24 +315,102 @@ export function materializeCodexAgentRoles(
 
   for (const agent of agents) {
     try {
-      if (!AGENT_KEY_PATTERN.test(agent.agentKey)) {
-        logger?.warn(`[CodexAgentRoles] skipping agent with an unsafe key: ${JSON.stringify(agent.agentKey)}`);
-        continue;
-      }
-      const content = renderCodexAgentRoleToml(agent);
-      const digest = createHash('sha256').update(content).digest('hex').slice(0, 16);
-      const file = path.join(dir, `${ROLE_PREFIX}${agent.agentKey}-${digest}.toml`);
-      ensureRoleFile(file, content);
-      // A blank description would still register, but Codex advertises it in the
-      // spawn_agent tool text — give the orchestrator something to choose by.
-      const description = typeof agent.description === 'string' ? agent.description.trim() : '';
-      roles[`${ROLE_PREFIX}${agent.agentKey}`] = {
-        description: description.length > 0 ? description : `Cyboflow ${agent.agentKey} role`,
-        config_file: file,
-      };
+      const planned = planRole(agent, logger);
+      if (planned === null) continue;
+      const file = path.join(dir, planned.fileName);
+      ensureRoleFile(file, planned.content);
+      roles[planned.role] = { description: planned.description, config_file: file };
     } catch (err) {
       logger?.warn(
         `[CodexAgentRoles] could not materialize role ${ROLE_PREFIX}${agent.agentKey}; omitting it: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return roles;
+}
+
+/** `<remoteRoot>/codex/agent-roles` — where a remote machine's role files live (POSIX, absolute). */
+export function remoteCodexAgentRolesDir(remoteRoot: string): string {
+  return `${remoteRoot.replace(/\/+$/, '')}/codex/agent-roles`;
+}
+
+/** Where (and through what) {@link materializeCodexAgentRolesOnHost} writes. */
+export interface CodexAgentRoleHostTarget {
+  hostId: string;
+  /** ABSOLUTE POSIX directory on that machine (remoteCodexAgentRolesDir). */
+  rolesDir: string;
+  /** The machine's fs (ExecutionHost.fs): writeFile is atomic there (temp file + rename). */
+  fs: Pick<MachineFs, 'mkdirp' | 'writeFile'>;
+  /**
+   * The host's generation (RemoteRuntimeSession.generation; default 0) — part of
+   * every `written` key, so an address change or an archive invalidates them.
+   */
+  generation?: number;
+  /**
+   * `<hostId>\0<generation>\0<file>` keys already written this app session —
+   * skipped, and added to on a successful write. The files are content-addressed,
+   * so a key that was written once (to that machine) still holds exactly that
+   * content.
+   */
+  written?: Set<string>;
+}
+
+/**
+ * The SSH-environment twin of {@link materializeCodexAgentRoles}: the SAME
+ * rendered TOML under the SAME content-addressed file name, written on the
+ * machine the app-server runs on (mode 0600) and registered by its REMOTE
+ * absolute path — Codex reads `config_file` lazily on that machine, so the file
+ * must exist there before thread/start. Fail-soft exactly like the local writer:
+ * a role that cannot be written is warned about and omitted; never throws. No
+ * pruning on the remote (files are small and content-addressed).
+ */
+export async function materializeCodexAgentRolesOnHost(
+  agents: readonly EffectiveAgent[],
+  target: CodexAgentRoleHostTarget,
+  logger?: LoggerLike,
+): Promise<CodexAgentRoles> {
+  const roles: CodexAgentRoles = {};
+  if (agents.length === 0) return roles;
+  const dir = target.rolesDir.replace(/\/+$/, '');
+  if (!dir.startsWith('/')) {
+    logger?.warn('[CodexAgentRoles] the remote roles directory is not absolute; registering no roles');
+    return roles;
+  }
+  const planned: PlannedRole[] = [];
+  for (const agent of agents) {
+    try {
+      const p = planRole(agent, logger);
+      if (p !== null) planned.push(p);
+    } catch (err) {
+      logger?.warn(
+        `[CodexAgentRoles] could not render role ${ROLE_PREFIX}${agent.agentKey}; omitting it: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (planned.length === 0) return roles;
+
+  const key = (file: string): string => `${target.hostId}\0${target.generation ?? 0}\0${file}`;
+  if (planned.some((p) => !target.written?.has(key(`${dir}/${p.fileName}`)))) {
+    try {
+      await target.fs.mkdirp({ hostId: target.hostId, path: dir });
+    } catch (err) {
+      logger?.warn(
+        `[CodexAgentRoles] could not create the roles directory on the environment; registering no roles: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return roles;
+    }
+  }
+  for (const p of planned) {
+    const file = `${dir}/${p.fileName}`;
+    try {
+      if (!target.written?.has(key(file))) {
+        await target.fs.writeFile({ hostId: target.hostId, path: file }, p.content, 0o600);
+        target.written?.add(key(file));
+      }
+      roles[p.role] = { description: p.description, config_file: file };
+    } catch (err) {
+      logger?.warn(
+        `[CodexAgentRoles] could not write role ${p.role} on the environment; omitting it: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

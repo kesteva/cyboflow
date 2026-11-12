@@ -29,6 +29,10 @@ function recordingTransport(result: Partial<ExecResult> = {}) {
     },
     runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     closeMaster: () => undefined,
+    controlArgs: () => [],
+    spawnStreaming: () => { throw new Error('not used'); },
+    openForward: () => { throw new Error('not used'); },
+    pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
   };
   return { transport, calls };
 }
@@ -131,6 +135,10 @@ describe.skipIf(!posix)('SshHost programs run by a local /bin/sh loopback (no ss
         spawnCapture('/bin/sh', ['-c', quoteRemoteArgv(argv)], { env, timeoutMs: 10_000, stdin: opts?.stdin }),
       runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
       closeMaster: () => undefined,
+      controlArgs: () => [],
+      spawnStreaming: () => { throw new Error('not used'); },
+      openForward: () => { throw new Error('not used'); },
+      pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     };
     const h = host(loopback);
     const dir = { hostId: 'h1', path: "~/cf remote/it's" };
@@ -144,5 +152,58 @@ describe.skipIf(!posix)('SshHost programs run by a local /bin/sh loopback (no ss
     expect(readFileSync(local, 'utf8')).toBe('hello world');
     expect(statSync(local).mode & 0o777).toBe(0o600);
     await expect(h.fs.readFile({ hostId: 'h1', path: '~/missing' })).rejects.toBeInstanceOf(RemoteOperationError);
+  });
+});
+
+describe('SshHost.preflight extras', () => {
+  const TC_HASH = 'f'.repeat(64);
+  const probeOut = [
+    'home=/Users/k', 'uname_s=Darwin', 'uname_m=arm64', 'node_path=/opt/homebrew/bin/node', 'node_version=v22.1.0',
+    `tc_hash=${TC_HASH}`, 'tc_manifest=0', 'probe_done=1',
+  ].join('\n');
+
+  function probingTransport(scripts: string[]): SshTransportLike {
+    const { transport } = recordingTransport();
+    return {
+      ...transport,
+      exec: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
+      runScript: async (_t, script) => {
+        scripts.push(script);
+        return { code: 0, stdout: probeOut, stderr: '', timedOut: false };
+      },
+    };
+  }
+
+  it('runs with the per-mode extras (expected toolchain in the probe, link handle)', async () => {
+    const scripts: string[] = [];
+    const extras = vi.fn(async () => ({
+      toolchain: {
+        archHint: 'arm64',
+        expectedFor: async () => ({ expectedHash: TC_HASH, files: [], codexIncluded: false, unavailableReason: null }),
+      },
+    }));
+    const h = new SshHost({
+      id: 'h1', label: 'Box', sshTarget: 'box', remoteRoot: '~/cf-remote/h1', appVersion: '1.0.0',
+      transport: probingTransport(scripts), localExists: () => false, preflightExtras: extras,
+    });
+    const r = await h.preflight('full');
+    expect(extras).toHaveBeenCalledWith('full');
+    expect(scripts[0]).toContain(`tc_h='${TC_HASH}'`);
+    expect(r.results.find((c) => c.id === 'sdk-binary-hash')).toMatchObject({ status: 'warn', detail: 'Not installed' });
+  });
+
+  it('a rejecting extras provider degrades to the M1 checks instead of throwing', async () => {
+    const scripts: string[] = [];
+    const warn = vi.fn();
+    const h = new SshHost({
+      id: 'h1', label: 'Box', sshTarget: 'box', remoteRoot: '~/cf-remote/h1', appVersion: '1.0.0',
+      transport: probingTransport(scripts), localExists: () => false,
+      preflightExtras: async () => { throw new Error('boom'); },
+      logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    });
+    const r = await h.preflight('full');
+    expect(r.results.find((c) => c.id === 'sdk-binary-hash')?.status).toBe('skipped');
+    expect(scripts[0]).not.toContain('tc_h=');
+    expect(warn).toHaveBeenCalled();
   });
 });

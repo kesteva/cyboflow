@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import { app } from 'electron';
 import { loadSdkQuery } from '../../../utils/lazyAgentSdk';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
@@ -71,6 +71,9 @@ import type { FastModeState, FastModeStateNotice, QueuedPanelInput } from '../..
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
+import { firstChangedFingerprintField, foldOptionsFingerprint, type OptionsFingerprint } from './claudeOptionsFingerprint';
+import { installRemoteWorkflowBundle, loadRemoteSpawnPermissionRules, prepareRemoteClaudeSpawn, releaseUnadoptedLease, remoteBundleTarget, remoteClaudeMcpServers, remoteClaudeRunEnv, remoteClaudeSdkOptions, removeRemoteWorkflowBundle, resolveClaudeSpawnHostId, type RemoteBundleTarget, type RemoteLease, type RemoteRuntimeSession } from '../../hosts/remoteClaudeSpawn';
+import { PendingRemotePreps, type PendingRemotePrep } from '../remotePrepCancel';
 
 /**
  * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
@@ -562,11 +565,6 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-/** SHA-1 hex of a string — a bounded, stable fingerprint digest (not for crypto). */
-function sha1(input: string): string {
-  return createHash('sha1').update(input).digest('hex');
-}
-
 /**
  * Recursively freeze a plain JSON value (object/array + nested), returning it.
  * Used by the F14 MCP-config parse cache so a cached parsed value can never be
@@ -582,38 +580,6 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
-}
-
-/**
- * Recursively sort object keys and drop functions so structurally-equal values
- * serialize identically regardless of key insertion order (composeMcpServers etc.
- * build records in a non-deterministic order). Used for the options fingerprint.
- */
-function canonicalize(value: unknown): unknown {
-  if (value === null || typeof value !== 'object') {
-    return typeof value === 'function' ? null : value;
-  }
-  if (Array.isArray(value)) return value.map(canonicalize);
-  const record = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(record).sort()) {
-    if (typeof record[key] === 'function') continue;
-    out[key] = canonicalize(record[key]);
-  }
-  return out;
-}
-
-/** Stable JSON of a value with sorted keys — the fingerprint's per-field input. */
-function stableSerialize(value: unknown): string {
-  return JSON.stringify(canonicalize(value)) ?? 'null';
-}
-
-/** Name the first fingerprint field whose hash differs (for the cold-respawn reason). */
-function firstChangedFingerprintField(prev: OptionsFingerprint, next: OptionsFingerprint): string {
-  for (const key of Object.keys(next.fields).sort()) {
-    if (prev.fields[key] !== next.fields[key]) return key;
-  }
-  return 'combined';
 }
 
 /** Cache for the Design Mode v0 first-turn prompt (read once per process). */
@@ -885,19 +851,8 @@ export interface ClaudeSpawnOptions extends LaneSpawnEnv {
    * over it.
    */
   disallowedTools?: string[];
-}
-
-/**
- * A per-field hash of the spawn-baked MUTABLE SDK inputs (model, betas, settings
- * overlay, composed mcpServers, deny guards, systemPrompt, env, permissionMode,
- * merged permission allowRules) plus a `combined` digest. Warm reuse requires a
- * `combined` match; a mismatch is diffed field-by-field to name the changed input
- * for the cold-respawn reason. Everything a warm turn cannot mutate live (the v1
- * choice is respawn, not SDK mutators) lives here.
- */
-interface OptionsFingerprint {
-  combined: string;
-  fields: Readonly<Record<string, string>>;
+  /** M2: the environment ('local' = This Mac); null/absent = from the run/session rows (remoteClaudeSpawn.ts). */
+  hostId?: string | null;
 }
 
 /**
@@ -1041,6 +996,8 @@ interface ClaudeSdkRun {
    * each turn boundary (the driver stashes it just before, for the abort check).
    */
   steeredThisTurn: boolean;
+  /** M2: the environment session (orch-link lease) this process owns; released at process death. Null = This Mac. */
+  remote: RemoteRuntimeSession | null;
 }
 
 /** Stub CliProcess shape that satisfies AbstractCliManager's processes map. */
@@ -1108,6 +1065,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * programmatic fan-out lane, else === panelId). One entry per concurrent lane.
    */
   private readonly sdkRuns = new Map<string, ClaudeSdkRun>();
+
+  /** Remote spawns still preparing their environment (B3: a stop there finds no sdkRuns record). */
+  private readonly remotePreps = new PendingRemotePreps();
 
   /**
    * Why a warm session for a spawnKey last closed WITHOUT the caller respawning it
@@ -1237,6 +1197,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * written).
    */
   private readonly bundleWorktrees = new Map<string, string>();
+  /** M2: a REMOTE session's bundle target (host port + remote worktree), so teardown strips it on the environment. */
+  private readonly remoteBundleTargets = new Map<string, RemoteBundleTarget>();
 
   /**
    * Per-sessionId refcount of live spawns that provisioned the cyboflow-* command
@@ -1369,7 +1331,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       return;
     }
     this.bundleRefcountBySession.delete(sessionId);
-    this.bundleWriter.remove(worktreePath);
+    const remoteTarget = this.remoteBundleTargets.get(sessionId);
+    this.remoteBundleTargets.delete(sessionId);
+    // M2: a remote bundle is stripped through the environment's fs (queued behind any in-flight install; never rejects).
+    if (remoteTarget !== undefined) void removeRemoteWorkflowBundle(this.bundleWriter, remoteTarget, makeLoggerLike(this.logger));
+    else this.bundleWriter.remove(worktreePath);
     this.bundleWorktrees.delete(sessionId);
   }
 
@@ -1422,7 +1388,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // withLock now scopes ONE TURN (cold spawn OR warm push → that turn's result),
     // NOT the whole process lifetime — the background for-await loop of a warm
     // session runs OUTSIDE the lock, so the next turn's lock acquisition is not
-    // blocked by the still-alive query().
+    // blocked by the still-alive query(). M2: an unadopted remote lease (warm push / early throw) is released after.
+    const remoteLease: RemoteLease = { session: null, adopted: false };
+    let prep: PendingRemotePrep | null = null; // registered only for a remote host
     return await withLock(`claude-spawn-${spawnKey}`, async () => {
       const { panelId, sessionId, isResume } = effectiveOptions;
 
@@ -1512,9 +1480,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // the two otherwise each re-read the same three settings files. NOT cached
       // across turns (a revoked allow-rule must take effect on the very next turn),
       // and the interactive MCP approval path keeps reading fresh per call.
-      const permissionRules = this.loadSpawnPermissionRules(options.worktreePath);
-      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules);
-      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId, permissionRules);
+      // M2: null host = This Mac (unchanged); a remote host prepares (gates, orch link, token file) or fails readably.
+      const hostId = resolveClaudeSpawnHostId(this.db, { hostId: options.hostId, sessionHostId: sessionRow?.host_id, runId, sessionId }, makeLoggerLike(this.logger));
+      if (hostId !== null) prep = this.remotePreps.begin(spawnKey, displayPanelId, runId); // runId: Merge / Dismiss stop a quick session by its chat run id
+      const remote = (remoteLease.session = hostId === null ? null : await prepareRemoteClaudeSpawn(hostId, { runId, spawnKey }, makeLoggerLike(this.logger)));
+      const permissionRules = remote === null ? this.loadSpawnPermissionRules(options.worktreePath) : await loadRemoteSpawnPermissionRules(remote, options.worktreePath, makeLoggerLike(this.logger));
+      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules, remote);
+      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId, permissionRules, hostId, remote?.generation ?? null);
+      if (prep?.cancelled) return this.abandonCancelledPrep(displayPanelId, sessionId);
 
       // Warm-session tri-state (non-lane only). A live warm-idle session for this
       // spawnKey that is a resume-continuation of the SAME conversation and whose
@@ -1562,6 +1535,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (this.processes.has(spawnKey)) {
         throw new Error(`Claude process already running for spawn ${spawnKey}`);
       }
+      if (remote !== null) await remote.fence?.(); // M2 F1: kill this spawnKey's orphans on the environment (bounded, never throws)
 
       // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
       // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
@@ -1580,7 +1554,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // The refcount is bumped ONCE per COLD spawn (the warm process's whole
       // lifetime), decremented once at process-death by removeBundleForSession — a
       // warm turn re-writes the bundle (driveWarmTurn) but does NOT re-bump.
-      if (!dbSession?.in_place) {
+      if (remote !== null && !dbSession?.in_place) {
+        // M2: the same bundle + overlay, placed in the REMOTE worktree through the environment's fs and awaited so the
+        // remote CLI discovers them at start (no local git exclude: remoteCheckout seeded the bare repo's).
+        // The refcount is claimed BEFORE the await: a sibling lane tearing down meanwhile must see this spawn as live,
+        // or it drops the count to 0 and strips the bundle being installed. A throw releases the claim.
+        const target = remoteBundleTarget(remote, options.worktreePath);
+        this.remoteBundleTargets.set(sessionId, target);
+        this.bundleWorktrees.set(sessionId, options.worktreePath);
+        this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+        await installRemoteWorkflowBundle(this.db, this.bundleWriter, runId, target, makeLoggerLike(this.logger))
+          .catch((err: unknown) => { this.removeBundleForSession(sessionId); throw err; });
+      } else if (remote === null && !dbSession?.in_place) {
         // 'prose' EXPLICITLY: this install seam is substrate-shared, but the SDK
         // path composes its prompt through workflowPromptReaderAdapter (which
         // never emits the workflow-dispatch chain), so stage scripts written
@@ -1596,6 +1581,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         );
         this.bundleWorktrees.set(sessionId, options.worktreePath);
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+      }
+      if (prep?.cancelled) {
+        if (!dbSession?.in_place) this.removeBundleForSession(sessionId); // the remote install's refcount claim
+        return this.abandonCancelledPrep(displayPanelId, sessionId);
       }
 
       // Set up the per-run pipeline (EventRouter + events sink). S0.2(c): a
@@ -1630,7 +1619,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // waits for the last lane (cleanupPipeline decrements / detaches on 1→0).
       const priorRefcount = this.trackerRefcountByRunId.get(runId) ?? 0;
       this.trackerRefcountByRunId.set(runId, priorRefcount + 1);
-      if (priorRefcount === 0) {
+      // Remote: no attach — the tracker reads the CLI's transcripts under THIS Mac's ~/.claude/projects, but a remote
+      // CLI writes them on the environment (and the SDK prose dispatch renders no stage scripts to watch).
+      if (priorRefcount === 0 && remote === null) {
         // worktreePath explicitly (see the interactive sibling): a flow run has no
         // `sessions` row, so the tracker's sessions-keyed fallback resolves nothing.
         DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, {
@@ -1701,8 +1692,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
               parkSeq: 0,
             }
           : null,
+        remote,
       };
       this.sdkRuns.set(spawnKey, run);
+      remoteLease.adopted = true; // the record owns the remote session from here
 
       const iteratorDone = this.runSdkQuery(
         spawnKey,
@@ -1755,8 +1748,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // turn (resultSuccessText left it null) or when the CLI emitted no result
       // text.
       return { resultText: firstTurn.resultText };
+    }).finally(() => {
+      releaseUnadoptedLease(remoteLease);
+      if (prep !== null) this.remotePreps.end(spawnKey, prep);
     });
   }
+
+  /** B3: stopped while preparing. Start nothing (the finally releases the lease); settle like an aborted turn. */
+  private abandonCancelledPrep(displayPanelId: string, sessionId: string): CliSpawnOutcome {
+    this.logger?.info(`[ClaudeCodeManager] remote spawn for panel ${displayPanelId} stopped while preparing the environment`);
+    this.emit('exit', { panelId: displayPanelId, sessionId, exitCode: 0, signal: null });
+    return { resultText: null };
+  }
+
 
   /**
    * Emit the per-turn 'spawned' + session_info descriptor. Both fire once per
@@ -2389,6 +2393,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       this.processes.delete(spawnKey);
       this.sdkRuns.delete(spawnKey);
       this.forgetSpawnKey(runId, spawnKey);
+      run.remote?.release(); // M2: this process's orch-link lease (idempotent)
 
       // If a turn was still in flight when the process died (abort mid-turn, thrown
       // error, or a graceful close before a result), settle it here: emit its
@@ -2665,6 +2670,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     worktreePath: string,
     runId: string,
     permissionRules?: MergedPermissionRules,
+    hostId: string | null = null,
+    hostGeneration: number | null = null,
   ): OptionsFingerprint {
     // F13: reuse the per-spawn snapshot the hook construction already loaded (when
     // spawnCliProcess passed it) so a single spawn reads the settings files once;
@@ -2702,18 +2709,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       tools: sdkOptions.tools ?? null,
       settingSources: sdkOptions.settingSources ?? null,
       allowedTools: sdkOptions.allowedTools ?? null,
+      // M2: never reuse a warm process across machines/dirs — nor across an edited SSH target (the host generation).
+      host: hostId === null ? 'local' : { id: hostId, generation: hostGeneration }, cwd: sdkOptions.cwd ?? null,
     };
-    const fields: Record<string, string> = {};
-    for (const [key, value] of Object.entries(material)) {
-      fields[key] = sha1(stableSerialize(value));
-    }
-    const combined = sha1(
-      Object.keys(fields)
-        .sort()
-        .map((k) => `${k}=${fields[k]}`)
-        .join('&'),
-    );
-    return { combined, fields };
+    return foldOptionsFingerprint(material);
   }
 
   /**
@@ -3004,7 +3003,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private async buildSdkOptions(
     options: ClaudeSpawnOptions,
     permissionRules?: MergedPermissionRules,
+    remote: RemoteRuntimeSession | null = null, // M2: cwd stays the stored (remote) worktree; MCP/env/binary go remote
   ): Promise<Options> {
+    const remoteInputs = { runKey: options.runId || options.sessionId, cwd: options.worktreePath, mcpScope: options.mcpScope, laneEnv: options.laneEnv, verbose: this.configManager?.getConfig()?.verbose, logger: makeLoggerLike(this.logger) };
     const sdkOptions: Options = {
       cwd: options.worktreePath,
       includePartialMessages: true,
@@ -3013,8 +3014,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
         preset: 'claude_code',
         append: this.composeSystemPromptAppend(options) ?? undefined,
       },
-      mcpServers: await this.composeMcpServers(options),
-      env: await this.composeRunEnv(options),
+      mcpServers: remote ? remoteClaudeMcpServers(remote, remoteInputs) : await this.composeMcpServers(options),
+      env: remote ? remoteClaudeRunEnv(remote, remoteInputs) : await this.composeRunEnv(options),
       // S0.2(a): a global-agent isolation spawn loads NO user/project settings —
       // no inherited MCP servers, plugins, or permission `allow` rules. Every
       // other spawn keeps the ['user','project'] sources it always had.
@@ -3074,8 +3075,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // fails with ENOTDIR — the claude subprocess never starts and query() yields
     // no output. Point the SDK at the asar-UNPACKED copy explicitly. Returns
     // undefined in dev (SDK resolves correctly), leaving this unset.
-    const claudeExecutable = resolveClaudeExecutablePath();
-    if (claudeExecutable) {
+    const claudeExecutable = remote ? undefined : resolveClaudeExecutablePath();
+    if (remote) Object.assign(sdkOptions, remoteClaudeSdkOptions(remote, remoteInputs)); // remote binary + spawner
+    else if (claudeExecutable) {
       sdkOptions.pathToClaudeCodeExecutable = claudeExecutable;
       this.logger?.info(`[ClaudeCodeManager] Using packaged claude executable: ${claudeExecutable}`);
     } else if (app.isPackaged) {
@@ -4040,6 +4042,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * fall through to the EXISTING single-abort path, byte-identical.
    */
   override async killProcess(panelId: string): Promise<void> {
+    this.remotePreps.cancel(panelId);
     if (this.spawnKeysByRunId.has(panelId)) {
       await this.killRun(panelId);
       return;
@@ -4064,6 +4067,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * teardown (forgetSpawnKey) mutates it.
    */
   async killRun(runId: string): Promise<void> {
+    this.remotePreps.cancel(runId);
     const keySet = this.spawnKeysByRunId.get(runId);
     if (keySet === undefined || keySet.size === 0) return;
     const spawnKeys = Array.from(keySet);
@@ -4287,6 +4291,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
     await this.killProcess(panelId);
   }
 
+  /** The base sweep only sees `processes`; a spawn still preparing its environment has no entry there yet. */
+  override async killAllProcesses(): Promise<void> {
+    this.remotePreps.cancel(null);
+    await super.killAllProcesses();
+  }
+
   /**
    * SDK override of the base PTY sendInput. The base writes to `cliProcess.process`
    * — which is `undefined as never` on the SDK stub — so it would crash the moment
@@ -4348,6 +4358,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * No-op when idle. Keyed by panelId (quick-session spawnKey === panelId).
    */
   async abortInFlightTurn(panelId: string): Promise<void> {
+    this.remotePreps.cancel(panelId);
     if (!this.isPanelTurnInFlight(panelId)) return;
     await this.abortCurrentRun(panelId);
     this.processes.delete(panelId);

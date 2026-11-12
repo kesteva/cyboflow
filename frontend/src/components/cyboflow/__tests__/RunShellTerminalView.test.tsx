@@ -106,3 +106,23 @@ describe('RunShellTerminalView exit push', () => {
     expect(runs.shellBacklog).toHaveBeenCalledWith({ terminalId: 'run-1' });
   });
 });
+
+describe('RunShellTerminalView on a remote environment (M2)', () => {
+  it('shows the remote refusal and points at the environment card, without retrying', async () => {
+    const open = vi.fn(async () => ({ ok: false, reason: 'remote' }));
+    const api: ShellTerminalApi = {
+      open,
+      input: async () => ({ ok: true }),
+      resize: async () => ({ ok: true }),
+      backlog: async () => ({ backlog: '', exited: false, exitCode: null }),
+    };
+    render(<RunShellTerminalView runId="run-r" terminalId="run-r" api={api} />);
+    await waitFor(() =>
+      expect(
+        screen.getByText('Not available on remote environments. Use Open terminal on the environment card.'),
+      ).toBeInTheDocument(),
+    );
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+});
+

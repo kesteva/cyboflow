@@ -29,7 +29,7 @@ vi.mock('@homebridge/node-pty-prebuilt-multiarch', () => ({
   },
 }));
 
-import { composeHosts, type HostsComposition } from '../hostsComposition';
+import { composeHosts, defaultOrchSocketPath, type HostsComposition } from '../hostsComposition';
 import { dbAdapter } from '../orchestrator/__test_fixtures__/dbAdapter';
 import {
   _resetHostsFacadeForTesting,
@@ -39,6 +39,12 @@ import {
   peekHostsFacade,
 } from '../orchestrator/hostsBridge';
 import { HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../services/hosts/flags';
+import type { HostsServiceDeps } from '../services/hosts/hostsService';
+import { getRemoteRuntime, setRemoteRuntime } from '../services/hosts/remoteRuntimeBridge';
+import { getRemoteCheckout, setRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
+import { getMergeBackService, setMergeBackService } from '../services/hosts/mergeBack/mergeBackBridge';
+import { sprintLaneChannel, sprintLaneEvents } from '../orchestrator/sprintLaneStore';
+import { runStatusEvents } from '../orchestrator/trpc/routers/events';
 import type { HostsChangedEvent } from '../../../shared/types/hosts';
 import type { LoggerLike } from '../orchestrator/types';
 
@@ -112,6 +118,9 @@ afterEach(() => {
   comp.stop();
   hostEvents.off(HOSTS_CHANNEL, onEvent);
   _resetHostsFacadeForTesting();
+  setRemoteRuntime(null);
+  setRemoteCheckout(null);
+  setMergeBackService(null);
   raw.close();
   vi.unstubAllEnvs();
 });
@@ -220,5 +229,145 @@ describe('composeHosts', () => {
     } finally {
       hostEvents.off(hostTerminalChannel(terminalId), onExit);
     }
+  });
+});
+
+describe('composeHosts remote runtime bridge', () => {
+  it('publishes the remote runtime at start() and clears it at stop()', () => {
+    expect(getRemoteRuntime()).toBeNull();
+    comp.start();
+    expect(getRemoteRuntime()).toBe(comp.remoteRuntime);
+    comp.stop();
+    expect(getRemoteRuntime()).toBeNull();
+    comp.start();
+    expect(getRemoteRuntime()).toBe(comp.remoteRuntime);
+  });
+
+  it('stop() leaves a runtime it did not publish in place', () => {
+    comp.start();
+    const other = { resolveHostId: () => null, prepare: () => Promise.reject(new Error('x')), removeRunToken: async () => undefined };
+    setRemoteRuntime(other);
+    comp.stop();
+    expect(getRemoteRuntime()).toBe(other);
+  });
+
+  it('the composed runtime resolves hosts from the db and gates prepare on the live service', async () => {
+    expect(comp.remoteRuntime.resolveHostId({ hostId: 'local' })).toBeNull();
+    expect(comp.remoteRuntime.resolveHostId({ hostId: 'h1' })).toBe('h1');
+    config.enabled = false;
+    await expect(comp.remoteRuntime.prepare('h1', { runId: 'r1', spawnKey: 'r1' })).rejects.toThrow(/turned off/);
+  });
+});
+
+describe('composeHosts remote process cleanup (Phase F)', () => {
+  it('the service\'s run-folder pass goes through the composed runtime', async () => {
+    const gc = vi.spyOn(comp.remoteRuntime, 'gcRunDir').mockResolvedValue(null);
+    const deps = (comp.service as unknown as { deps: Pick<HostsServiceDeps, 'runDirGc'> }).deps;
+    expect(deps.runDirGc).toBeTypeOf('function');
+    await deps.runDirGc?.('h1', '/Users/me/cf-remote');
+    expect(gc).toHaveBeenCalledWith('h1', '/Users/me/cf-remote');
+  });
+
+  it('drain() kills the remote processes through the service', async () => {
+    const drain = vi.spyOn(comp.service, 'drainRemoteProcesses').mockResolvedValue(undefined);
+    await comp.drain();
+    expect(drain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('composeHosts remote checkout bridge', () => {
+  it('publishes the remote checkout at start() and clears it at stop(), leaving a foreign one in place', () => {
+    expect(getRemoteCheckout()).toBeNull();
+    comp.start();
+    expect(getRemoteCheckout()).toBe(comp.remoteCheckout);
+    comp.stop();
+    expect(getRemoteCheckout()).toBeNull();
+    comp.start();
+    const other = { ...comp.remoteCheckout } as typeof comp.remoteCheckout;
+    setRemoteCheckout(other);
+    comp.stop();
+    expect(getRemoteCheckout()).toBe(other);
+  });
+
+  it('the composed checkout gates on the live service and reads hosts from the store', async () => {
+    insertHost();
+    config.enabled = false;
+    await expect(comp.remoteCheckout.worktreeExists('h1', 'k')).rejects.toThrow(/turned off/);
+    config.enabled = true;
+    // h1 has no completed check, so there is no remote root to name a path under.
+    expect(() => comp.remoteCheckout.plannedWorktreePath('h1', 'k')).toThrow(/no completed check/);
+    expect(() => comp.remoteCheckout.plannedWorktreePath('nope', 'k')).toThrow();
+  });
+});
+
+describe('composeHosts merge-back', () => {
+  const lane = (runId: string, status: string) => ({ runId, batchId: 'b', taskId: 't', status, currentStepId: null, attempts: 1, visualVerification: null, timestamp: 'now' });
+
+  it('publishes the merge-back service at start() and clears it at stop(), leaving a foreign one in place', () => {
+    expect(getMergeBackService()).toBeNull();
+    comp.start();
+    expect(getMergeBackService()).toBe(comp.mergeBack);
+    comp.stop();
+    expect(getMergeBackService()).toBeNull();
+    comp.start();
+    const other = { ...comp.mergeBack } as typeof comp.mergeBack;
+    setMergeBackService(other);
+    comp.stop();
+    expect(getMergeBackService()).toBe(other);
+  });
+
+  it('checkpoints: watches live remote runs (seeded + followed), asks on integrated only, unwatches on terminal / stop', () => {
+    // 152 added workflow_runs.host_id (FK to hosts); session_id comes from the real schema.
+    insertHost();
+    raw.exec(`ALTER TABLE workflow_runs ADD COLUMN session_id TEXT;
+              INSERT INTO workflow_runs (id, status, host_id, session_id) VALUES
+                ('r1', 'running', 'h1', 's1'), ('r0', 'running', NULL, 's0'), ('rL', 'running', 'local', 'sL'),
+                ('rT', 'completed', 'h1', 'sT');`);
+    const asked: string[] = [];
+    vi.spyOn(comp.mergeBack, 'requestCheckpoint').mockImplementation(async (sessionId: string) => { asked.push(sessionId); });
+    comp.start();
+    for (const runId of ['r1', 'r0', 'rL', 'rT']) sprintLaneEvents.emit(sprintLaneChannel(runId), lane(runId, 'integrated'));
+    sprintLaneEvents.emit(sprintLaneChannel('r1'), lane('r1', 'running'));
+    expect(asked).toEqual(['s1']);
+
+    runStatusEvents.emit('changed', { runId: 'r1', status: 'completed' });
+    sprintLaneEvents.emit(sprintLaneChannel('r1'), lane('r1', 'integrated'));
+    expect(asked).toEqual(['s1']);
+
+    raw.exec(`INSERT INTO workflow_runs (id, status, host_id, session_id) VALUES ('r2', 'starting', 'h1', 's2')`);
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(1);
+    sprintLaneEvents.emit(sprintLaneChannel('r2'), lane('r2', 'integrated'));
+    expect(asked).toEqual(['s1', 's2']);
+
+    comp.stop();
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(0);
+    runStatusEvents.emit('changed', { runId: 'r2', status: 'running' });
+    expect(sprintLaneEvents.listenerCount(sprintLaneChannel('r2'))).toBe(0);
+  });
+
+  it('an archived session (abandoned → cleaned) gets its local half cleaned', async () => {
+    raw.exec(readFileSync(join(__dirname, '..', 'database', 'migrations', '153_session_merge_backs.sql'), 'utf-8'));
+    raw.exec(`INSERT INTO projects (id, name) VALUES (1, 'p'); INSERT INTO sessions (id) VALUES ('s1');`);
+    insertHost();
+    const local = vi.spyOn(comp.mergeBack, 'cleanupLocal').mockResolvedValue(true);
+    await comp.mergeBackStore.create({ sessionId: 's1', hostId: 'h1', projectId: 1, mergeKey: 'k', branch: 'k', state: 'remote_ready' });
+    await comp.mergeBackStore.transition('s1', { from: ['remote_ready'], to: 'abandoned' });
+    expect(local).not.toHaveBeenCalled();
+    await comp.mergeBackStore.transition('s1', { from: ['abandoned'], to: 'cleaned' });
+    expect(local).toHaveBeenCalledWith('s1');
+  });
+});
+
+describe('defaultOrchSocketPath', () => {
+  it('is the orch socket orchSocketComposition binds on POSIX, and null for a Windows named pipe', () => {
+    expect(defaultOrchSocketPath('darwin')).toMatch(/[/\\]sockets[/\\]orch\.sock$/);
+    expect(defaultOrchSocketPath('win32')).toBeNull();
+  });
+
+  it('composes a service that can hand out orchestrator links', () => {
+    expect(typeof comp.service.linkFor).toBe('function');
+    expect(() => comp.service.linkFor('local')).toThrow(/needs no orchestrator link/);
   });
 });

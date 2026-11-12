@@ -76,3 +76,11 @@ export class HostsDisabledError extends Error {
     this.name = HOSTS_ERROR_NAMES.disabled;
   }
 }
+
+/** An action that needs the machine's probed facts (remote folder, architecture) before any check completed. */
+export class HostNeedsPreflightError extends Error {
+  constructor() {
+    super('Run a check first.');
+    this.name = HOSTS_ERROR_NAMES.needsPreflight;
+  }
+}

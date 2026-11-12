@@ -10,6 +10,7 @@
  *   runPreflight       : mutation     -> HostsResult<{ result: PreflightResult }>
  *   archive            : mutation     -> HostsResult<{}>
  *   setProjectDefault  : mutation     -> HostsResult<{}>
+ *   installToolchain   : mutation     -> HostsResult<{}>    (push cyboflow tools, then a full preflight)
  *   terminalOpen       : mutation     -> HostsResult<{ terminalId }>
  *   terminalInput      : mutation     -> HostsResult<{}>    (high frequency: thin)
  *   terminalResize     : mutation     -> HostsResult<{}>    (high frequency: thin)
@@ -17,6 +18,7 @@
  *   terminalClose      : mutation     -> HostsResult<{}>                             (UNGATED)
  *   onHostsChanged     : subscription -> HostsChangedEvent
  *   onPreflightProgress: subscription -> PreflightProgressEvent
+ *   onToolchainProgress: subscription -> ToolchainProgressEvent
  *   onTerminalExit     : subscription -> { exitCode }  (one frame, then ends; immediate if already exited)
  *
  * Every procedure is a thin wrapper over the HostsFacade wired at boot. The service throws NAMED errors and
@@ -35,6 +37,7 @@ import {
   hostEvents,
   hostPreflightChannel,
   hostTerminalChannel,
+  hostToolchainChannel,
   HOSTS_CHANNEL,
   peekHostsFacade,
   type HostsFacade,
@@ -53,6 +56,7 @@ import type {
   HostTerminalExitEvent,
   HostView,
   PreflightProgressEvent,
+  ToolchainProgressEvent,
 } from '../../../../../shared/types/hosts';
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,9 @@ const NAME_TO_CODE: Readonly<Record<string, HostsFailureCode>> = {
   [N.killed]: 'remote_hosts_disabled',
   [N.disabled]: 'feature_disabled',
   [N.terminalUnavailable]: 'terminal_unavailable',
+  [N.toolchainUnavailable]: 'toolchain_unavailable',
+  [N.toolchainPushFailed]: 'toolchain_push_failed',
+  [N.needsPreflight]: 'needs_preflight',
 };
 
 function errName(err: unknown): string | null {
@@ -225,6 +232,13 @@ export const hostsRouter = router({
       return {};
     })),
 
+  installToolchain: protectedProcedure
+    .input(z.object({ id }).strict())
+    .mutation(({ input }) => run(async (f) => {
+      await f.installToolchain(input.id);
+      return {};
+    })),
+
   terminalOpen: protectedProcedure
     .input(z.object({ hostId: id }).strict())
     .mutation(({ input }) => run((f) => f.terminalOpen(input.hostId))),
@@ -272,6 +286,21 @@ export const hostsRouter = router({
       const source = eventToAsyncIterable<PreflightProgressEvent>(
         hostEvents,
         hostPreflightChannel(input.id),
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    }),
+
+  /** One host's "Install cyboflow tools" progress: a frame per phase / progress step, ending with done or failed. */
+  onToolchainProgress: protectedProcedure
+    .input(z.object({ id }).strict())
+    .subscription(async function* ({ input, signal }): AsyncGenerator<ToolchainProgressEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<ToolchainProgressEvent>(
+        hostEvents,
+        hostToolchainChannel(input.id),
         abortSignal,
       );
       for await (const ev of source) {

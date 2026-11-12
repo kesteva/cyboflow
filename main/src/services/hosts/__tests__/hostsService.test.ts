@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
+import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,12 +12,23 @@ import {
   type HostsChangedEvent,
   type PreflightCheckResult,
   type PreflightProgressEvent,
+  type PreflightRemoteFacts,
   type PreflightResult,
 } from '../../../../../shared/types/hosts';
 import type { ExecutionHost } from '../../../orchestrator/trpc/contracts/executionHost';
-import { HostsService, summarizePreflight, type HostTerminalsLike } from '../hostsService';
+import {
+  HostLinkUnavailableError,
+  HostsService,
+  isRemoteReady,
+  summarizePreflight,
+  type HostLinksDeps,
+  type HostTerminalsLike,
+} from '../hostsService';
+import { HostLinkNotReadyError, type HostLinkEvent, type HostLinkTimers } from '../hostLink';
+import type { ForwardHandle, ForwardSpec } from '../sshTransport';
 import { REMOTE_HOSTS_KILL_SWITCH_ENV, HOST_PREFLIGHT_SCHEDULE_KILL_SWITCH_ENV } from '../flags';
 import type { LoggerLike } from '../../../orchestrator/types';
+import { RemoteProcessTracker, RUN_DIR_GC_PROGRAM, TOKEN_REMOVE_PROGRAM, type TrackedRemoteProcess } from '../remoteFencing';
 
 const SQL = readFileSync(join(__dirname, '..', '..', '..', 'database', 'migrations', '152_hosts.sql'), 'utf-8');
 
@@ -339,6 +351,23 @@ describe('update / archive / terminals / shutdown', () => {
     expect(hostFor(id).host.preflight).toHaveBeenCalledTimes(2);
   });
 
+  it('generation(): bumped by a target change and by archive, never by a label edit', async () => {
+    const id = await addSettled();
+    expect(service.generation(id)).toBe(0);
+    await service.update(id, { label: 'Renamed' });
+    expect(service.generation(id)).toBe(0);
+    await service.update(id, { sshTarget: 'box2' });
+    expect(service.generation(id)).toBe(1);
+    await flush();
+    hostFor(id).runs.at(-1)?.d.resolve(result(id));
+    await flush();
+    await service.update(id, { sshTarget: 'box2' }); // unchanged target: no bump
+    expect(service.generation(id)).toBe(1);
+    await service.archive(id);
+    expect(service.generation(id)).toBe(2);
+    expect(service.generation('never-seen')).toBe(0);
+  });
+
   it('a label-only edit neither invalidates the connection nor cancels a running preflight', async () => {
     const id = await addSettled();
     const p = service.runPreflight(id);
@@ -441,6 +470,27 @@ describe('update / archive / terminals / shutdown', () => {
   });
 });
 
+describe('gitCapture (orchestrator facade)', () => {
+  it('runs git.capture on the host with a HostPath for that host and resolves stdout', async () => {
+    const id = await addSettled();
+    const capture = vi.fn(async () => ({ stdout: 'abc123\n', stderr: '' }));
+    (hostFor(id).host as unknown as { git: { capture: typeof capture } }).git = { capture };
+    await expect(service.gitCapture(id, '/home/u/cf-remote/wt/k', ['rev-parse', 'HEAD'])).resolves.toBe('abc123\n');
+    expect(capture).toHaveBeenCalledWith({ hostId: id, path: '/home/u/cf-remote/wt/k' }, ['rev-parse', 'HEAD'], undefined);
+  });
+
+  it('propagates a non-zero git exit (throw-on-nonzero) and refuses while off or killed', async () => {
+    const id = await addSettled();
+    const boom = Object.assign(new Error('Command failed: git rev-parse HEAD'), { name: 'HostGitCommandError' });
+    (hostFor(id).host as unknown as { git: { capture: () => Promise<never> } }).git = { capture: async () => { throw boom; } };
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toBe(boom);
+    env[REMOTE_HOSTS_KILL_SWITCH_ENV] = '1';
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toMatchObject({ name: HOSTS_ERROR_NAMES.killed });
+    enabled = false;
+    await expect(service.gitCapture(id, '/w', ['rev-parse', 'HEAD'])).rejects.toMatchObject({ name: HOSTS_ERROR_NAMES.disabled });
+  });
+});
+
 describe('summarizePreflight', () => {
   it('counts statuses, singularises one warning', () => {
     const r = result('h', { results: [check('arch', 'pass'), check('git', 'warn'), check('node22', 'fail')] });
@@ -450,5 +500,312 @@ describe('summarizePreflight', () => {
   it('a reachable run whose probe did not finish says so instead of counting skipped rows', () => {
     const r = result('h', { probeComplete: false, results: [check('ssh-reachable', 'pass'), check('arch', 'skipped')] });
     expect(summarizePreflight(r)).toBe('Reachable, but the check did not finish (connection dropped or timed out)');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// remote readiness + orchestrator links
+// ---------------------------------------------------------------------------------------------------------------
+
+const REMOTE: PreflightRemoteFacts = {
+  home: '/Users/k', remoteRoot: '/Users/k/cf-remote/h', user: 'k', logname: 'k', shell: '/bin/zsh', tmpdir: null,
+  lang: null, nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git', codexPath: null, arch: 'arm64',
+  socketPathOk: true,
+};
+
+function hashPass(id: string, remote: PreflightRemoteFacts | null = REMOTE): PreflightResult {
+  return result(id, {
+    results: PREFLIGHT_CHECK_IDS.map((c) => check(c, 'pass')),
+    ...(remote ? { remote } : {}),
+  });
+}
+
+describe('HostView.remoteReady', () => {
+  it('is true only for an SSH machine whose complete preflight passed sdk-binary-hash and recorded facts', async () => {
+    const { id } = await service.addSsh({ label: 'Box', sshTarget: 'box' });
+    await flush();
+    hostFor(id).runs[0].d.resolve(hashPass(id));
+    await flush();
+    await store._queue().onIdle();
+    expect(service.get(id).remoteReady).toBe(true);
+    expect(service.get('local').remoteReady).toBe(false);
+    expect(isRemoteReady({ kind: 'ssh', preflight: result(id, { remote: REMOTE }) })).toBe(false); // hash skipped
+    expect(isRemoteReady({ kind: 'ssh', preflight: hashPass(id, null) })).toBe(false); // no facts
+    expect(isRemoteReady({ kind: 'ssh', preflight: { ...hashPass(id), probeComplete: false } })).toBe(false);
+    expect(isRemoteReady({ kind: 'ssh', preflight: null })).toBe(false);
+  });
+
+  it('a settled cli host is not remote-ready and its link is idle', async () => {
+    const id = await addSettled();
+    expect(service.get(id)).toMatchObject({ remoteReady: false, linkState: 'idle' });
+    expect(service.get('local')).toMatchObject({ linkState: 'idle' });
+  });
+});
+
+/** A forward the test drives by hand. */
+class FakeForward implements ForwardHandle {
+  readonly emitter = new EventEmitter();
+  closed = false;
+  exited = false;
+  readonly ready: Promise<void>;
+  private settle!: (err?: Error) => void;
+  constructor(readonly target: string, readonly spec: ForwardSpec) {
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.settle = (err) => (err ? reject(err) : resolve());
+    });
+    this.ready.catch(() => undefined);
+  }
+  up(): void {
+    this.settle();
+  }
+  drop(): void {
+    this.exited = true;
+    this.settle(new Error('exited'));
+    this.emitter.emit('exit', 255, 'Connection reset');
+  }
+  close(): void {
+    this.closed = true;
+    this.drop();
+  }
+  on(event: 'exit', listener: (code: number | null, stderrTail: string) => void): void {
+    this.emitter.on(event, listener);
+  }
+}
+
+describe('orchestrator links', () => {
+  let forwards: FakeForward[];
+  let orchSock: string | null;
+  let linked: HostsService;
+  const timers: HostLinkTimers = { setTimer: () => () => undefined };
+
+  function linksDeps(): HostLinksDeps {
+    return {
+      transport: {
+        openForward: (target, spec) => {
+          const f = new FakeForward(target, spec);
+          forwards.push(f);
+          return f;
+        },
+      },
+      getOrchSocketPath: () => orchSock,
+      timers,
+    };
+  }
+
+  beforeEach(() => {
+    forwards = [];
+    orchSock = '/Users/me/.cyboflow/sockets/orch.sock';
+    linked = new HostsService({
+      store, registry, terminals, appVersion: '1.0.0',
+      isAvailable: () => available, isEnabled: () => available && enabled, env, logger, captureError,
+      links: linksDeps(),
+    });
+  });
+
+  async function addReady(): Promise<string> {
+    const { id } = await linked.addSsh({ label: 'Box', sshTarget: 'box' });
+    await flush();
+    hostFor(id).runs[0].d.resolve(hashPass(id));
+    await flush();
+    await store._queue().onIdle();
+    return id;
+  }
+
+  it('forwards <remoteRoot>/s/o.sock to the local orch socket; link-up/down reach the view and listeners', async () => {
+    const id = await addReady();
+    const seen: HostLinkEvent[] = [];
+    linked.onLinkEvent((e) => seen.push(e));
+    const handle = linked.linkFor(id);
+    const lease = handle.acquire();
+    await flush();
+    expect(forwards).toHaveLength(1);
+    expect(forwards[0].target).toBe('box');
+    expect(forwards[0].spec).toEqual({ remoteSock: '/Users/k/cf-remote/h/s/o.sock', localSock: orchSock });
+    changes = [];
+    forwards[0].up();
+    await expect(lease).resolves.toEqual({ remoteSock: '/Users/k/cf-remote/h/s/o.sock' });
+    expect(linked.get(id).linkState).toBe('up');
+    expect(changes).toContainEqual({ kind: 'hosts', hostId: id });
+    expect(seen).toEqual([{ type: 'link-up', hostId: id, remoteSock: '/Users/k/cf-remote/h/s/o.sock' }]);
+    forwards[0].drop();
+    expect(linked.get(id).linkState).toBe('down');
+    expect(seen.map((e) => e.type)).toEqual(['link-up', 'link-down']);
+    handle.release();
+    expect(linked.get(id).linkState).toBe('idle');
+  });
+
+  it('acquire needs a recorded remote root and a local orch socket', async () => {
+    const id = await addSettled('Plain', 'plain');
+    const ready = await addReady();
+    await expect(linked.linkFor(id).acquire()).rejects.toBeInstanceOf(HostLinkNotReadyError);
+    orchSock = null;
+    await expect(linked.linkFor(ready).acquire()).rejects.toBeInstanceOf(HostLinkUnavailableError);
+    expect(forwards).toHaveLength(0);
+  });
+
+  it('refuses This Mac, unknown hosts, the gates, and an unwired service', async () => {
+    const id = await addReady();
+    expect(() => linked.linkFor('local')).toThrow(HostLinkUnavailableError);
+    expect(() => linked.linkFor('nope')).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.notFound }));
+    expect(() => service.linkFor(id)).toThrow(HostLinkUnavailableError);
+    env[REMOTE_HOSTS_KILL_SWITCH_ENV] = '1';
+    expect(() => linked.linkFor(id)).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.killed }));
+    delete env[REMOTE_HOSTS_KILL_SWITCH_ENV];
+    enabled = false;
+    expect(() => linked.linkFor(id)).toThrow(expect.objectContaining({ name: HOSTS_ERROR_NAMES.disabled }));
+  });
+
+  it('archive, a target change and shutdown close the forward', async () => {
+    const a = await addReady();
+    const lease = linked.linkFor(a).acquire();
+    await flush();
+    forwards[0].up();
+    await lease;
+    linked.linkFor(a).release();
+    await linked.archive(a);
+    expect(forwards[0].closed).toBe(true);
+    expect(linked.get(a).linkState).toBe('idle');
+
+    const b = await addReady();
+    const lb = linked.linkFor(b).acquire();
+    await flush();
+    forwards[1].up();
+    await lb;
+    await linked.update(b, { sshTarget: 'box2' });
+    expect(forwards[1].closed).toBe(true);
+    await flush();
+    hostFor(b).runs[1].d.resolve(hashPass(b));
+    await flush();
+    await store._queue().onIdle();
+
+    const lc = linked.linkFor(b).acquire();
+    await flush();
+    expect(forwards[2].target).toBe('box2');
+    forwards[2].up();
+    await lc;
+    linked.shutdown();
+    expect(forwards[2].closed).toBe(true);
+    expect(linked.get(b).linkState).toBe('idle');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Phase F: run dir GC after a full preflight (F3) and the quit drain (F2)
+// ---------------------------------------------------------------------------------------------------------------
+
+const REMOTE_FACTS: PreflightRemoteFacts = {
+  home: '/Users/me', remoteRoot: '/Users/me/cf-remote/h', user: 'me', logname: 'me', shell: '/bin/zsh', tmpdir: null,
+  lang: null, nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git', codexPath: null, arch: 'arm64', socketPathOk: true,
+};
+
+describe('run dir GC after a full preflight (F3)', () => {
+  async function settleSecond(id: string, r: PreflightResult): Promise<void> {
+    const p = service.runPreflight(id);
+    await flush();
+    hostFor(id).runs[1].d.resolve(r);
+    await p;
+  }
+
+  it('built-in pass: one scan of <remoteRoot>/run over the host exec, never a token removal', async () => {
+    const id = await addSettled();
+    const exec = vi.fn(async (argv: string[]) => ({ code: 0, stdout: argv[2] === RUN_DIR_GC_PROGRAM ? 'r1.token\n#2\n' : '', stderr: '', timedOut: false }));
+    (hostFor(id).host as unknown as { exec: { exec: typeof exec } }).exec = { exec };
+    await settleSecond(id, result(id, { remote: { ...REMOTE_FACTS } }));
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec.mock.calls[0][0].slice(2, 5)).toEqual([RUN_DIR_GC_PROGRAM, 'sh', '/Users/me/cf-remote/h/run']);
+    expect(exec.mock.calls.some((c) => c[0][2] === TOKEN_REMOVE_PROGRAM)).toBe(false);
+  });
+
+  it('uses the injected runDirGc; skipped for unreachable / incomplete / unexpanded-root / fact-less results; never throws', async () => {
+    const runDirGc = vi.fn(async () => { throw new Error('boom'); });
+    service = new HostsService({
+      store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, runDirGc,
+    });
+    const id = await addSettled();
+    await settleSecond(id, result(id, { remote: { ...REMOTE_FACTS } }));
+    expect(runDirGc).toHaveBeenCalledWith(id, '/Users/me/cf-remote/h');
+    expect(logger.warn).toHaveBeenCalledWith('[hosts] run folder cleanup skipped', expect.anything());
+    runDirGc.mockClear();
+    for (const over of [
+      { reachable: false },
+      { probeComplete: false },
+      { remote: { ...REMOTE_FACTS, remoteRoot: '~/cf-remote/h' } },
+      {},
+    ] as Array<Partial<PreflightResult>>) {
+      const p = service.runPreflight(id);
+      await flush();
+      const runs = hostFor(id).runs;
+      runs[runs.length - 1].d.resolve(result(id, { remote: { ...REMOTE_FACTS }, ...over, ...(Object.keys(over).length === 0 ? { remote: undefined } : {}) }));
+      await p;
+    }
+    expect(runDirGc).not.toHaveBeenCalled();
+  });
+});
+
+describe('quit drain of live remote processes (F2)', () => {
+  function liveEntry(tracker: RemoteProcessTracker): { signals: string[]; exit: () => void } {
+    const proc = Object.assign(new EventEmitter(), { stdin: { end: vi.fn() } });
+    const signals: string[] = [];
+    const untrack = tracker.add({
+      hostId: 'h1',
+      proc: proc as unknown as TrackedRemoteProcess['proc'],
+      signalRemote: async (signal) => {
+        signals.push(signal);
+        queueMicrotask(() => {
+          untrack();
+          proc.emit('exit', null, 'SIGTERM');
+        });
+      },
+      killLocal: () => undefined,
+    });
+    return { signals, exit: () => untrack() };
+  }
+
+  it('no live process: shutdown closes the masters synchronously, as before; the drain is a no-op close', async () => {
+    const tracker = new RemoteProcessTracker();
+    const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+    s.shutdown();
+    expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    await s.drainRemoteProcesses();
+    expect(registry.closeAllMasters).toHaveBeenCalledTimes(2);
+  });
+
+  it('shutdown never kills a live remote process (runs are not latched yet) and keeps the masters for the drain', async () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = new RemoteProcessTracker();
+      const a = liveEntry(tracker);
+      const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+      s.shutdown();
+      s.shutdown();
+      expect(terminals.destroyAll).toHaveBeenCalled();
+      expect(a.signals).toEqual([]);
+      expect(registry.closeAllMasters).not.toHaveBeenCalled();
+      // Nobody drains: the unref'd fallback closes the masters once, after the budget.
+      vi.advanceTimersByTime(3_100);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drainRemoteProcesses: TERM over the still-open masters FIRST, then the masters close (fallback cancelled)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const tracker = new RemoteProcessTracker();
+      const a = liveEntry(tracker);
+      const s = new HostsService({ store, registry, terminals, appVersion: '1.0.0', isAvailable: () => true, isEnabled: () => true, env, logger, processTracker: tracker });
+      s.shutdown();
+      const done = s.drainRemoteProcesses();
+      expect(registry.closeAllMasters).not.toHaveBeenCalled();
+      await done;
+      expect(a.signals).toEqual(['TERM']);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+      expect(tracker.size).toBe(0);
+      vi.advanceTimersByTime(10_000);
+      expect(registry.closeAllMasters).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

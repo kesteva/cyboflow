@@ -15,7 +15,18 @@ import type {
   HostView,
   PreflightProgressEvent,
   PreflightResult,
+  ToolchainProgressEvent,
 } from '../../../shared/types/hosts';
+
+/** The runtime a remote launch needs on the machine. Mirrors HostsService's PrelaunchRuntime. */
+export type HostLaunchRuntime = 'claude-sdk' | 'codex-sdk';
+
+/** Why a remote launch was refused. Mirrors HostsService's PrelaunchFailureCode (`implements` catches drift). */
+export type HostPrelaunchFailureCode =
+  | 'unreachable' | 'not-installed' | 'no-auth' | 'tier' | 'runtime-unavailable' | 'disabled' | 'archived' | 'link-down'
+  | 'needs-check';
+
+export type HostPrelaunchResult = { ok: true } | { ok: false; code: HostPrelaunchFailureCode; reason: string };
 
 /** Implemented by HostsService. Methods THROW named errors; the router converts them. */
 export interface HostsFacade {
@@ -31,6 +42,24 @@ export interface HostsFacade {
   runPreflight(id: string): Promise<PreflightResult>;
   archive(id: string): Promise<void>;
   setProjectDefault(projectId: number, hostId: string | null): Promise<void>;
+  /**
+   * "Install cyboflow tools": push the toolchain for the machine's arch, then kick a full preflight. One install
+   * per host — a call while one runs returns the running promise. Progress goes out on hostToolchainChannel.
+   * @throws HostNeedsPreflightError without a complete check; ToolchainUnavailableError / ToolchainPushError.
+   */
+  installToolchain(id: string): Promise<void>;
+  /**
+   * Launch-time gate for a run on `hostId` (RunLauncher): the last complete full check plus a live 2 s probe.
+   * Never throws; This Mac always passes. Optional only so router-test fakes predating M2 still satisfy the
+   * interface — HostsService implements it, and a caller treats a missing method as "Environments are not running".
+   */
+  prelaunch?(hostId: string, runtime: HostLaunchRuntime, signal?: AbortSignal): Promise<HostPrelaunchResult>;
+  /**
+   * `git -C <cwd> <args…>` on the machine; resolves stdout on exit 0, rejects on any other exit (HostGitCommandError,
+   * runGitCapture parity) or when the feature is off / the host is unknown. `cwd` is a path ON that machine.
+   * Optional for the same reason as prelaunch.
+   */
+  gitCapture?(hostId: string, cwd: string, args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<string>;
   /** A new terminal on every call. */
   terminalOpen(hostId: string): Promise<{ terminalId: string }>;
   terminalInput(terminalId: string, text: string): void;
@@ -80,6 +109,10 @@ export function hostPreflightChannel(id: string): string {
   return `host-preflight-${id}`;
 }
 
+export function hostToolchainChannel(id: string): string {
+  return `host-toolchain-${id}`;
+}
+
 export function hostTerminalChannel(terminalId: string): string {
   return `host-terminal-${terminalId}`;
 }
@@ -94,4 +127,8 @@ export function emitHostsChanged(ev: HostsChangedEvent): void {
 
 export function emitPreflightProgress(ev: PreflightProgressEvent): void {
   hostEvents.emit(hostPreflightChannel(ev.hostId), ev);
+}
+
+export function emitToolchainProgress(ev: ToolchainProgressEvent): void {
+  hostEvents.emit(hostToolchainChannel(ev.hostId), ev);
 }

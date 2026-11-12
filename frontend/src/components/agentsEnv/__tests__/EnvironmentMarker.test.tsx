@@ -36,3 +36,19 @@ describe('EnvironmentMarker', () => {
     expect(screen.getByTestId('environment-marker').firstElementChild?.className).toContain('status-error');
   });
 });
+
+describe('EnvironmentMarker detail', () => {
+  it('spells out transport and tier', () => {
+    act(() => useHostsStore.setState({ hosts: [makeHost({ id: 'h2', label: 'm2-studio', effectiveTier: 'full' })] }));
+    render(<EnvironmentMarker hostId="h2" detail />);
+    expect(screen.getByTestId('environment-marker')).toHaveTextContent('m2-studio · SSH · Sessions + workflows');
+  });
+
+  it('says Terminal only for the cli tier and stays terse without detail', () => {
+    act(() => useHostsStore.setState({ hosts: [makeHost({ id: 'h2', label: 'm2-studio', effectiveTier: 'cli' })] }));
+    const { rerender } = render(<EnvironmentMarker hostId="h2" detail />);
+    expect(screen.getByTestId('environment-marker')).toHaveTextContent('m2-studio · SSH · Terminal only');
+    rerender(<EnvironmentMarker hostId="h2" />);
+    expect(screen.getByTestId('environment-marker').textContent).toBe('m2-studio');
+  });
+});

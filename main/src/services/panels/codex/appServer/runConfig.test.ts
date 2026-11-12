@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as path from 'node:path';
 import {
   buildCodexAppServerEnvironment,
+  buildCodexRemoteAppServerEnvironment,
   buildCodexAppServerThreadResumeParams,
   buildCodexAppServerThreadStartParams,
   buildCodexAppServerTurnOptions,
@@ -505,6 +506,53 @@ describe('Codex app-server run configuration', () => {
       excludeTurns: true,
       sandbox: 'read-only',
       approvalPolicy: 'never',
+    });
+  });
+
+  describe('remote (SSH environment) spawns', () => {
+    const remoteConfig = {
+      orchSocketPath: '/Users/me/cf-remote/h1/s/o.sock',
+      bridgeScriptPath: '/Users/me/cf-remote/h1/toolchain/abc/cyboflowMcpServer.js',
+      nodeExecutablePath: process.execPath, // even if it matched, a remote node never gets the Electron guard
+      orchTokenFile: '/Users/me/cf-remote/h1/run/run-1.token',
+    };
+
+    it('carries the token FILE (never the token) and the remote paths on the MCP bridge, start AND resume', () => {
+      const options = {
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/Users/me/cf-remote/h1/wt/s1',
+        prompt: 'go',
+      };
+      for (const params of [
+        buildCodexAppServerThreadStartParams('run-1', options, remoteConfig),
+        buildCodexAppServerThreadResumeParams('run-1', 'codex-thread-1', options, remoteConfig),
+      ]) {
+        const server = (params.config as {
+          mcp_servers: { cyboflow: { command: string; args: string[]; env: Record<string, string> } };
+        }).mcp_servers.cyboflow;
+        expect(server.command).toBe(process.execPath);
+        expect(server.args).toEqual([remoteConfig.bridgeScriptPath]);
+        expect(server.env).toEqual({
+          CYBOFLOW_RUN_ID: 'run-1',
+          CYBOFLOW_ORCH_SOCKET: remoteConfig.orchSocketPath,
+          CYBOFLOW_ORCH_TOKEN_FILE: remoteConfig.orchTokenFile,
+          CYBOFLOW_INSTANCE: getInstanceId(),
+          CYBOFLOW_WORKTREE: '/Users/me/cf-remote/h1/wt/s1',
+        });
+        expect(params.cwd).toBe('/Users/me/cf-remote/h1/wt/s1');
+      }
+    });
+
+    it('builds the remote app-server env slice without this Mac\'s env, PATH, socket or token', () => {
+      const env = buildCodexRemoteAppServerEnvironment('run-1', '/Users/me/cf-remote/h1/wt/s1');
+      expect(env).toEqual({
+        CYBOFLOW_RUN_ID: 'run-1',
+        CYBOFLOW_MANAGED_TEST_CONCURRENCY: '1',
+        CYBOFLOW_INSTANCE: getInstanceId(),
+        CYBOFLOW_WORKTREE: '/Users/me/cf-remote/h1/wt/s1',
+      });
     });
   });
 });

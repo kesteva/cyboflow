@@ -89,16 +89,19 @@ const PNG_DATA_URL =
 
 let tmpRoot: string;
 
-function makeServices(): AppServices {
+function makeServices(
+  sessions: Record<string, { id: string; hostId?: string | null }> = {},
+  runs: Record<string, { id: string; host_id?: string | null }> = {},
+): AppServices {
   return {
-    sessionManager: { getSession: vi.fn(async () => undefined) },
-    cyboflow: { workflowRegistry: { getRunById: vi.fn(() => undefined) } },
+    sessionManager: { getSession: vi.fn(async (id: string) => sessions[id]) },
+    cyboflow: { workflowRegistry: { getRunById: vi.fn((id: string) => runs[id]) } },
   } as unknown as AppServices;
 }
 
-function register() {
+function register(services: AppServices = makeServices()) {
   const { ipcMain, handlers } = makeHandlerCapture();
-  registerSessionHandlers(ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0], makeServices());
+  registerSessionHandlers(ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0], services);
   return handlers;
 }
 
@@ -168,5 +171,32 @@ describe('sessions:save-images — ownerId containment', () => {
     expect(basename).not.toContain('/');
     const ext = basename.split('.').pop() ?? '';
     expect(/^[a-zA-Z0-9]+$/.test(ext)).toBe(true);
+  });
+});
+
+describe('attachments for a remote-environment owner (M2)', () => {
+  const REMOTE_ERROR = /Attaching files is not available on remote environments/;
+  const services = () =>
+    makeServices(
+      { rs: { id: 'rs', hostId: 'host-a' }, ls: { id: 'ls', hostId: null }, lo: { id: 'lo', hostId: 'local' } },
+      { rr: { id: 'rr', host_id: 'host-a' }, lr: { id: 'lr', host_id: null } },
+    );
+
+  it('refuses save-images and save-large-text for a remote session or run, writing nothing', async () => {
+    const handlers = register(services());
+    const image = [{ name: 'shot.png', dataUrl: PNG_DATA_URL, type: 'image/png' }];
+    await expect(invoke(handlers, 'sessions:save-images', 'rs', image)).rejects.toThrow(REMOTE_ERROR);
+    await expect(invoke(handlers, 'sessions:save-images', 'rr', image)).rejects.toThrow(REMOTE_ERROR);
+    await expect(invoke(handlers, 'sessions:save-large-text', 'rs', 'big text')).rejects.toThrow(REMOTE_ERROR);
+    await expect(invoke(handlers, 'sessions:save-large-text', 'rr', 'big text')).rejects.toThrow(REMOTE_ERROR);
+    expect(existsSync(getCyboflowSubdirectory('artifacts'))).toBe(false);
+  });
+
+  it('keeps saving for local sessions and runs (null or the literal local)', async () => {
+    const handlers = register(services());
+    for (const owner of ['ls', 'lo', 'lr']) {
+      const saved = (await invoke(handlers, 'sessions:save-large-text', owner, 'hello')) as string;
+      expect(existsSync(saved)).toBe(true);
+    }
   });
 });

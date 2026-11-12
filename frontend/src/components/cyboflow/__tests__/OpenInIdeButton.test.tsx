@@ -101,4 +101,19 @@ describe('OpenInIdeButton', () => {
       }),
     );
   });
+
+  it('renders nothing for a session on a remote environment (M2)', async () => {
+    const { useSessionStore } = await import('../../../stores/sessionStore');
+    act(() => {
+      useSessionStore.setState({ sessions: [{ id: 'r1', hostId: 'host-a' } as never, { id: 'l1', hostId: 'local' } as never] });
+    });
+    const { rerender } = render(<OpenInIdeButton sessionId="r1" projectId={1} />);
+    expect(screen.queryByTestId('diff-open-in-ide')).toBeNull();
+    rerender(<OpenInIdeButton sessionId="l1" projectId={1} />);
+    expect(screen.getByTestId('diff-open-in-ide')).toBeInTheDocument();
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+    });
+  });
 });
+

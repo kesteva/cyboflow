@@ -49,6 +49,8 @@ import { BaseSelector } from './BaseSelector';
 import { WorktreeStrip } from './WorktreeStrip';
 import { OpenInIdeButton } from './OpenInIdeButton';
 import { ArtifactsPanel } from './ArtifactsPanel';
+import { RemoteUnavailableNotice } from './RemoteUnavailableNotice';
+import { useIsRemoteSession } from '../../hooks/useIsRemoteSession';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
@@ -184,6 +186,9 @@ export function RunRightRail({
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
+  // M2: a session on a remote environment has no worktree on this Mac — the File Explorer and Diff tabs show
+  // "Not available on remote environments" and no worktree watcher is subscribed for it.
+  const selectedIsRemote = useIsRemoteSession(selectedSessionId);
   const openFileTab = useCenterPaneStore((s) => s.openFileTab);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
 
@@ -258,7 +263,7 @@ export function RunRightRail({
   //      session to subscribe on): coming back to the app refetches once.
   const diffTabLive = activeTab === 'diff';
   useEffect(() => {
-    if (!diffTabLive || selectedSessionId === null) return;
+    if (!diffTabLive || selectedSessionId === null || selectedIsRemote) return;
     const sub = trpc.cyboflow.sessionGit.onWorktreeChanged.subscribe(
       { sessionId: selectedSessionId },
       {
@@ -267,7 +272,7 @@ export function RunRightRail({
       },
     );
     return () => sub.unsubscribe();
-  }, [diffTabLive, selectedSessionId]);
+  }, [diffTabLive, selectedSessionId, selectedIsRemote]);
   useEffect(() => {
     if (!diffTabLive) return;
     const onFocus = () => setWorktreeRefreshNonce((n) => n + 1);
@@ -500,7 +505,9 @@ export function RunRightRail({
             </div>
           )
         ) : currentTab.id === 'file-explorer' ? (
-          selectedSessionId ? (
+          selectedSessionId && selectedIsRemote ? (
+            <RemoteUnavailableNotice testId="run-right-rail-file-explorer-remote" />
+          ) : selectedSessionId ? (
             <SessionFileExplorer
               sessionId={selectedSessionId}
               // During an active run, clicking a file opens a center-pane file/diff
@@ -531,6 +538,8 @@ export function RunRightRail({
               Select a session to view its files.
             </div>
           )
+        ) : currentTab.id === 'diff' && selectedIsRemote ? (
+          <RemoteUnavailableNotice testId="run-right-rail-diff-remote" />
         ) : currentTab.id === 'diff' ? (
           // Diff tab — a full-width BaseSelector row directly under the rail
           // tab bar (TASK-218), then two scopes for the body below it:

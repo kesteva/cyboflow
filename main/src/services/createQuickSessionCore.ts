@@ -32,6 +32,8 @@ import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { isPtyLane } from './panelLane';
 import { normalizePathSeparators } from '../utils/posixPath';
+import { isRemoteHostId, type HostsFeatureStatus, type HostView } from '../../../shared/types/hosts';
+import { getRemoteCheckout } from './hosts/remoteCheckoutBridge';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -56,6 +58,8 @@ export interface QuickSessionJobData {
   /** Work directly in the project checkout — no dedicated worktree (migration 047). */
   inPlace?: boolean;
   claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore' };
+  /** Remote environment (M2); absent = This Mac. Only a validated remote id is ever set. */
+  hostId?: string | null;
 }
 
 /** The collaborators the core needs — structural so both IPC + boot wiring inject them. */
@@ -69,6 +73,11 @@ export interface CreateQuickSessionCoreDeps {
   sessionManager: {
     on(event: 'session-created', listener: (s: QuickSessionRow) => void): void;
     removeListener(event: 'session-created', listener: (s: QuickSessionRow) => void): void;
+    /**
+     * Hide a session row (SessionManager.archiveSession). Optional: used only to retire a REMOTE session that
+     * surfaced after its waiter gave up, when no {@link CreateQuickSessionCoreDeps.dismissHalfCreatedSession} is wired.
+     */
+    archiveSession?(sessionId: string): Promise<void>;
   };
   workflowRegistry: {
     ensureQuickWorkflow(projectId: number): string;
@@ -138,7 +147,15 @@ export interface CreateQuickSessionCoreOptions {
    * project path, never `/${nameHint}`).
    */
   inPlace?: boolean;
-  /** Await budget for the session-created event (default 30s). */
+  /**
+   * Remote environment (M2) the session runs on — set ONLY by sessions:create-quick, after
+   * {@link resolveQuickSessionHost} validated it. Every other caller omits it (This Mac).
+   */
+  hostId?: string | null;
+  /**
+   * Await budget for the session-created event (default 30s; a REMOTE session defaults to
+   * {@link REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS}, its provisioning budget).
+   */
   timeoutMs?: number;
 }
 
@@ -148,6 +165,22 @@ export interface CreateQuickSessionCoreResult {
   resolvedSubstrate: CliSubstrate;
   jobId: string;
 }
+
+/** The local default await budget for the session-created event. */
+const LOCAL_QUICK_SESSION_CREATE_TIMEOUT_MS = 30_000;
+
+/**
+ * The await budget for a REMOTE session's session-created event. A remote session-create job provisions the
+ * environment worktree BEFORE session-created fires (services/taskQueue.ts → RemoteCheckout.ensureSessionWorktree),
+ * so the waiter must outlast that work, not the local 30s. Mirrors the step budgets in services/hosts/remoteCheckout.ts:
+ * the bare-repo lock wait (5 min) + its git steps, the base push of possibly the full history (30 min), the worktree
+ * add (10 min), plus a few 60s git probes — rounded up to 50 minutes. KEEP IN SYNC with those constants.
+ */
+export const REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS = 50 * 60_000;
+
+export const REMOTE_QUICK_SESSION_TIMEOUT_MESSAGE =
+  'Setting up the session on its environment took too long, so cyboflow stopped waiting. ' +
+  'If the setup finishes later, the session is removed from the environment automatically. Try again, or check the environment from Environments.';
 
 /**
  * Session ids already claimed by an in-flight core call's session-created
@@ -182,6 +215,7 @@ export async function createQuickSessionCore(
   const { taskQueue, sessionManager, workflowRegistry } = deps;
   const branchName = opts.nameHint;
   const inPlace = opts.inPlace === true;
+  const remote = isRemoteHostId(opts.hostId);
 
   // Job failures are subscribed BEFORE the job is enqueued: the processor's
   // throw is otherwise swallowed into a queue log line, and the only thing the
@@ -207,6 +241,8 @@ export async function createQuickSessionCore(
     agentModel: opts.agentModel,
     inPlace,
     claudeConfig: opts.claudeConfig,
+    // Remote environment (M2): only a remote id rides the job, so a local payload is unchanged.
+    ...(isRemoteHostId(opts.hostId) ? { hostId: opts.hostId } : {}),
   });
 
   // Await the session row via the session-created event. Concurrent create-quick
@@ -227,14 +263,17 @@ export async function createQuickSessionCore(
     // matching by path exactly as before. Names carry no separators, so this
     // branch needs no normalization.
     const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
-    const onCreated = (createdSession: QuickSessionRow) => {
+    const matchesThisCall = (createdSession: QuickSessionRow): boolean => {
       const wt = normalizePathSeparators(createdSession.worktreePath ?? '');
       const name = createdSession.name ?? '';
-      const matches =
+      return (
         wt.split('/').pop() === branchName ||
         suffixed.test(wt) ||
-        (inPlace && (name === branchName || nameSuffixed.test(name)));
-      if (!matches) return;
+        (inPlace && (name === branchName || nameSuffixed.test(name)))
+      );
+    };
+    const onCreated = (createdSession: QuickSessionRow) => {
+      if (!matchesThisCall(createdSession)) return;
       // Claim the session id so a concurrent sibling call doesn't also resolve to it.
       if (claimedQuickSessionIds.has(createdSession.id)) return;
       claimedQuickSessionIds.add(createdSession.id);
@@ -247,8 +286,14 @@ export async function createQuickSessionCore(
     };
     const timeout = setTimeout(() => {
       cleanup();
+      if (remote) {
+        // The remote job is still provisioning and nobody will ever receive its id: retire it when it lands.
+        watchForLateRemoteSession(deps, opts.hostId, job.id, matchesThisCall);
+        reject(new Error(REMOTE_QUICK_SESSION_TIMEOUT_MESSAGE));
+        return;
+      }
       reject(new Error('Timed out waiting for quick session to be created'));
-    }, opts.timeoutMs ?? 30_000);
+    }, opts.timeoutMs ?? (remote ? REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS : LOCAL_QUICK_SESSION_CREATE_TIMEOUT_MS));
     const cleanup = () => {
       clearTimeout(timeout);
       sessionManager.removeListener('session-created', onCreated);
@@ -318,10 +363,64 @@ export async function createQuickSessionCore(
 
     return { session, runId, resolvedSubstrate, jobId: job.id };
   } catch (err) {
+    // A remote session's worktree lives on its environment: remove it there first (best-effort; the merge-back
+    // row records any failure). The local dismiss below then only finds the session row to retire.
+    if (isRemoteHostId(opts.hostId)) {
+      await getRemoteCheckout()?.removeSessionWorktree(session.id).catch(() => false);
+    }
     if (deps.dismissHalfCreatedSession) {
       await deps.dismissHalfCreatedSession(session.id).catch(() => {});
     }
     throw err;
+  }
+}
+
+/**
+ * After a REMOTE create's waiter timed out, the session-create job may still finish: its session-created would then
+ * surface a session no caller holds (an orphan with a live environment worktree). Watch for it and retire it — remove
+ * the environment worktree, then dismiss (or, unwired, archive) the row. A job that FAILS late needs nothing: the
+ * task queue already compensated it. The watch claims the id (so a concurrent sibling waiter cannot resolve to the
+ * orphan) and expires after another provisioning budget so a job that never settles cannot leak the listener.
+ */
+function watchForLateRemoteSession(
+  deps: CreateQuickSessionCoreDeps,
+  hostId: string | null | undefined,
+  jobId: string,
+  matches: (s: QuickSessionRow) => boolean,
+): void {
+  const { sessionManager, taskQueue } = deps;
+  let unsubscribeFailed: () => void = () => {};
+  const stop = (): void => {
+    clearTimeout(expiry);
+    sessionManager.removeListener('session-created', onLate);
+    unsubscribeFailed();
+  };
+  const onLate = (late: QuickSessionRow): void => {
+    if (!matches(late) || claimedQuickSessionIds.has(late.id)) return;
+    claimedQuickSessionIds.add(late.id);
+    stop();
+    void compensateLateRemoteSession(deps, hostId, late.id);
+  };
+  const expiry = setTimeout(stop, REMOTE_QUICK_SESSION_CREATE_TIMEOUT_MS);
+  expiry.unref?.();
+  sessionManager.on('session-created', onLate);
+  unsubscribeFailed = taskQueue.onSessionJobFailed((failedJobId) => {
+    if (failedJobId === jobId) stop();
+  });
+}
+
+async function compensateLateRemoteSession(
+  deps: CreateQuickSessionCoreDeps,
+  hostId: string | null | undefined,
+  sessionId: string,
+): Promise<void> {
+  if (isRemoteHostId(hostId)) {
+    await getRemoteCheckout()?.removeSessionWorktree(sessionId).catch(() => false);
+  }
+  if (deps.dismissHalfCreatedSession) {
+    await deps.dismissHalfCreatedSession(sessionId).catch(() => {});
+  } else if (deps.sessionManager.archiveSession) {
+    await deps.sessionManager.archiveSession(sessionId).catch(() => {});
   }
 }
 
@@ -448,4 +547,117 @@ export function stampQuickSessionRuntimeConfig(
             agent_runtime = ?
       WHERE id = ?`,
   ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, sessionId);
+}
+
+/** The slice of the hosts facade (orchestrator/hostsBridge.ts `HostsFacade`) the host resolver reads. */
+export interface QuickSessionHostsReader {
+  status(): HostsFeatureStatus;
+  /** Throws when the id is unknown. */
+  get(id: string): HostView;
+}
+
+/** What {@link resolveQuickSessionHost} needs to know about the launch being resolved. */
+export interface QuickSessionHostInput {
+  /** The raw IPC `hostId` (untrusted): a string names an environment, null = This Mac, absent = default. */
+  requestedHostId: unknown;
+  /** projects.default_host_id (migration 152). */
+  projectDefaultHostId: string | null | undefined;
+  /** The RESOLVED session runtime (undefined = Claude, decided by the substrate). */
+  agentRuntime: SessionAgentRuntime | undefined;
+  /** The substrate the launch requests (undefined = the substrate ladder decides — the PTY by default). */
+  requestedSubstrate: CliSubstrate | undefined;
+  inPlace: boolean;
+  isDesignSession: boolean;
+  ultracode: boolean;
+  /** CYBOFLOW_DISABLE_ORCH_SOCK_AUTH is set: a remote agent could not authenticate to the orch socket. */
+  orchSocketAuthDisabled: boolean;
+}
+
+export type QuickSessionHostResolution = { ok: true; hostId: string | null } | { ok: false; error: string };
+
+export const REMOTE_ENVIRONMENTS_OFF_MESSAGE = 'Remote environments are turned off';
+
+/**
+ * The launch-shape reason this session cannot run on a remote environment, or null when it can. M2 hosts only
+ * worktree-backed structured SDK sessions (Claude SDK / Codex SDK); PTY terminals, design, ultracode and in-place
+ * sessions stay on This Mac.
+ */
+function remoteShapeRefusal(input: QuickSessionHostInput): string | null {
+  if (input.inPlace) return 'In-place sessions run on This Mac only. Choose a worktree session to use a remote environment.';
+  if (input.isDesignSession) return 'Design sessions run on This Mac only.';
+  if (input.ultracode) return 'Ultracode sessions run on This Mac only.';
+  const runtime = remoteSessionRuntime(input);
+  if (runtime === null) {
+    return 'Remote environments run Claude SDK or Codex SDK sessions only. Terminal and other agents run on This Mac.';
+  }
+  return null;
+}
+
+/** claude-sdk / codex-sdk on the SDK substrate, else null. Claude's runtime comes from the substrate. */
+function remoteSessionRuntime(input: QuickSessionHostInput): 'claude-sdk' | 'codex-sdk' | null {
+  if (input.requestedSubstrate !== 'sdk') return null;
+  const runtime = input.agentRuntime ?? 'claude-sdk';
+  return runtime === 'claude-sdk' || runtime === 'codex-sdk' ? runtime : null;
+}
+
+/**
+ * Decide which environment a `sessions:create-quick` launch runs on, BEFORE anything is enqueued:
+ * an explicit request (a string; 'local' = This Mac) > the project's default environment (only while
+ * environments are running and not kill-switched, and only for a session shape a remote can host) > This Mac.
+ * A remote pick is validated (exists, not archived, SSH, full tier, cyboflow tools installed, the runtime's SDK
+ * available there); every refusal is a readable message the renderer shows. Local resolves to null — the
+ * canonical stamp — so a local launch threads nothing.
+ */
+export function resolveQuickSessionHost(
+  hosts: QuickSessionHostsReader | null,
+  input: QuickSessionHostInput,
+): QuickSessionHostResolution {
+  const explicit = input.requestedHostId;
+  const status = hosts?.status() ?? null;
+  const featureOn = status !== null && status.running && !status.killed;
+
+  let candidate: string | null;
+  if (typeof explicit === 'string' && explicit.trim().length > 0) {
+    candidate = explicit.trim();
+  } else if (explicit === null) {
+    candidate = null;
+  } else {
+    // Absent (or a blank string — treated as "no choice").
+    // No explicit choice: the project default applies only while the feature runs, and only to a session shape a
+    // remote environment can host — a terminal or design launch in a remote-default project stays on This Mac.
+    const fallback = featureOn ? input.projectDefaultHostId : null;
+    candidate = isRemoteHostId(fallback) && remoteShapeRefusal(input) === null ? fallback : null;
+  }
+  if (!isRemoteHostId(candidate)) return { ok: true, hostId: null };
+
+  if (!featureOn || hosts === null) return { ok: false, error: REMOTE_ENVIRONMENTS_OFF_MESSAGE };
+  if (input.orchSocketAuthDisabled) {
+    return { ok: false, error: 'Remote environments need orchestrator socket authentication, which is turned off (CYBOFLOW_DISABLE_ORCH_SOCK_AUTH).' };
+  }
+  const shapeRefusal = remoteShapeRefusal(input);
+  if (shapeRefusal !== null) return { ok: false, error: shapeRefusal };
+
+  let host: HostView;
+  try {
+    host = hosts.get(candidate);
+  } catch {
+    return { ok: false, error: 'That environment no longer exists. Pick another environment.' };
+  }
+  const name = host.label;
+  if (host.archivedAt !== null) return { ok: false, error: `The environment "${name}" is archived.` };
+  if (host.kind !== 'ssh') return { ok: false, error: `The environment "${name}" is not a remote machine.` };
+  if (host.effectiveTier !== 'full') {
+    return { ok: false, error: `The environment "${name}" cannot run SDK sessions yet. Run its check from Environments.` };
+  }
+  if (!host.remoteReady) {
+    return { ok: false, error: `Install cyboflow tools on "${name}" (Environments) before starting a session there.` };
+  }
+  const runtime = remoteSessionRuntime(input);
+  const runtimes = host.preflight?.runtimes;
+  const available = runtime === 'claude-sdk' ? runtimes?.claudeSdk === true : runtimes?.codexSdk === true;
+  if (!available) {
+    const label = runtime === 'claude-sdk' ? 'Claude' : 'Codex';
+    return { ok: false, error: `${label} is not available on "${name}". Check the machine from Environments.` };
+  }
+  return { ok: true, hostId: candidate };
 }

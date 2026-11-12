@@ -33,7 +33,13 @@ import {
   createQuickSessionCore,
   stampQuickSessionRuntimeConfig,
   QUICK_PROVIDER_SDK_RUNTIME,
+  resolveQuickSessionHost,
 } from '../services/createQuickSessionCore';
+import { peekHostsFacade } from '../orchestrator/hostsBridge';
+import { isRemoteHostId } from '../../../shared/types/hosts';
+import { remoteUnavailableError } from '../../../shared/types/remoteEnvironment';
+import { getRemoteCheckout } from '../services/hosts/remoteCheckoutBridge';
+import { isOrchSockAuthDisabled } from '../orchestrator/orchAuthToken';
 import { isPermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -1238,6 +1244,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         : quickResolvedRuntime;
       const quickRequestedSubstrateForLaunch = isDesignSession ? 'sdk' : requestedSubstrate;
 
+      // Environment (M2): explicit request > project default (environments on) > This Mac. Every refusal lands
+      // HERE, before anything is enqueued; a local launch resolves to null and threads nothing.
+      const hostResolution = resolveQuickSessionHost(peekHostsFacade(), {
+        requestedHostId: request.hostId,
+        projectDefaultHostId: targetProject.default_host_id,
+        agentRuntime: quickAgentRuntimeForLaunch,
+        requestedSubstrate: quickRequestedSubstrateForLaunch,
+        inPlace,
+        isDesignSession,
+        ultracode: requestedEffort === 'ultracode',
+        orchSocketAuthDisabled: isOrchSockAuthDisabled(),
+      });
+      if (!hostResolution.ok) return { success: false, error: hostResolution.error };
+
       // Create the session + wire the __quick__ sentinel run via the SHARED core
       // (createQuickSessionCore) — the same path experiments.startSideBySide uses
       // for its SHA-pinned arm sessions. The core: enqueues the session-create job
@@ -1270,6 +1290,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // matching to the NAME fallback.
           inPlace,
           ...(isDesignSession ? { requireSdkSubstrate: true } : {}),
+          ...(hostResolution.hostId !== null ? { hostId: hostResolution.hostId } : {}),
         },
       );
 
@@ -1837,7 +1858,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // (singleton dashboard) or in-place sessions (migration 047) — an in-place
         // session's worktree_path IS the user's real checkout, which must never be
         // torn down by `git worktree remove`.
-        if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
+        // M2: a remote session's worktree and branch live on the environment, never in the local repo (a local
+        // `branch -D <name>` could delete the user's own branch of that name).
+        if (isRemoteHostId(dbSession.host_id)) {
+          if (!(await getRemoteCheckout()?.removeSessionWorktree(sessionId))) cleanupMessage += `\x1b[33m⚠ The environment's worktree was not fully removed\x1b[0m\r\n`;
+        } else if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
           const project = databaseService.getProject(dbSession.project_id);
           if (project) {
             try {
@@ -3131,9 +3156,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    */
   const assertAttachmentOwner = async (ownerId: string): Promise<void> => {
     if (isPendingAttachmentOwner(ownerId)) return;
-    if (await sessionManager.getSession(ownerId)) return;
-    if (cyboflow.workflowRegistry.getRunById(ownerId)) return;
-    throw new Error('Attachment owner not found');
+    const session = await sessionManager.getSession(ownerId);
+    const run = session ? null : cyboflow.workflowRegistry.getRunById(ownerId);
+    if (!session && !run) throw new Error('Attachment owner not found');
+    // M2: the saved files live on this Mac, where an agent on a remote environment cannot read them.
+    if (isRemoteHostId(session ? session.hostId : run?.host_id)) throw new Error(remoteUnavailableError('Attaching files'));
   };
 
   ipcMain.handle('sessions:save-images', async (_event, ownerId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => {

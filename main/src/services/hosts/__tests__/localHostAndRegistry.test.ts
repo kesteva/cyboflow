@@ -2,12 +2,17 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PREFLIGHT_CHECK_IDS, type PreflightCheckResult } from '../../../../../shared/types/hosts';
+import {
+  PREFLIGHT_CHECK_IDS,
+  type PreflightCheckResult,
+  type PreflightRemoteFacts,
+  type PreflightResult,
+} from '../../../../../shared/types/hosts';
 import type { HostRow } from '../../../orchestrator/hosts/hostStore';
 import { HostNotFoundError } from '../../../orchestrator/hosts/errors';
 import type { ExecutionHost } from '../../../orchestrator/trpc/contracts/executionHost';
 import { LocalHost, execErrorToResult, type LocalHostDeps } from '../localHost';
-import { HostRegistry } from '../hostRegistry';
+import { HostRegistry, remoteFactsFromPreflight } from '../hostRegistry';
 import { HostPathMismatchError, SshHost } from '../sshHost';
 import type { ProcessRunner, SshTransportLike } from '../sshTransport';
 
@@ -135,11 +140,51 @@ function row(over: Partial<HostRow> = {}): HostRow {
   };
 }
 
+const REMOTE: PreflightRemoteFacts = {
+  home: '/Users/k', remoteRoot: '/Users/k/cf-remote/h1', user: 'k', logname: 'k', shell: '/bin/zsh',
+  tmpdir: '/var/folders/T/', lang: 'en_US.UTF-8', nodePath: '/opt/homebrew/bin/node', gitPath: '/usr/bin/git',
+  codexPath: null, arch: 'arm64', socketPathOk: true,
+};
+
+function preflightWith(remote: PreflightRemoteFacts | undefined, over: Partial<PreflightResult> = {}): PreflightResult {
+  return {
+    hostId: 'h1', mode: 'full', startedAt: '2026-10-09T00:00:00.000Z', finishedAt: '2026-10-09T00:00:01.000Z',
+    results: [], reachable: true, probeComplete: true, detectedTier: 'cli',
+    runtimes: { claudeSdk: false, codexSdk: false, claudeCli: true, codexCli: false },
+    arch: 'arm64', osVersion: 'macOS 15.1', toolchainHash: null, appVersion: '1',
+    ...(remote ? { remote } : {}),
+    ...over,
+  };
+}
+
+describe('remoteFactsFromPreflight', () => {
+  it('builds the spawn facts with the probed node / git dirs ahead of the system PATH', () => {
+    expect(remoteFactsFromPreflight(preflightWith({ ...REMOTE, gitPath: '/opt/git/bin/git' }))?.path)
+      .toBe('/opt/homebrew/bin:/opt/git/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+    expect(remoteFactsFromPreflight(preflightWith({ ...REMOTE, nodePath: null, gitPath: 'git' }))?.path)
+      .toBe('/usr/bin:/bin:/usr/sbin:/sbin');
+    expect(remoteFactsFromPreflight(preflightWith({ ...REMOTE, gitPath: '/opt/homebrew/bin/git' }))?.path)
+      .toBe('/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+  });
+
+  it('is null without a preflight, without recorded facts, or for an incomplete result', () => {
+    expect(remoteFactsFromPreflight(null)).toBeNull();
+    expect(remoteFactsFromPreflight(undefined)).toBeNull();
+    expect(remoteFactsFromPreflight(preflightWith(undefined))).toBeNull();
+    expect(remoteFactsFromPreflight(preflightWith(REMOTE, { probeComplete: false }))).toBeNull();
+    expect(remoteFactsFromPreflight(preflightWith({ ...REMOTE, remoteRoot: '~/cf' }))).toBeNull();
+  });
+});
+
 describe('HostRegistry', () => {
   const transport: SshTransportLike = {
     exec: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     runScript: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
     closeMaster: vi.fn(),
+    controlArgs: () => [],
+    spawnStreaming: () => { throw new Error('not used'); },
+    openForward: () => { throw new Error('not used'); },
+    pushStream: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
   };
 
   function registry(rows: Map<string, HostRow>) {
@@ -154,7 +199,7 @@ describe('HostRegistry', () => {
     const a = reg.get('h1');
     expect(a).toBeInstanceOf(SshHost);
     expect(reg.get('h1')).toBe(a);
-    expect(a.info).toEqual({ id: 'h1', kind: 'ssh', label: 'Box' });
+    expect(a.info).toEqual({ id: 'h1', kind: 'ssh', label: 'Box', remoteRoot: null });
   });
 
   it('rebuilds when the target changes and on invalidate (closing the old master)', () => {
@@ -169,6 +214,40 @@ describe('HostRegistry', () => {
     expect(reg.get('h1')).not.toBe(b);
     reg.closeAllMasters();
     expect(transport.closeMaster).toHaveBeenLastCalledWith('box2');
+  });
+
+  it('a cached SshHost reads remote facts LIVE: a preflight recorded after it was built is visible', () => {
+    const rows = new Map([['h1', row()]]);
+    const { reg } = registry(rows);
+    const a = reg.get('h1');
+    expect(a.info.remoteRoot).toBeNull();
+    rows.set('h1', row({ preflight: preflightWith(REMOTE) }));
+    const b = reg.get('h1');
+    expect(b).toBe(a);
+    expect(b.info.remoteRoot).toBe('/Users/k/cf-remote/h1');
+  });
+
+  it('hands the SshHost a facts getter built from the stored preflight', () => {
+    const rows = new Map([['h1', row({ preflight: preflightWith(REMOTE) })]]);
+    let getter: (() => unknown) | undefined;
+    const reg = new HostRegistry({
+      store: { get: (id) => rows.get(id) ?? null },
+      transport,
+      local: {} as ExecutionHost,
+      appVersion: '1',
+      createSshHost: (d) => {
+        getter = d.remoteFacts;
+        return new SshHost(d);
+      },
+    });
+    reg.get('h1');
+    expect(getter?.()).toEqual({
+      remoteRoot: '/Users/k/cf-remote/h1', home: '/Users/k',
+      path: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      user: 'k', logname: 'k', shell: '/bin/zsh', tmpdir: '/var/folders/T/', lang: 'en_US.UTF-8',
+    });
+    rows.set('h1', row({ preflight: null }));
+    expect(getter?.()).toBeNull();
   });
 
   it('unknown or archived hosts throw HostNotFoundError', () => {

@@ -25,6 +25,9 @@ import { SessionActionToast } from './SessionActionToast';
 import { workflowTitleForName } from './wizard/workflowMeta';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
+import { EnvironmentPicker, useEnvironmentSelection } from './EnvironmentPicker';
+import { isRemoteLaunchRuntime } from '../agentsEnv/hostLaunchability';
+import { API } from '../../utils/api';
 import { ModelSelector, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
@@ -249,6 +252,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const {
     value: agentRuntime,
     setByUser: setAgentRuntimeByUser,
+    reseed: reseedAgentRuntime,
     isTouched: isAgentRuntimeTouched,
   } = useSeededSelection<LaunchAgentRuntime>({
     key: runTypeKey,
@@ -334,6 +338,39 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     if (launchModel !== model) reseedModel(launchModel);
   }, [launchModel, model, reseedModel]);
 
+  // Environment (where the session/run executes). The project's default environment is read once per project
+  // from the project row; a missing/failed read just means This Mac.
+  const [projectDefaultHostId, setProjectDefaultHostId] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await API.projects?.getAll();
+        const row = res?.success ? res.data?.find((p) => p.id === projectId) : undefined;
+        if (!cancelled) setProjectDefaultHostId(row?.default_host_id ?? null);
+      } catch {
+        if (!cancelled) setProjectDefaultHostId(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+  const envSelection = useEnvironmentSelection({
+    projectId,
+    projectDefaultHostId,
+    runtime: agentRuntime,
+    kind: 'workflow',
+  });
+  const remoteHostId = envSelection.remoteHostId;
+  // What launch requests carry: undefined (omit) while the picker is hidden, else the explicit pick (null = This Mac).
+  const requestHostId = envSelection.requestHostId;
+  // ONE derived value feeding the runtime coercion: a remote host only runs SDK runtimes.
+  const runtimeNeedsRemoteCoercion = remoteHostId !== null && !isRemoteLaunchRuntime(agentRuntime);
+  useEffect(() => {
+    if (runtimeNeedsRemoteCoercion) reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
+  }, [runtimeNeedsRemoteCoercion, reseedAgentRuntime]);
+
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
    * 'rotation' — a no-op selection ({@link variantSelectionToStartInput} sends
@@ -391,6 +428,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     error: quickError,
   } = useQuickSession({
     projectId,
+    hostId: requestHostId,
     onSuccess: (sessionId) => {
       onWorkflowStarted?.(sessionId);
     },
@@ -495,6 +533,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
           agentModel: launchModel,
+          ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -529,7 +568,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, requestHostId],
   );
 
   /**
@@ -559,6 +598,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
           agentModel: launchModel,
+          ...(requestHostId !== undefined ? { hostId: requestHostId } : {}),
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -588,7 +628,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows, requestHostId],
   );
 
   const handleStartRun = async () => {
@@ -710,7 +750,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     )
       ? quickDefaults.agentRuntime
       : claudeRuntimeFromSubstrate(quickDefaults.substrate);
-    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched
+    // A remote environment only hosts SDK runtimes: an untouched quick default it cannot run follows the
+    // picker's (already coerced) runtime instead, transport included, or main refuses the launch.
+    const followsRemoteCoercion =
+      !isAgentRuntimeTouched && remoteHostId !== null && !isRemoteLaunchRuntime(quickDefaultRuntime);
+    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched || followsRemoteCoercion
       ? agentRuntime
       : quickDefaultRuntime;
     const quickPermissionMode = isPermissionModeTouched
@@ -723,7 +767,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // authoritative.
     const quickProvider = providerForRuntime(sessionRuntime);
     const quickSubstrate =
-      isAgentRuntimeTouched || quickProvider !== 'claude'
+      isAgentRuntimeTouched || followsRemoteCoercion || quickProvider !== 'claude'
         ? substrateForRuntime(sessionRuntime)
         : quickDefaults.substrate;
     // The model follows the same touched/untouched rule, with one extra guard.
@@ -783,6 +827,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     globalAgentRuntime,
     startQuickSession,
     quickDefaultSubstrate,
+    remoteHostId,
   ]);
 
   const selectedWorkflowTitle = workflowTitleForName(
@@ -890,6 +935,13 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       )}
 
       {/* Agent runtime selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
+      <EnvironmentPicker
+        selection={envSelection}
+        projectId={projectId}
+        kind="workflow"
+        runtime={agentRuntime}
+        id="workflow-picker-environment"
+      />
       <SubstrateSelector
         value={agentRuntime}
         // A real per-launch choice — after this the Quick Session button uses the
@@ -899,6 +951,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         id="workflow-picker-substrate"
         caveatsTestId="workflow-picker-substrate-caveats"
         runtimeScope="mixed"
+        remoteEnvironment={
+          remoteHostId !== null ? (envSelection.hosts.find((h) => h.id === remoteHostId)?.label ?? 'this environment') : null
+        }
       />
 
       {/* Session permission selector — an explicit choice permanently sets the
