@@ -757,6 +757,28 @@ describe('MergeBackService data safety (real git)', { timeout: 30_000 }, () => {
     expect(fs.readFileSync(path.join(remoteWt(), file), 'utf8')).toBe(body);
   });
 
+  it('C3: a cut-off resync is still finished when main gained another commit before the retry', async () => {
+    const service = await cutOffResync();
+    commit(project, 'y.txt', 'main y\n'); // another session merged in the meantime
+    await expect(service.resync('s1', 'main')).resolves.toBe(true);
+    expect(fs.readFileSync(path.join(remoteWt(), 'x.txt'), 'utf8')).toBe('main x\n');
+    expect(fs.readFileSync(path.join(remoteWt(), 'y.txt'), 'utf8')).toBe('main y\n');
+    expectResynced();
+  });
+
+  it('C3: after a cut-off resync and a newer main, an edit on the environment is still refused and nothing moves', async () => {
+    const service = await cutOffResync();
+    const cutOffMain = mainSha();
+    commit(project, 'y.txt', 'main y\n');
+    fs.writeFileSync(path.join(remoteWt(), 'b.txt'), 'edited\n');
+    await expect(service.resync('s1', 'main')).resolves.toBe(false);
+    expect(mergeBacks.get('s1')).toMatchObject({ state: 'merged' });
+    expect(mergeBacks.get('s1')?.lastError).toMatch(/^Uncommitted changes on Studio after the merge/);
+    expect(git(remoteWt(), ['rev-parse', 'HEAD']).trim()).toBe(cutOffMain);
+    expect(fs.readFileSync(path.join(remoteWt(), 'b.txt'), 'utf8')).toBe('edited\n');
+    expect(fs.existsSync(path.join(remoteWt(), 'y.txt'))).toBe(false);
+  });
+
   it('LC-5: a merged row whose close-out completed is only resynced at boot, never closed out again', async () => {
     commit(remoteWt(), 'b.txt', 'b\n');
     const service = new MergeBackService({

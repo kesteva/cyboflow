@@ -825,7 +825,9 @@ export class MergeBackService implements MergeBackServiceLike {
    *      (and touching nothing) when a local change would be overwritten; then the branch is swapped back (CAS again)
    *      and the dirty error keeps `merged` for a later retry.
    * A connection lost between 2 and 3 leaves the branch at main over the imported tree; the next run recognises
-   * exactly that (index == imported tree, worktree == index) and finishes step 3.
+   * exactly that (index == imported tree, worktree == index) and finishes step 3. Main may have moved again by
+   * then, so "at main" means today's main or an ancestor of it (the main of the cut-off run): the branch is brought
+   * forward first (CAS), then the tree.
    */
   private async resetRemoteLocked(row: MergeBackRow, r: ResolvedHost, mainSha: string): Promise<'reset' | 'current' | 'moved'> {
     const label = r.row.label;
@@ -852,11 +854,23 @@ export class MergeBackService implements MergeBackServiceLike {
       // An earlier resync moved the branch (step 2) but lost the connection before step 3: the branch is at main
       // while the index + worktree still hold EXACTLY the imported tree. That reads as "dirty" (a staged revert of
       // main) forever — finish the move instead. Any other difference is a real local change: refused as before.
-      if (importSha === null || (await tipOf()) !== mainSha || !(await onBranch())) throw dirty();
+      const tip = await tipOf();
+      if (importSha === null || tip === '' || tip === importSha || !(await onBranch())) throw dirty();
+      // Another merge may have landed on main since the cut-off: the branch then sits at THAT run's main, an
+      // ancestor of today's. Requiring today's sha would refuse this state forever, and "ask the agent to commit"
+      // would commit a revert of main.
+      if (tip !== mainSha) {
+        const olderMain = await r.host.git.run(wt, ['merge-base', '--is-ancestor', tip, mainSha], opts);
+        if (olderMain.code !== 0) throw dirty();
+      }
       await r.host.git.run(wt, ['update-index', '-q', '--refresh'], opts);
       const indexIsImport = await r.host.git.run(wt, ['diff-index', '--cached', '--quiet', importSha, '--'], opts);
       const worktreeIsIndex = await r.host.git.run(wt, ['diff-files', '--quiet'], opts);
       if (indexIsImport.code !== 0 || worktreeIsIndex.code !== 0) throw dirty();
+      if (tip !== mainSha) {
+        const forward = await r.host.git.run(wt, ['update-ref', '-m', 'cyboflow: resync after merge', branchRef, mainSha, tip], opts);
+        if (forward.code !== 0) throw dirty();
+      }
       // Refuses (touching nothing) when an untracked file would be overwritten; the branch then goes back to the
       // imported tip, the consistent state a retry handles like any dirty tree.
       const finish = await r.host.git.run(wt, ['read-tree', '-m', '-u', importSha, mainSha], { timeoutMs: WORKTREE_TIMEOUT_MS });
