@@ -21,6 +21,7 @@ import {
   type SyncErrorBody,
   type TrackerClaimResponse,
 } from '../../../../shared/types/remoteSyncWire';
+import { validateDevices } from '../cloud/accountsHttpClient';
 
 /** Injected so tests never touch the network. */
 export type FetchLike = typeof fetch;
@@ -145,6 +146,12 @@ export class SyncHttpClient {
     action: 'check' | 'claim' | 'release';
   }): Promise<SyncResult<TrackerClaimResponse>> {
     return this.request('POST', '/v1/tracker-claims', req);
+  }
+
+  /** The account's devices (GET /v1/devices on the same origin), reduced to what conflicts name: id and name. */
+  async listDevices(): Promise<Array<{ id: string; name: string }>> {
+    const r = await this.request<unknown>('GET', '/v1/devices');
+    return validateDevices(r.body).map(({ id, name }) => ({ id, name }));
   }
 
   checksum(projectId: string, req: { atSeq: number; hash: string }): Promise<SyncResult<ChecksumResponse>> {

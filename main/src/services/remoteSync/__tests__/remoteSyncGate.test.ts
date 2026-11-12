@@ -165,6 +165,7 @@ describe('remote sync gate', () => {
         staging: false,
         signedIn: false,
         projects: [],
+        conflictsRevision: 0,
       });
     });
 

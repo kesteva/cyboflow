@@ -207,7 +207,14 @@ export function TrackerIntegrationSection(): React.JSX.Element {
                         <span
                           className={cn('h-2 w-2 flex-shrink-0 rounded-full', status.dotClass)}
                         />
-                        {status.label}
+                        {/* A connection sync paused says why (which computer runs it); cut to fit, full text in the tooltip and Manage. */}
+                        {connection.claimHold ? (
+                          <span className="max-w-[18rem] truncate" title={connection.claimHold}>
+                            {connection.claimHold}
+                          </span>
+                        ) : (
+                          status.label
+                        )}
                       </span>
                       <Button
                         type="button"

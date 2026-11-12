@@ -38,7 +38,7 @@ beforeEach(() => {
   router = TaskChangeRouter.initialize(adapter);
   store = new SyncStore(adapter);
   store.optIn(projectId, 'rp', 'fp');
-  deps = { db: adapter, router, store, deviceId: 'dev-1', now: () => NOW };
+  deps = { db: adapter, router, store, deviceId: 'dev-1', deviceName: (d) => (d === 'dev-2' ? 'Studio' : null), now: () => NOW };
   seq = 0;
 });
 
@@ -85,8 +85,8 @@ describe('field conflicts', () => {
     expect(open()).toEqual([
       expect.objectContaining({
         id: 'c1', entityType: 'task', field: 'title', changedSince: false, currentNow: 'Studio title',
-        current: { value: 'Studio title', device: 'dev-2', thisDevice: false, at: NOW - 30_000 },
-        other: { value: 'My title', device: 'dev-1', thisDevice: true, at: NOW - 60_000 },
+        current: { value: 'Studio title', device: 'dev-2', thisDevice: false, deviceName: 'Studio', at: NOW - 30_000 },
+        other: { value: 'My title', device: 'dev-1', thisDevice: true, deviceName: null, at: NOW - 60_000 },
         actions: ['keep', 'use_other', 'merge'],
         pendingResolution: null,
       }),
@@ -158,7 +158,13 @@ describe('dependency edge', () => {
       id: 'e1', entityId: a, kind: 'dependency_edge', field: 'depends_on',
       extra: { removedEdge: { taskId: a, dependsOnId: b }, keptEdge: { taskId: b, dependsOnId: a } },
     });
-    expect(open()[0].actions).toEqual(['keep', 'swap']);
+    // A client-filed record has no title: the view names the item from the local copy.
+    expect(open()[0]).toMatchObject({ actions: ['keep', 'swap'], entityTitle: 'a' });
+    const refOf = (id: string) => (db.prepare('SELECT ref FROM tasks WHERE id = ?').get(id) as { ref: string }).ref;
+    expect(open()[0].edges).toEqual({
+      removed: { task: `${refOf(a)} a`, dependsOn: `${refOf(b)} b` },
+      kept: { task: `${refOf(b)} b`, dependsOn: `${refOf(a)} a` },
+    });
     expect(await resolveConflict(deps, 'e1', { kind: 'swap' })).toMatchObject({ ok: true });
     expect(edges()).toEqual([{ t: a, d: b }]);
     expect(store.listPendingResolutions(projectId)).toEqual([{ id: 'e1', resolution: 'swapped' }]);

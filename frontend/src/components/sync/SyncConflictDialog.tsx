@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { RemoteSyncConflict, RemoteSyncConflictAction } from '../../../../shared/types/remoteSync';
+import type { RemoteSyncConflict, RemoteSyncConflictAction, RemoteSyncConflictEdge } from '../../../../shared/types/remoteSync';
 import { trpc } from '../../trpc/client';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
@@ -32,6 +32,11 @@ interface OrphanChild {
   id: string;
   ref: string;
   type: string;
+}
+
+/** "A depends on B" for one edge of a dependency conflict. */
+function edgeText(edge: RemoteSyncConflictEdge): string {
+  return `${edge.task ?? 'a deleted task'} depends on ${edge.dependsOn ?? 'a deleted task'}`;
 }
 
 function childrenOf(extra: unknown): OrphanChild[] {
@@ -94,6 +99,7 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
   }, []);
 
   const children = childrenOf(conflict.extra);
+  const edges = conflict.edges;
   const parents = useMemo(
     () =>
       tasks.filter(
@@ -173,6 +179,24 @@ function DialogBody({ conflict, onClose }: { conflict: RemoteSyncConflict; onClo
             <ValuePane key={field} title={field} text={formatValue(value)} />
           ))}
         </div>
+      ) : conflict.kind === 'dependency_edge' ? (
+        <ul className="space-y-1 text-xs text-text-secondary" data-testid="sync-conflict-edges">
+          {edges?.removed && (
+            <li>
+              <span className="font-semibold text-status-warning">Removed:</span> {edgeText(edges.removed)}
+            </li>
+          )}
+          {edges?.kept && (
+            <li>
+              <span className="font-semibold text-text-primary">Kept:</span> {edgeText(edges.kept)}
+            </li>
+          )}
+          <li className="text-text-tertiary">
+            {edges?.removed && edges.kept
+              ? 'Both machines added one of these at once, which made a cycle.'
+              : 'A dependency added on another machine at the same time made a cycle.'}
+          </li>
+        </ul>
       ) : conflict.kind === 'orphaned' ? (
         <ul className="text-xs text-text-secondary" data-testid="sync-conflict-children">
           {children.map((c) => (
