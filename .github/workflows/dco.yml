@@ -27,10 +27,27 @@ jobs:
             });
 
             const failures = [];
+            let botExempt = 0;
             for (const c of commits) {
               const sha = c.sha.substring(0, 7);
               // Merge commits (2+ parents) are not authored work — skip them.
               if (c.parents && c.parents.length > 1) continue;
+
+              // Commits made by Claude's cloud sessions (e.g. Sentry auto-fix PRs)
+              // are exempt: a sign-off is a human's certification, which the bot
+              // cannot give, and the maintainer reviews every such PR before merge.
+              // All three must hold, so setting the author email alone is not
+              // enough: GitHub links the commit to the `claude` account, the
+              // author email is Anthropic's noreply address, and GitHub reports
+              // the commit's signature as verified.
+              const authorLogin = (c.author && c.author.login) || '';
+              const authorEmail = ((c.commit.author && c.commit.author.email) || '').trim().toLowerCase();
+              const verified = Boolean(c.commit.verification && c.commit.verification.verified);
+              if (authorLogin === 'claude' && authorEmail === 'noreply@anthropic.com' && verified) {
+                core.info(`${sha}: authored by the Claude bot (verified); sign-off not required`);
+                botExempt++;
+                continue;
+              }
 
               const message = c.commit.message || '';
               const matches = [...message.matchAll(/^Signed-off-by: (.+) <(.+)>$/gim)];
@@ -59,5 +76,9 @@ jobs:
                   failures.join('\n')
               );
             } else {
-              core.info(`DCO: all ${commits.length} commit(s) signed off.`);
+              core.info(
+                botExempt
+                  ? `DCO: all ${commits.length} commit(s) pass (${botExempt} exempt as Claude bot commits).`
+                  : `DCO: all ${commits.length} commit(s) signed off.`
+              );
             }
