@@ -42,6 +42,115 @@ const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
 const SCAN_INTERVAL_MS = 60_000; // 60 seconds
 
 // ---------------------------------------------------------------------------
+// parked_no_gate telemetry context
+//
+// CYBOFLOW-APP-2P ("Run wedged (stuck): parked_no_gate") reported THAT a run
+// parked but nothing about which shape it parked in, so the cause could not be
+// traced from Sentry. The tags below say which shape it was, and nothing else.
+//
+// Privacy contract (see the payload rules on emitSeamError in telemetrySink.ts):
+// every value is either a fixed literal written here or a DB column value
+// mapped through an allowlist of internal enum labels, with anything unknown
+// collapsed to 'other'. No run id, session id, step id, workflow or flow name,
+// prompt, agent output, path, repo, branch, env var or other free text is read
+// or sent. Times are bucketed, never exact. These tags are NOT part of the
+// Sentry fingerprint (seam + errorClass + errorDigest), so issue grouping is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+const EXECUTION_MODEL_TAG_VALUES = new Set(['orchestrated', 'programmatic']);
+const SUBSTRATE_TAG_VALUES = new Set(['sdk', 'interactive']);
+/** Internal raw_events.event_type labels (SDK message kinds and Cyboflow's own markers). */
+const LAST_EVENT_TYPE_TAG_VALUES = new Set([
+  'assistant',
+  'user',
+  'system',
+  'result',
+  'agent_result',
+  'stream_event',
+  'tool_progress',
+  'sdk_message',
+  'tool_call',
+  'status_change',
+  'step_transition',
+  'cyboflow_checkpoint',
+  'subagent_usage',
+  'codex_app_server_notification',
+]);
+
+function allowlisted(value: unknown, allowed: ReadonlySet<string>): string {
+  return typeof value === 'string' && allowed.has(value) ? value : 'other';
+}
+
+/** Bucket an idle duration so no exact timestamp leaves the machine. */
+export function idleBucket(idleMs: number): string {
+  const minutes = idleMs / 60_000;
+  if (!Number.isFinite(minutes) || minutes < 0) return 'unknown';
+  if (minutes < 60) return 'lt_1h';
+  if (minutes < 3 * 60) return '1h_3h';
+  if (minutes < 12 * 60) return '3h_12h';
+  if (minutes < 24 * 60) return '12h_24h';
+  return 'gt_24h';
+}
+
+interface ParkedRunContextRow {
+  executionModel: string | null;
+  substrate: string | null;
+  lastEventType: string | null;
+  lastEventEpoch: number | null;
+  createdEpoch: number | null;
+}
+
+/**
+ * Non-identifying tags describing the shape of a parked run, for the
+ * parked_no_gate seam error. Total: a missing column (an old fixture schema)
+ * or any read failure yields just `contextUnavailable`, never a throw, so
+ * telemetry can never stop the detector from stamping the run.
+ */
+export function parkedRunTelemetryTags(
+  db: DatabaseLike,
+  runId: string,
+  executorAlive: boolean,
+  nowMs: number,
+): Record<string, string> {
+  // executorAlive=yes here means the live-turn guard let the run through
+  // because its last turn had ended: the hung-spawn shape (a detached child
+  // holding the executor open). executorAlive=no means the executor let go of
+  // a run still marked running.
+  const tags: Record<string, string> = {
+    executorAlive: executorAlive ? 'yes' : 'no',
+  };
+  try {
+    const row = db
+      .prepare(
+        `SELECT wr.execution_model AS executionModel,
+                wr.substrate AS substrate,
+                (SELECT re.event_type FROM raw_events re
+                  WHERE re.run_id = wr.id ORDER BY re.id DESC LIMIT 1) AS lastEventType,
+                (SELECT MAX(unixepoch(re.created_at)) FROM raw_events re
+                  WHERE re.run_id = wr.id) AS lastEventEpoch,
+                unixepoch(wr.created_at) AS createdEpoch
+           FROM workflow_runs wr
+          WHERE wr.id = ?`,
+      )
+      .get(runId) as ParkedRunContextRow | undefined;
+    if (!row) {
+      tags.contextUnavailable = 'yes';
+      return tags;
+    }
+    tags.executionModel = allowlisted(row.executionModel, EXECUTION_MODEL_TAG_VALUES);
+    tags.substrate = allowlisted(row.substrate, SUBSTRATE_TAG_VALUES);
+    tags.hadEvents = row.lastEventEpoch === null ? 'no' : 'yes';
+    tags.lastEventType = row.lastEventType === null ? 'none' : allowlisted(row.lastEventType, LAST_EVENT_TYPE_TAG_VALUES);
+    const sinceEpoch = row.lastEventEpoch ?? row.createdEpoch;
+    tags.idleFor = sinceEpoch === null ? 'unknown' : idleBucket(nowMs - sinceEpoch * 1000);
+  } catch {
+    tags.contextUnavailable = 'yes';
+  }
+  return tags;
+}
+
+// ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
 // ---------------------------------------------------------------------------
 
@@ -300,10 +409,14 @@ export class StuckDetector {
         // so a live walk is always skipped — a programmatic walk wedged by a
         // hung spawn is not caught here. Killing the surviving child process
         // is out of scope (TASK-311).
-        if (this.claudeManager.hasActiveRunForId(row.id) && !isLatestRunTurnCompleted(this.db, row.id)) {
+        // Short-circuit kept: the turn-ended read only runs while the executor
+        // still holds the run, exactly as before. When it does not, the shape
+        // tags' lastEventType carries the same signal.
+        const executorAlive = this.claudeManager.hasActiveRunForId(row.id);
+        if (executorAlive && !isLatestRunTurnCompleted(this.db, row.id)) {
           continue;
         }
-        this.transitionRunningToStuck(row.id, { kind: 'parked_no_gate' });
+        this.transitionRunningToStuck(row.id, { kind: 'parked_no_gate' }, { executorAlive });
       }
     } catch (err) {
       this.logger.warn('[StuckDetector] scan failed', {
@@ -429,7 +542,11 @@ export class StuckDetector {
    * `status = 'running'` instead of `'awaiting_review'`. Only emits the
    * 'runs:stuck' event when `changes === 1`, same idempotency discipline.
    */
-  private transitionRunningToStuck(runId: string, reason: StuckReason): void {
+  private transitionRunningToStuck(
+    runId: string,
+    reason: StuckReason,
+    shape?: { executorAlive: boolean },
+  ): void {
     const detectedAt = Date.now();
 
     const { changes } = this.stmtTransitionRunningToStuck.run(reason.kind, detectedAt, runId) as {
@@ -443,7 +560,12 @@ export class StuckDetector {
         detectedAt,
       };
       this.emitter.emit('runs:stuck', event);
+      // Shape tags are non-identifying by construction; see parkedRunTelemetryTags.
+      const shapeTags = shape
+        ? parkedRunTelemetryTags(this.db, runId, shape.executorAlive, detectedAt)
+        : {};
       emitSeamError('run-stuck-detected', new Error(`Run wedged (stuck): ${reason.kind}`), {
+        ...shapeTags,
         stuckReason: reason.kind,
         errorClass: reason.kind,
       });
