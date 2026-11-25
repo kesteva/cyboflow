@@ -12,7 +12,8 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { StuckDetector, type ClaudeManagerLike } from '../stuckDetector';
+import { StuckDetector, idleBucket, type ClaudeManagerLike } from '../stuckDetector';
+import { setSeamErrorSink } from '../telemetrySink';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
@@ -29,12 +30,16 @@ const FRESH_AGO = new Date(Date.now() - 60 * 1000).toISOString();
 
 /**
  * The inbox fixture's migration set predates execution_model (032), which
- * isLatestRunTurnCompleted reads to exempt programmatic runs. Added locally,
+ * isLatestRunTurnCompleted reads to exempt programmatic runs, and substrate.
+ * Both added locally,
  * as runRecovery.test.ts does, rather than widening the shared fixture.
  */
 function buildReviewInboxDb(): Database.Database {
   const db = buildInboxFixtureDb();
   db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
+  // Likewise substrate (013), which the parked_no_gate seam report's shape
+  // tags read. Without it the context read degrades to contextUnavailable.
+  db.exec("ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk'");
   return db;
 }
 
@@ -323,5 +328,124 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
     await detector.scan();
 
     expect(events).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CYBOFLOW-APP-2P: the parked_no_gate seam report carries the parked run's
+// SHAPE (non-identifying, allowlisted, bucketed) so the cause can be traced.
+// ---------------------------------------------------------------------------
+
+describe('StuckDetector — parked_no_gate seam report context (CYBOFLOW-APP-2P)', () => {
+  afterEach(() => {
+    setSeamErrorSink(undefined as never);
+  });
+
+  const SHAPE_TAG_KEYS = [
+    'errorClass',
+    'executionModel',
+    'executorAlive',
+    'hadEvents',
+    'idleFor',
+    'lastEventType',
+    'stuckReason',
+    'substrate',
+  ];
+
+  function captureSeams(): Array<{ seam: string; message: string; tags?: Record<string, string> }> {
+    const calls: Array<{ seam: string; message: string; tags?: Record<string, string> }> = [];
+    setSeamErrorSink((seam, error, tags) =>
+      calls.push({ seam, message: error instanceof Error ? error.message : String(error), tags }),
+    );
+    return calls;
+  }
+
+  it('reports the hung-spawn shape with only allowlisted tags and keeps the grouping key', async () => {
+    const calls = captureSeams();
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-secret-id-123', 'running');
+    seedRawEvent(db, 'run-secret-id-123', STALE_AGO, 'result');
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(new Set(['run-secret-id-123'])),
+      emitter: new EventEmitter(),
+      logger: makeSpyLogger(),
+    });
+    await detector.scan();
+
+    const reports = calls.filter((c) => c.seam === 'run-stuck-detected');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].message).toBe('Run wedged (stuck): parked_no_gate');
+    expect(reports[0].tags).toEqual({
+      executorAlive: 'yes',
+      executionModel: 'orchestrated',
+      substrate: 'sdk',
+      hadEvents: 'yes',
+      lastEventType: 'result',
+      idleFor: 'lt_1h',
+      stuckReason: 'parked_no_gate',
+      errorClass: 'parked_no_gate',
+    });
+    // Nothing identifying leaks: no run id, workflow name or other key.
+    expect(Object.keys(reports[0].tags ?? {}).sort()).toEqual(SHAPE_TAG_KEYS);
+    const serialized = JSON.stringify(reports[0]);
+    expect(serialized).not.toContain('run-secret-id-123');
+    expect(serialized).not.toContain('sprint');
+  });
+
+  it('collapses an unknown event type to other and reports a dead executor', async () => {
+    const calls = captureSeams();
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-odd-event', 'running');
+    seedRawEvent(db, 'run-odd-event', STALE_AGO, 'user-typed text /Users/k/secret-repo');
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(),
+      emitter: new EventEmitter(),
+      logger: makeSpyLogger(),
+    });
+    await detector.scan();
+
+    const tags = calls.find((c) => c.seam === 'run-stuck-detected')?.tags;
+    expect(tags?.executorAlive).toBe('no');
+    expect(tags?.lastEventType).toBe('other');
+    expect(JSON.stringify(tags)).not.toContain('secret-repo');
+  });
+
+  it('still stamps the run when the context read fails, reporting contextUnavailable', async () => {
+    const calls = captureSeams();
+    // The bare inbox fixture has no execution_model or substrate column, so the context
+    // read throws; the executor is gone, so the turn-ended read never runs.
+    const db = buildInboxFixtureDb();
+    seedInboxRun(db, 'run-no-context', 'running');
+    seedRawEvent(db, 'run-no-context', STALE_AGO);
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(),
+      emitter: new EventEmitter(),
+      logger: makeSpyLogger(),
+    });
+    await detector.scan();
+
+    expect(runStatus(db, 'run-no-context')).toBe('stuck');
+    expect(calls.find((c) => c.seam === 'run-stuck-detected')?.tags).toEqual({
+      executorAlive: 'no',
+      contextUnavailable: 'yes',
+      stuckReason: 'parked_no_gate',
+      errorClass: 'parked_no_gate',
+    });
+  });
+
+  it('buckets idle time instead of sending it exactly', () => {
+    const min = 60_000;
+    expect(idleBucket(46 * min)).toBe('lt_1h');
+    expect(idleBucket(90 * min)).toBe('1h_3h');
+    expect(idleBucket(5 * 60 * min)).toBe('3h_12h');
+    expect(idleBucket(13 * 60 * min)).toBe('12h_24h');
+    expect(idleBucket(3 * 24 * 60 * min)).toBe('gt_24h');
+    expect(idleBucket(-1)).toBe('unknown');
   });
 });
