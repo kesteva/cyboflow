@@ -29,6 +29,8 @@ The name and email must be real and must match the commit author. By signing off
 
 To sign off a commit you already made, use `git commit --amend -s` (or `git rebase --signoff <base>` for a range). PRs whose commits are missing a sign-off will be asked to amend before merge.
 
+The one exemption is commits made by Claude's cloud sessions (for example automated Sentry fix PRs): the `dco` check skips a commit only when GitHub links it to the `claude` account, its author email is `noreply@anthropic.com`, and its signature is verified. Those PRs are reviewed by a maintainer before merge. Every other commit still needs a sign-off.
+
 ## Getting Started
 
 1. Fork the repository on GitHub
